@@ -6,6 +6,7 @@ use super::{
 };
 use rex_linux::{
     connection::{Command, Connection},
+    links::Link,
     terminal::{Cell, Frame},
 };
 use rune::{El, Mods, Span, TextStyle, el, memo, rich, text};
@@ -34,6 +35,10 @@ pub struct Term {
     pub mouse: Option<MouseGesture>,
     /// The last cell a motion report named, so moves within a cell send nothing.
     pub mouse_cell: Option<(u16, u16)>,
+    /// The link under the pointer while Ctrl is held, with the cell the pointer is on.
+    pub link: Option<(usize, Link)>,
+    /// The link a Ctrl+press went down on; releasing over the same link opens it.
+    pub pressed_link: Option<String>,
 }
 
 #[derive(Default)]
@@ -114,6 +119,8 @@ impl Term {
             scroll: 0.,
             mouse: None,
             mouse_cell: None,
+            link: None,
+            pressed_link: None,
         }
     }
 
@@ -128,6 +135,14 @@ impl Term {
         self.initial_size
             .observe(frame.as_ref().map(|frame| (frame.cols, frame.rows)));
         self.frame = frame;
+        // The same cell may hold a different link, or none, after output.
+        if let Some((index, _)) = self.link.take() {
+            self.link = self
+                .frame
+                .as_ref()
+                .and_then(|f| f.link_at(index))
+                .map(|l| (index, l));
+        }
     }
 
     pub fn status(&self) -> Status {
@@ -210,6 +225,12 @@ impl Term {
     /// The program has asked for mouse reports.
     pub fn tracking(&self) -> bool {
         self.frame.as_ref().is_some_and(|f| f.mouse_tracking)
+    }
+
+    /// The openable link under a point in the grid's own coordinates, with its cell index.
+    pub fn link_at(&self, x: f32, y: f32, cell: (f32, f32)) -> Option<(usize, Link)> {
+        let index = self.index(x, y, cell);
+        self.frame.as_ref()?.link_at(index).map(|l| (index, l))
     }
 
     /// The server's cell (column, row) under a point in the grid's own coordinates, clamped
@@ -545,6 +566,34 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         grid = grid.child(memo(id, h.finish(), || {
             row_el(cells, top, frame.bg, sel, m)
         }));
+    }
+    // The link Ctrl+click would open, underlined in its own colour, row by row.
+    if let Some((_, link)) = &term.link {
+        let color = frame
+            .cells
+            .get(link.start / cols)
+            .and_then(|row| row.get(link.start % cols))
+            .map_or(frame.fg, |c| RunStyle::of(c, frame.bg).fg);
+        for y in
+            (link.start / cols..=link.end / cols).filter(|y| (start..start + visible).contains(y))
+        {
+            let c0 = if y == link.start / cols {
+                link.start % cols
+            } else {
+                0
+            };
+            let c1 = if y == link.end / cols {
+                link.end % cols
+            } else {
+                cols - 1
+            };
+            grid = grid.child(
+                el().key(format!("{key}/link{y}"))
+                    .absolute(c0 as f32 * cw, (y - start) as f32 * ch + ch - 2.)
+                    .size((c1 + 1 - c0) as f32 * cw, 1.)
+                    .fill(rgb(color)),
+            );
+        }
     }
     if let Some((x, y)) = frame.cursor
         && let Some(cursor_look) = look.cursor
