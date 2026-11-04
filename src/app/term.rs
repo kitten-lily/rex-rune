@@ -150,6 +150,13 @@ impl Term {
             .clone();
         self.initial_size
             .observe(frame.as_ref().map(|frame| (frame.cols, frame.rows)));
+        // A selection is cell indices into a grid of one size; in another size (a resize,
+        // or the first frame at this client's size) they name other text.
+        let size = |f: &Option<Arc<Frame>>| f.as_ref().map(|f| (f.cols, f.rows));
+        if size(&self.frame).is_some() && size(&self.frame) != size(&frame) {
+            self.selection = None;
+            self.selection_anchor = None;
+        }
         self.frame = frame;
         // The same cell may hold a different link, or none, after output.
         if let Some((index, _)) = self.link.take() {
