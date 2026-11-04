@@ -23,6 +23,8 @@ pub struct Term {
     pub last_size: Option<(u16, u16)>,
     /// The grid's rect in window points (inside the padding).
     pub rect: [f32; 4],
+    /// The first live frame stays hidden until the server acknowledges this grid's size.
+    initial_size: InitialSize,
     pub selection: Option<(usize, usize)>,
     pub preedit: String,
     pub notice: Option<String>,
@@ -32,6 +34,33 @@ pub struct Term {
     pub mouse: Option<MouseGesture>,
     /// The last cell a motion report named, so moves within a cell send nothing.
     pub mouse_cell: Option<(u16, u16)>,
+}
+
+#[derive(Default)]
+struct InitialSize {
+    expected: Option<(u16, u16)>,
+    ready: bool,
+}
+
+impl InitialSize {
+    fn layout(&mut self, size: (u16, u16), frame: Option<(u16, u16)>) {
+        if self.ready {
+            return;
+        }
+        self.expected = Some(size);
+        self.observe(frame);
+    }
+
+    fn observe(&mut self, frame: Option<(u16, u16)>) {
+        if self.expected.is_some() && self.expected == frame {
+            self.expected = None;
+            self.ready = true;
+        }
+    }
+
+    fn renders(&self, live: bool) -> bool {
+        self.ready || !live
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -78,6 +107,7 @@ impl Term {
             frame,
             last_size: None,
             rect: [0.; 4],
+            initial_size: InitialSize::default(),
             selection: None,
             preedit: String::new(),
             notice: None,
@@ -88,13 +118,16 @@ impl Term {
     }
 
     pub fn refresh(&mut self) {
-        self.frame = self
+        let frame = self
             .connection
             .model
             .lock()
             .expect("terminal model")
             .frame
             .clone();
+        self.initial_size
+            .observe(frame.as_ref().map(|frame| (frame.cols, frame.rows)));
+        self.frame = frame;
     }
 
     pub fn status(&self) -> Status {
@@ -103,6 +136,14 @@ impl Term {
             live: m.connected && m.control_connected,
             owner: m.owner,
             status: m.status.clone(),
+        }
+    }
+
+    fn display_frame(&self) -> Option<&Arc<Frame>> {
+        if self.initial_size.renders(self.status().live) {
+            self.frame.as_ref()
+        } else {
+            None
         }
     }
 
@@ -140,6 +181,10 @@ impl Term {
         let status = self.status();
         let cols = (self.rect[2] / cell.0).floor().clamp(1., 65535.) as u16;
         let rows = (self.rect[3] / cell.1).floor().clamp(1., 65535.) as u16;
+        self.initial_size.layout(
+            (cols, rows),
+            self.frame.as_ref().map(|frame| (frame.cols, frame.rows)),
+        );
         if !status.owner || !status.live {
             self.last_size = None;
         } else if self.last_size != Some((cols, rows)) {
@@ -476,7 +521,7 @@ pub struct GridLook {
 
 /// The visible rows of `term`'s frame, each memoized by its content.
 pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
-    let Some(frame) = &term.frame else {
+    let Some(frame) = term.display_frame() else {
         return el().w_full().h_full();
     };
     let (cw, ch) = m.cell;
@@ -566,6 +611,29 @@ mod tests {
             .child(row_el(&s.cells, 0., 0, None, &m))
     }
 
+    #[test]
+    fn startup_waits_for_the_server_frame_at_the_layout_size_only_once() {
+        let mut size = InitialSize::default();
+        assert!(
+            !size.renders(true),
+            "a live stale frame is hidden before layout"
+        );
+        assert!(size.renders(false), "retained output stays visible offline");
+
+        size.layout((80, 24), Some((160, 50)));
+        assert!(
+            !size.renders(true),
+            "the stale startup geometry stays hidden"
+        );
+        size.observe(Some((80, 24)));
+        assert!(size.renders(true), "the acknowledged frame becomes visible");
+
+        size.layout((100, 30), Some((80, 24)));
+        assert!(
+            size.renders(true),
+            "later window resizes keep the previous frame visible"
+        );
+    }
     #[test]
     fn typing_styled_terminal_runs_never_creates_a_second_ui_line() {
         let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
