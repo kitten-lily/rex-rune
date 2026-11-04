@@ -47,11 +47,11 @@ Some probes and Python scripts in `scripts/` connect to the configured Rex serve
 ## Conventions
 
 - Match the surrounding style; run `cargo fmt` and keep clippy clean with `-D warnings`.
-- Terminal content, colours and split geometry are server-owned. Do not recolour output or invent layout.
+- Terminal content, colours, block order and split nesting are server-owned. Do not recolour output or invent blocks. Tiled tabs use the server's ratios; the scrolling view is the declared exception, with client-local widths for top-level horizontal columns and server ratios inside each column.
 - Ordinary attachment must never start, stop or reconfigure a Rex server, and must never create or destroy a session. Creation is always an explicit user action.
 - Failed input is never replayed automatically; a transport failure pauses affected panes.
 - Workspace shortcuts are reserved by the client; keep every other key flowing to the focused terminal, including key releases only when their press was sent.
-- Terminal content never animates; chrome motion uses the springs in `theme.rs`.
+- Terminal cells never animate. Cards may move as rigid surfaces on layout changes and automatic scrolling; direct wheel scrolling is immediate. Other chrome motion uses the springs in `theme.rs`.
 - UI changes should follow [DESIGN.md](DESIGN.md). Prefer verifying them in a rendered build (for example with Rune's `-- --snap out.png`) rather than by reading code.
 - Add tests for protocol and state-machine changes; headless UI tests in `src/app/tests.rs` cover focus and dialog behavior.
 - Keep the README's claims honest: don't document features that aren't implemented or checked.

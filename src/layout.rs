@@ -124,6 +124,13 @@ impl<'a> Strip<'a> {
     pub fn clamp(&self, offset: f64) -> f64 {
         offset.clamp(0., (self.extent - 1.).max(0.))
     }
+    /// The column span containing `block`, in strip units.
+    pub fn column_span(&self, block: &str) -> Option<[f64; 2]> {
+        self.columns
+            .iter()
+            .find(|c| contains(c.node, block))
+            .map(|c| [c.left, c.width])
+    }
 
     /// The offset nearest `offset` that shows all of `block`'s column, or its left edge when
     /// the column is wider than the window.
@@ -353,6 +360,7 @@ mod tests {
             "before":{"split":{"direction":"horizontal","ratio":0.5,"before":{"block_id":"a"},"after":{"block_id":"b"}}},
             "after":{"split":{"direction":"vertical","ratio":0.5,"before":{"block_id":"c"},"after":{"block_id":"d"}}}}}}]})).unwrap();
         let strip = Strip::new(&window, 0.5);
+        assert_eq!(strip.column_span("d"), Some([1., 0.5]));
         assert_eq!(strip.reveal(0., "d"), 0.5, "the right edge comes into view");
         assert_eq!(strip.reveal(0.5, "b"), 0.5, "already in view");
         assert_eq!(strip.reveal(0.5, "a"), 0., "the left edge comes into view");
