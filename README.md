@@ -36,6 +36,19 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 ## Build
 
+The repository's [`mise.toml`](mise.toml) pins Rust 1.96.1 (with Clippy and
+rustfmt) and Zig 0.17.1:
+
+```sh
+mise trust
+mise install
+mise run build
+```
+
+Mise manages the language toolchain, not the native Linux libraries listed in
+[Requirements](#requirements). With compatible Rust and Zig already on
+`PATH`, the equivalent build command is:
+
 ```sh
 cargo build --locked --release --bin rex-linux
 ```
@@ -72,13 +85,35 @@ Options:
 
 Without `--session`, the workspace restores the saved host and session; on a new host it selects the first listed session. Rune's own developer flags go after `--` (for example `-- --snap out.png`). `REX_FRAME_STATS=1` prints per-frame CPU percentiles.
 
-### Desktop install
+### User install
 
 ```sh
-bash scripts/install-desktop.sh [path/to/rex-linux]
+# Build a release binary and install it for the current user.
+mise run install
+
+# Remove the installed binary, desktop entry and icons.
+mise run uninstall
 ```
 
-This installs `dev.shuv.rex-linux.desktop` under `$XDG_DATA_HOME/applications` (normally `~/.local/share/applications`) pointing at the release binary of this checkout (or the binary you pass), and the app icon at 32, 128 and 256 px into the user's `hicolor` theme. Re-run it if you move the checkout. It needs `desktop-file-install`, `desktop-file-validate` and `update-desktop-database`. See [icon provenance](resources/icons/README.md).
+To choose the installed desktop launcher's terminal font without committing a
+machine-specific preference, add it to `mise.local.toml`:
+
+```toml
+[env]
+REX_INSTALL_FONT = "Iosevka Term"
+```
+
+The variable is optional. When set, `mise run install` adds the corresponding
+`--font` argument to the desktop entry; when unset, the application uses its
+default family.
+
+The install task copies `rex-linux` to `$XDG_BIN_HOME` (normally
+`~/.local/bin`), installs `dev.shuv.rex-linux.desktop` under
+`$XDG_DATA_HOME/applications` (normally `~/.local/share/applications`), and
+adds the 32, 128 and 256 px icons to the user's `hicolor` theme. It does not
+need root access or depend on the checkout remaining at the same path. The
+desktop step needs `desktop-file-install`, `desktop-file-validate` and
+`update-desktop-database`. See [icon provenance](resources/icons/README.md).
 
 ## Configuration
 
@@ -113,6 +148,21 @@ These chords are reserved by the client and do not reach terminal programs; ever
 Other interactions: click the session/host identity for grouped navigation, or right-click it for the current session's actions; in the switcher, rename a session in place (right-click its row, F2 or the pencil; Enter saves, Esc cancels) or close it with its ×; right-click a pane for actions targeting that pane; drag dividers to resize splits and the sidebar's edge to resize it (double-click resets); double-click a tab to rename it. Closing a pane or tab asks for confirmation, with **Keep running** as the default. The active window takes size ownership of a terminal automatically. On the borderless window, the toolbar's empty space moves it (double-click maximizes; right-click requests the window manager's menu on Wayland).
 
 ## Development
+
+The mise tasks use the pinned toolchain and the repository's required Cargo
+flags:
+
+```sh
+mise run test
+mise run fmt
+mise run clippy
+mise run test-rexrs
+
+# Run every check above.
+mise run check
+```
+
+The underlying commands remain available directly:
 
 ```sh
 cargo test --locked --all-features

@@ -12,7 +12,7 @@ chip, empty states and the desktop launcher. If you redistribute or package Rex 
 doing so is acceptable to the icon's owner, or replace these files.
 
 The app embeds the 256px PNG once and reuses it for its identity and empty-state marks.
-`scripts/install-desktop.sh` copies the native-size files into the user's `hicolor` icon theme
+`scripts/install-user.sh` copies the native-size files into the user's `hicolor` icon theme
 under the application ID `dev.shuv.rex-linux`.
 
 Source ICNS SHA-256: `d28fc64c3e6f6919d0c69e99056b7234b549ad6d88bd457404d9402833e0e1ed`.
