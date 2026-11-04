@@ -6,7 +6,7 @@ use super::{
     widgets::{Pill, glyph, pill},
     workspace::Workspace,
 };
-use rex_linux::settings::{NoticePosition, NotificationsConfig, TabLayout};
+use rex_linux::settings::{FocusCentering, NoticePosition, NotificationsConfig, TabLayout};
 use rune::{Cursor, El, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::{IconButton, Keybind, SegmentedControl, Switch};
 
@@ -148,6 +148,11 @@ fn interface(s: &Workspace) -> El {
         TabLayout::Tiled => 0,
         TabLayout::Scrolling => 1,
     };
+    let centering = match s.settings.focus_centering {
+        FocusCentering::Never => 0,
+        FocusCentering::OnOverflow => 1,
+        FocusCentering::Always => 2,
+    };
     col()
         .gap(4.)
         .child(setting(
@@ -192,6 +197,22 @@ fn interface(s: &Workspace) -> El {
                 })
                 .build(k)
                 .key("tab-layout"),
+        ))
+        .child(divider())
+        .child(setting(
+            "Focus centering",
+            "When moving focus in a scrolling tab. On overflow centers when both columns cannot fit together.",
+            SegmentedControl::new(&["Never", "On overflow", "Always"], Some(centering))
+                .fit()
+                .on_pick(|s: &mut Workspace, i, _| {
+                    s.set_focus_centering(match i {
+                        1 => FocusCentering::OnOverflow,
+                        2 => FocusCentering::Always,
+                        _ => FocusCentering::Never,
+                    })
+                })
+                .build(k)
+                .key("focus-centering"),
         ))
         .child(divider())
         .child(setting(

@@ -147,6 +147,21 @@ impl<'a> Strip<'a> {
     pub fn clamp(&self, offset: f64) -> f64 {
         offset.clamp(0., (self.extent - 1.).max(0.))
     }
+
+    pub fn column_ids(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.columns.iter().map(|column| column.id)
+    }
+
+    /// Align the viewport's left edge with the nearest column edge, including the strip end.
+    pub fn snap(&self, offset: f64) -> f64 {
+        let offset = self.clamp(offset);
+        self.columns
+            .iter()
+            .map(|column| self.clamp(column.left))
+            .chain(std::iter::once(self.clamp(self.extent)))
+            .min_by(|a, b| (a - offset).abs().total_cmp(&(b - offset).abs()))
+            .unwrap_or(offset)
+    }
     /// The ID and span of the column containing `block`, in strip units.
     pub fn column(&self, block: &str) -> Option<(&'a str, [f64; 2])> {
         self.columns
@@ -458,6 +473,12 @@ mod tests {
         assert_eq!(strip.column_width("d"), Some(0.4));
         assert!((strip.center("b").unwrap() - 0.1).abs() < EPSILON);
         assert!((strip.center("d").unwrap() - 0.3).abs() < EPSILON);
+        assert_eq!(
+            strip.column_ids().collect::<Vec<_>>(),
+            ["a", "column:bc", "d"]
+        );
+        assert!((strip.snap(0.14) - 0.).abs() < EPSILON);
+        assert!((strip.snap(0.16) - 0.3).abs() < EPSILON);
         let edges = strip.column_edges(0.2);
         assert_eq!(
             edges
