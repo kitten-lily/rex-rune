@@ -1393,6 +1393,22 @@ fn agent_commands_never_autostart_and_always_name_the_naming_choice() {
             "--json"
         ])
     );
+    let omp = AgentChange::Setup {
+        agents: vec!["omp".into(), "pi".into()],
+        force: false,
+    };
+    assert_eq!(
+        omp.args(false, true),
+        strings(&[
+            "--autostart=false",
+            "skill",
+            "setup",
+            "--agent=pi",
+            "--session-naming=false",
+            "--dry-run",
+            "--json"
+        ])
+    );
 }
 
 fn integrations_open(status: Result<String, String>) -> Runtime<Workspace> {
@@ -1435,7 +1451,11 @@ fn integrations_list_agents_and_preview_changes_before_making_them() {
     let mut rt = integrations_open(Ok(SKILL_STATUS.into()));
     let codex = element_text(&rt, "agent:codex").join(" | ");
     assert!(codex.contains("Not installed"), "{codex}");
-    assert!(codex.contains("with OpenCode and Pi"), "{codex}");
+    assert!(codex.contains("with OpenCode and Pi and OMP"), "{codex}");
+    let omp = element_text(&rt, "agent:omp").join(" | ");
+    assert!(omp.contains("OMP"), "{omp}");
+    assert!(omp.contains("Not installed"), "{omp}");
+    assert!(omp.contains("with Codex and OpenCode and Pi"), "{omp}");
     assert!(
         element_text(&rt, "agent:claude")
             .join(" ")
@@ -1464,7 +1484,7 @@ fn integrations_list_agents_and_preview_changes_before_making_them() {
         .join("\n");
     // The shared skill names every agent it affects, not only the one asked for.
     assert!(
-        lines.contains("Create skill /home/user/.agents/skills/rex · Codex, OpenCode, Pi"),
+        lines.contains("Create skill /home/user/.agents/skills/rex · Codex, OpenCode, Pi, OMP"),
         "{lines}"
     );
     assert!(

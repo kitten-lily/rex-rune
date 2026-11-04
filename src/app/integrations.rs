@@ -13,12 +13,16 @@ use rune::{El, Tx, col, row, text};
 use rune_kit::Switch;
 use serde::Deserialize;
 
-/// The agents `rex skill` knows, in the order Settings lists them.
-pub const AGENTS: [(&str, &str); 4] = [
+/// The agents Settings knows, in the order it lists them.
+///
+/// OMP reads the same Agent Skills directory as Pi. Rex does not yet accept an `omp`
+/// harness name, so changes for OMP use Rex's Pi target to manage that shared file.
+pub const AGENTS: [(&str, &str); 5] = [
     ("claude", "Claude Code"),
     ("codex", "Codex"),
     ("opencode", "OpenCode"),
     ("pi", "Pi"),
+    ("omp", "OMP"),
 ];
 
 fn agent_name(id: &str) -> &str {
@@ -146,8 +150,17 @@ impl AgentChange {
                 agents
             }
         };
-        for agent in agents {
-            args.push(format!("--agent={agent}"));
+        let mut selected = Vec::new();
+        for requested in agents {
+            let agent = if requested == "omp" {
+                "pi"
+            } else {
+                requested.as_str()
+            };
+            if !selected.contains(&agent) {
+                selected.push(agent);
+                args.push(format!("--agent={agent}"));
+            }
         }
         if let AgentChange::Setup { force, .. } = self {
             args.push(format!("--session-naming={naming}"));
@@ -178,6 +191,50 @@ pub fn status_args() -> Vec<String> {
     ["--autostart=false", "skill", "status", "--json"]
         .map(String::from)
         .to_vec()
+}
+
+fn executable_on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(name))
+            .any(|path| path.is_file())
+    })
+}
+
+fn omp_detected() -> bool {
+    let configured = std::env::var_os("PI_CODING_AGENT_DIR")
+        .map(std::path::PathBuf::from)
+        .is_some_and(|path| path.is_dir());
+    let default = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|home| home.join(".omp/agent"))
+        .is_some_and(|path| path.is_dir());
+    configured || default || executable_on_path("omp")
+}
+
+/// OMP discovers the Agent Skills path that Rex already manages for Pi. Mirror that
+/// file's state so OMP gets a first-class row without duplicating Rex's ownership logic.
+fn add_omp_harness(harnesses: &mut Vec<Harness>) {
+    if harnesses.iter().any(|harness| harness.id == "omp") {
+        return;
+    }
+    let items = harnesses
+        .iter()
+        .find(|harness| harness.id == "pi")
+        .and_then(|harness| {
+            harness
+                .items
+                .iter()
+                .find(|item| item.kind == "skill")
+                .cloned()
+        })
+        .into_iter()
+        .collect();
+    harnesses.push(Harness {
+        id: "omp".into(),
+        detected: omp_detected(),
+        items,
+    });
 }
 
 #[derive(Default)]
@@ -276,7 +333,10 @@ impl Workspace {
             serde_json::from_str::<StatusReply>(&out)
                 .map_err(|e| format!("Couldn't read rex skill status: {e}"))
         }) {
-            Ok(reply) => AgentStatus::Ready(reply.harnesses),
+            Ok(mut reply) => {
+                add_omp_harness(&mut reply.harnesses);
+                AgentStatus::Ready(reply.harnesses)
+            }
             Err(words) => AgentStatus::Unavailable(words),
         };
     }
@@ -520,20 +580,22 @@ pub fn section(s: &Workspace) -> El {
                 }
                 body = body.child(agent_row(s, harness));
             }
-            let pending = harnesses
+            let pending: Vec<String> = harnesses
                 .iter()
-                .any(|h| h.detected && h.installed() != Installed::Yes);
+                .filter(|h| h.detected && h.installed() != Installed::Yes)
+                .map(|h| h.id.clone())
+                .collect();
             let mut all = row().gap(8.).mt(10.).child(refresh);
-            if pending {
+            if !pending.is_empty() {
                 all = all.child(wait(
                     pill(
                         "agents-setup-all",
                         "Set up all detected…",
                         Pill::Primary,
                         28.,
-                        |s, _| {
+                        move |s, _| {
                             s.preview_agents(AgentChange::Setup {
-                                agents: Vec::new(),
+                                agents: pending.clone(),
                                 force: false,
                             })
                         },
