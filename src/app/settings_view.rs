@@ -6,7 +6,7 @@ use super::{
     widgets::{Pill, glyph, pill},
     workspace::Workspace,
 };
-use rex_linux::settings::{NoticePosition, NotificationsConfig};
+use rex_linux::settings::{NoticePosition, NotificationsConfig, TabLayout};
 use rune::{Cursor, El, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::{IconButton, Keybind, SegmentedControl, Switch};
 
@@ -142,6 +142,10 @@ fn interface(s: &Workspace) -> El {
         NoticePosition::TopRight => 0,
         NoticePosition::BottomRight => 1,
     };
+    let layout = match s.settings.tab_layout {
+        TabLayout::Tiled => 0,
+        TabLayout::Scrolling => 1,
+    };
     col()
         .gap(4.)
         .child(setting(
@@ -170,6 +174,22 @@ fn interface(s: &Workspace) -> El {
                 .on_toggle_tx(|s: &mut Workspace, tx: &mut Tx| s.perform(Intent::Sidebar, tx))
                 .build(k)
                 .key("sidebar-switch"),
+        ))
+        .child(divider())
+        .child(setting(
+            "Tab layout",
+            "Panes tiled to the window, or half-width columns that scroll sideways. A tab's menu can change it.",
+            SegmentedControl::new(&["Tiled", "Scrolling"], Some(layout))
+                .fit()
+                .on_pick(|s: &mut Workspace, i, _| {
+                    s.set_tab_layout(if i == 0 {
+                        TabLayout::Tiled
+                    } else {
+                        TabLayout::Scrolling
+                    })
+                })
+                .build(k)
+                .key("tab-layout"),
         ))
         .child(divider())
         .child(setting(

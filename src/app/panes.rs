@@ -1,6 +1,7 @@
 //! The pane area: server-placed terminals as floating cards in 8pt gutters, each with a header
 //! (status, label, size, exception pill), drag handles in the gutters, and empty states. A tab
-//! with a single pane draws it edge to edge instead.
+//! with a single pane draws it edge to edge instead. A scrolling tab's columns slide sideways
+//! under the wheel and to bring the focused pane into view.
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
     panel::{Form, Intent, PanelKind},
@@ -9,7 +10,11 @@ use super::{
     widgets::{Pill, pill},
     workspace::{DividerDrag, Workspace},
 };
-use rex_linux::{connection::Command, layout};
+use rex_linux::settings::TabLayout;
+use rex_linux::{
+    connection::Command,
+    layout::{self, Placement},
+};
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, el, row, text};
 use rune_kit::TextInput;
@@ -27,12 +32,11 @@ fn inner(s: &Workspace) -> [f32; 4] {
 
 /// A placement's card rect: its share of the inner area, inset by half a gutter wherever it
 /// meets another card.
-pub fn card_rect(s: &Workspace, rect: [f64; 4]) -> [f32; 4] {
+pub fn card_rect(s: &Workspace, placement: &Placement) -> [f32; 4] {
     let [ix, iy, iw, ih] = inner(s);
-    let [x, y, w, h] = rect;
+    let [x, y, w, h] = placement.rect;
     let half = GUTTER / 2.;
-    let (l, t) = (x > 1e-6, y > 1e-6);
-    let (r, b) = (x + w < 1. - 1e-6, y + h < 1. - 1e-6);
+    let [l, t, r, b] = placement.inner;
     let mut c = [
         ix + x as f32 * iw,
         iy + y as f32 * ih,
@@ -395,6 +399,10 @@ fn card(
                     s.pane_menu(menu_block.clone(), Some((w.x, w.y)));
                 })
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
+                    // Sideways scrolling is the pane area's, for a scrolling tab's strip.
+                    if e.dx.abs() > e.dy.abs() {
+                        return false;
+                    }
                     let scale = if e.precise { s.ui_scale() } else { 1. };
                     let cell = term::metrics(s.settings.font_size).cell;
                     let Some(t) = s.terminals.get_mut(&k3) else {
@@ -595,14 +603,33 @@ pub fn area(s: &Workspace, px: f32) -> El {
     let focused = s.focused_block();
     let target = target_block(s);
     let preview = s.drag.as_ref().map(|d| (d.divider.key(), d.ratio));
-    let (panes, dividers) =
-        layout::placements(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
+    let (panes, dividers) = s.arrange(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
     let bleed = full_bleed(current);
+    let scrolls = current
+        .window_id
+        .as_deref()
+        .is_some_and(|id| s.tab_layout(id) == TabLayout::Scrolling);
+    if scrolls {
+        // Columns off either side are cut at the area's edges. Over a pane only sideways
+        // scrolling arrives here; over gutters and headers the plain wheel pans as well.
+        area = area
+            .clip_rounded(0.)
+            .on_wheel(|s: &mut Workspace, e: WheelEvent, tx: &mut Tx| {
+                let delta = if e.dx.abs() >= e.dy.abs() { e.dx } else { e.dy };
+                let scale = if e.precise { s.ui_scale() } else { 1. };
+                let width = inner(s)[2] * scale;
+                if width <= 0. || !s.scroll_strip(-f64::from(delta / width)) {
+                    return false;
+                }
+                tx.instant();
+                true
+            });
+    }
     for placement in panes {
         let rect = if bleed {
             [0., 0., s.area[2], s.area[3]]
         } else {
-            card_rect(s, placement.rect)
+            card_rect(s, &placement)
         };
         let is_focus = focused.as_deref() == Some(placement.block.as_str());
         let state = if target.as_deref() == Some(placement.block.as_str()) {

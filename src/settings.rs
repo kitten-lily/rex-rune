@@ -26,6 +26,15 @@ pub enum NoticePosition {
     BottomRight,
 }
 
+/// How a tab arranges its panes: tiled to the window, or as columns that scroll sideways.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TabLayout {
+    #[default]
+    Tiled,
+    Scrolling,
+}
+
 /// What program activity shows in tabs and which changes become desktop notifications.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -72,6 +81,11 @@ pub struct Settings {
     /// The Ghostty theme terminals are drawn in, by name; none is the chrome's built-in theme.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_theme: Option<String>,
+    /// The layout of tabs without their own choice.
+    pub tab_layout: TabLayout,
+    /// Tabs given their own layout, by host endpoint, session ID and Rex window ID.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub tab_layouts: HashMap<String, HashMap<String, HashMap<String, TabLayout>>>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -95,6 +109,8 @@ impl Default for Settings {
             notifications: NotificationsConfig::default(),
             agent_session_naming: false,
             terminal_theme: None,
+            tab_layout: TabLayout::default(),
+            tab_layouts: HashMap::new(),
         }
     }
 }
@@ -177,14 +193,28 @@ mod tests {
         .unwrap();
         assert_eq!(old.notice_position, NoticePosition::TopRight);
         assert_eq!(old.notifications, NotificationsConfig::default());
+        assert_eq!(old.tab_layout, TabLayout::Tiled);
+        assert!(old.tab_layouts.is_empty());
         let partial: Settings =
             serde_json::from_str(r#"{"notifications":{"done":false}}"#).unwrap();
         assert!(!partial.notifications.done && partial.notifications.blocked);
         let mut s = old;
         s.notice_position = NoticePosition::BottomRight;
+        s.tab_layout = TabLayout::Scrolling;
+        s.tab_layouts
+            .entry("unix:///run/rex.sock".into())
+            .or_default()
+            .entry("session:a".into())
+            .or_default()
+            .insert("window:a".into(), TabLayout::Tiled);
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["notice_position"], "bottom_right");
+        assert_eq!(json["tab_layout"], "scrolling");
         let back: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(back.notice_position, NoticePosition::BottomRight);
+        assert_eq!(
+            back.tab_layouts["unix:///run/rex.sock"]["session:a"]["window:a"],
+            TabLayout::Tiled
+        );
     }
 }

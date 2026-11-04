@@ -10,10 +10,11 @@ use super::{
 };
 use rex_linux::{
     connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
-    layout::{Divider, shell_layout},
-    settings::{Host, NoticePosition, Settings, validate_host},
+    layout::{COLUMN_WIDTH, Divider, Placement, Strip, shell_layout},
+    settings::{Host, NoticePosition, Settings, TabLayout, validate_host},
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo},
 };
+use rexrs::api::session::Window;
 use rune::{AppHandle, PhysicalKeyCode, TextEdit, Tx};
 use serde_json::{Value, json};
 use std::{
@@ -103,6 +104,15 @@ pub struct Workspace {
     pub theme_dirs: ThemeDirs,
     /// The Ghostty themes the theme picker lists, read when it opens.
     pub themes: Vec<ThemeInfo>,
+    /// Each scrolling tab's place along its strip, by host and Rex window ID.
+    pub strips: HashMap<HostId, HashMap<String, StripView>>,
+}
+
+/// A scrolling tab's place along its strip, and the pane it last brought into view.
+#[derive(Default)]
+pub struct StripView {
+    offset: f64,
+    revealed: Option<String>,
 }
 
 #[derive(Default)]
@@ -213,6 +223,7 @@ impl Workspace {
             term_theme,
             theme_dirs,
             themes: Vec::new(),
+            strips: HashMap::new(),
         };
         if let Some(error) = theme_error {
             this.notify(format!("{error:#}; using {}", CHROME.name));
@@ -276,6 +287,7 @@ impl Workspace {
         self.unseen_done.retain(|(host, _)| *host != id);
         self.unseen_bells.retain(|(host, _)| *host != id);
         self.activity_epochs.remove(&id);
+        self.strips.remove(&id);
     }
 
     /// Stop connecting to saved host `index` and drop it from the workspace. Its server, its
@@ -415,6 +427,9 @@ impl Workspace {
         if changed_session && self.hosts[index].model.selected.is_some() {
             self.save();
         }
+        if index == self.active {
+            self.reveal_focus();
+        }
         self.claim_visible();
         let font = self.settings.font_size;
         for ((host, _), term) in self.terminals.iter_mut() {
@@ -468,6 +483,148 @@ impl Workspace {
         if let Some(term) = self.terminals.get_mut(key) {
             term.refresh(self.images.as_ref());
             term.resize_if_owner(font);
+        }
+    }
+
+    /// The layout of `window` in the active host and session: its own choice, else the default.
+    pub fn tab_layout(&self, window: &str) -> TabLayout {
+        let endpoint = &self.settings.hosts[self.active].endpoint;
+        self.model()
+            .selected
+            .as_deref()
+            .and_then(|session| {
+                self.settings
+                    .tab_layouts
+                    .get(endpoint)?
+                    .get(session)?
+                    .get(window)
+            })
+            .copied()
+            .unwrap_or(self.settings.tab_layout)
+    }
+
+    /// `window`'s panes and dividers on the active host in window units, seen from its place
+    /// along its strip when it scrolls.
+    pub fn arrange(
+        &self,
+        window: &Window,
+        drag: Option<(&str, f64)>,
+    ) -> (Vec<Placement>, Vec<Divider>) {
+        let Some(id) = window
+            .window_id
+            .as_deref()
+            .filter(|id| self.tab_layout(id) == TabLayout::Scrolling)
+        else {
+            return rex_linux::layout::placements(window, drag);
+        };
+        let offset = self
+            .strips
+            .get(&self.hosts[self.active].id)
+            .and_then(|views| views.get(id))
+            .map_or(0., |v| v.offset);
+        Strip::new(window, COLUMN_WIDTH).placements(offset, drag)
+    }
+
+    /// Scroll the active tab along its strip by `delta` window widths. False when the tab
+    /// doesn't scroll or its strip fits the window.
+    pub fn scroll_strip(&mut self, delta: f64) -> bool {
+        let host = &self.hosts[self.active];
+        let Some(window) = host.model.window() else {
+            return false;
+        };
+        let Some(id) = window.window_id.as_ref() else {
+            return false;
+        };
+        let strip = Strip::new(window, COLUMN_WIDTH);
+        if self.tab_layout(id) == TabLayout::Tiled || strip.extent <= 1. {
+            return false;
+        }
+        let view = self
+            .strips
+            .entry(host.id)
+            .or_default()
+            .entry(id.clone())
+            .or_default();
+        view.offset = strip.clamp(strip.clamp(view.offset) + delta);
+        true
+    }
+
+    /// Bring the active tab's focused pane into view if focus moved since it last was.
+    fn reveal_focus(&mut self) {
+        let host = &self.hosts[self.active];
+        let (Some(window), Some(block)) = (host.model.window(), host.model.focused()) else {
+            return;
+        };
+        let Some(id) = window.window_id.as_ref() else {
+            return;
+        };
+        if self.tab_layout(id) == TabLayout::Tiled {
+            return;
+        }
+        let view = self
+            .strips
+            .entry(host.id)
+            .or_default()
+            .entry(id.clone())
+            .or_default();
+        if view.revealed.as_deref() != Some(block) {
+            view.offset = Strip::new(window, COLUMN_WIDTH).reveal(view.offset, block);
+            view.revealed = Some(block.to_owned());
+        }
+    }
+
+    /// Switch a tab on the active host between tiled and scrolling, for that tab only.
+    pub fn toggle_tab_layout(&mut self, window: String) {
+        let next = match self.tab_layout(&window) {
+            TabLayout::Scrolling => TabLayout::Tiled,
+            TabLayout::Tiled => TabLayout::Scrolling,
+        };
+        let endpoint = self.settings.hosts[self.active].endpoint.clone();
+        let Some(session) = self.model().selected.clone() else {
+            return;
+        };
+        if next == self.settings.tab_layout {
+            if let Some(sessions) = self.settings.tab_layouts.get_mut(&endpoint) {
+                if let Some(windows) = sessions.get_mut(&session) {
+                    windows.remove(&window);
+                }
+                sessions.retain(|_, windows| !windows.is_empty());
+            }
+            self.settings
+                .tab_layouts
+                .retain(|_, sessions| !sessions.is_empty());
+        } else {
+            self.settings
+                .tab_layouts
+                .entry(endpoint)
+                .or_default()
+                .entry(session)
+                .or_default()
+                .insert(window.clone(), next);
+        }
+        // A tab that scrolls again starts at its focused pane.
+        if let Some(views) = self.strips.get_mut(&self.hosts[self.active].id) {
+            views.remove(&window);
+        }
+        self.reveal_focus();
+        self.save();
+    }
+
+    /// The layout of tabs without their own choice.
+    pub fn set_tab_layout(&mut self, layout: TabLayout) {
+        if self.settings.tab_layout != layout {
+            self.settings.tab_layout = layout;
+            for sessions in self.settings.tab_layouts.values_mut() {
+                for windows in sessions.values_mut() {
+                    windows.retain(|_, tab| *tab != layout);
+                }
+                sessions.retain(|_, windows| !windows.is_empty());
+            }
+            self.settings
+                .tab_layouts
+                .retain(|_, sessions| !sessions.is_empty());
+            self.reveal_focus();
+            self.save();
         }
     }
 
@@ -839,6 +996,7 @@ impl Workspace {
                 json!({"window_id":id}),
                 "Ends every program in this tab on the server. Closing the app itself leaves programs running.",
             ),
+            Intent::TabLayout(id) => self.toggle_tab_layout(id),
             Intent::Zoom => {
                 if let Some(block) = self.focused_block() {
                     self.request("session.zoom_block", json!({"block_id":block}));
