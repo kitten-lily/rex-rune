@@ -315,7 +315,8 @@ impl Term {
             SelectionMode::Line => frame.line_range(index),
         };
         self.selection_anchor = Some(range);
-        self.selection = Some(range);
+        // A click selects nothing: a cell selection starts once the drag leaves the cell.
+        self.selection = (!matches!(self.selection_mode, SelectionMode::Cell)).then_some(range);
     }
 
     pub fn extend_selection(&mut self, index: usize) {
@@ -327,6 +328,10 @@ impl Term {
             SelectionMode::Word => frame.word_range(index),
             SelectionMode::Line => frame.line_range(index),
         };
+        if matches!(self.selection_mode, SelectionMode::Cell) && target == anchor {
+            self.selection = None;
+            return;
+        }
         self.selection = Some(if target.1 < anchor.0 {
             (anchor.1, target.0)
         } else {
