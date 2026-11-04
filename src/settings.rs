@@ -37,6 +37,9 @@ pub enum TabLayout {
     Scrolling,
 }
 
+/// Client-local column widths, keyed by host endpoint, session, window and column.
+pub type ColumnWidths = HashMap<String, HashMap<String, HashMap<String, HashMap<String, f64>>>>;
+
 /// What program activity shows in tabs and which changes become desktop notifications.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -90,6 +93,9 @@ pub struct Settings {
     /// Tabs given their own layout, by host endpoint, session ID and Rex window ID.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tab_layouts: HashMap<String, HashMap<String, HashMap<String, TabLayout>>>,
+    /// Widths changed from the half-window default, by host, session, window and column ID.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub column_widths: ColumnWidths,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -117,6 +123,7 @@ impl Default for Settings {
             terminal_theme: None,
             tab_layout: TabLayout::default(),
             tab_layouts: HashMap::new(),
+            column_widths: HashMap::new(),
         }
     }
 }
@@ -154,6 +161,18 @@ impl Settings {
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
+        for sessions in settings.column_widths.values_mut() {
+            for windows in sessions.values_mut() {
+                for columns in windows.values_mut() {
+                    for width in columns.values_mut() {
+                        *width = width.clamp(
+                            crate::layout::MIN_COLUMN_WIDTH,
+                            crate::layout::MAX_COLUMN_WIDTH,
+                        );
+                    }
+                }
+            }
+        }
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -232,6 +251,7 @@ mod tests {
         assert!(old.tab_layouts.is_empty());
         assert_eq!(old.font_family, DEFAULT_FONT_FAMILY);
         assert!(old.font_fallbacks.is_empty());
+        assert!(old.column_widths.is_empty());
         let partial: Settings =
             serde_json::from_str(r#"{"notifications":{"done":false}}"#).unwrap();
         assert!(!partial.notifications.done && partial.notifications.blocked);
@@ -244,6 +264,14 @@ mod tests {
             .entry("session:a".into())
             .or_default()
             .insert("window:a".into(), TabLayout::Tiled);
+        s.column_widths
+            .entry("unix:///run/rex.sock".into())
+            .or_default()
+            .entry("session:a".into())
+            .or_default()
+            .entry("window:a".into())
+            .or_default()
+            .insert("split:a".into(), 2. / 3.);
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["notice_position"], "bottom_right");
         assert_eq!(json["tab_layout"], "scrolling");
@@ -253,6 +281,31 @@ mod tests {
             back.tab_layouts["unix:///run/rex.sock"]["session:a"]["window:a"],
             TabLayout::Tiled
         );
+        assert_eq!(
+            back.column_widths["unix:///run/rex.sock"]["session:a"]["window:a"]["split:a"],
+            2. / 3.
+        );
+    }
+
+    #[test]
+    fn loaded_column_widths_are_held_to_supported_bounds() {
+        let path = std::env::temp_dir().join(format!(
+            "rex-linux-settings-columns-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{
+                "hosts":[{"label":"a","endpoint":"unix:///run/rex.sock"}],
+                "column_widths":{"unix:///run/rex.sock":{"s":{"w":{"narrow":0.01,"wide":4.0}}}}
+            }"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&path).unwrap();
+        let widths = &settings.column_widths["unix:///run/rex.sock"]["s"]["w"];
+        assert_eq!(widths["narrow"], crate::layout::MIN_COLUMN_WIDTH);
+        assert_eq!(widths["wide"], crate::layout::MAX_COLUMN_WIDTH);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

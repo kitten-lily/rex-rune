@@ -26,6 +26,9 @@ pub enum Intent {
     CloseWindow(String),
     /// Switch the tab with this Rex window ID between tiled and scrolling.
     TabLayout(String),
+    CycleColumnWidth,
+    MaximizeColumn,
+    CenterColumn,
     Zoom,
     Sidebar,
     Settings,
@@ -86,6 +89,7 @@ pub struct PaneTarget {
     pub host: usize,
     pub session: String,
     pub block: String,
+    pub window: String,
     pub label: String,
     pub tab: String,
 }
@@ -366,6 +370,31 @@ impl Workspace {
         Entry::new(label, "", group, Intent::TabLayout(window.to_owned()))
     }
 
+    fn column_entries(&self, group: &str) -> Vec<Entry> {
+        let Some(width) = self.active_column_width() else {
+            return Vec::new();
+        };
+        vec![
+            Entry::new(
+                "Cycle column width",
+                "Ctrl Shift S",
+                group,
+                Intent::CycleColumnWidth,
+            ),
+            Entry::new(
+                if width >= 0.99 {
+                    "Restore column width"
+                } else {
+                    "Maximize column"
+                },
+                "Ctrl Shift M",
+                group,
+                Intent::MaximizeColumn,
+            ),
+            Entry::new("Center column", "", group, Intent::CenterColumn),
+        ]
+    }
+
     /// A sidebar host header's menu: New session, Default shell…, and Retry while offline.
     fn host_entries(&self, host: usize) -> Vec<Entry> {
         let connected = self.hosts[host].model.connected;
@@ -436,12 +465,22 @@ impl Workspace {
         }
         if let PanelKind::Window(id) = &panel.kind {
             let connected = self.model().connected;
+            let active = self
+                .model()
+                .window()
+                .and_then(|window| window.window_id.as_deref())
+                == Some(id.as_str());
             let mut entries = vec![
                 Entry::new("Rename tab…", "", "", Intent::RenameWindow(id.clone())),
                 self.layout_entry(id, ""),
+            ];
+            if active && self.tab_layout(id) == TabLayout::Scrolling {
+                entries.extend(self.column_entries(""));
+            }
+            entries.extend([
                 Entry::new("Close tab…", "", "", Intent::CloseWindow(id.clone())),
                 Entry::new("New tab", "Ctrl Shift T", "", Intent::NewWindow),
-            ];
+            ]);
             for e in &mut entries {
                 e.enabled = connected;
             }
@@ -497,6 +536,9 @@ impl Workspace {
                     Intent::RenameWindow(id.clone()),
                 ));
                 entries.push(self.layout_entry(&id, "Workspace"));
+                if self.tab_layout(&id) == TabLayout::Scrolling {
+                    entries.extend(self.column_entries("Workspace"));
+                }
                 entries.push(Entry::new(
                     "Close tab…",
                     "",
@@ -521,7 +563,11 @@ impl Workspace {
                 .is_some_and(|w| w.zoomed_block_id.as_ref() == Some(&target.block));
             for (label, key, action) in [
                 (
-                    "Split right",
+                    if self.tab_layout(&target.window) == TabLayout::Scrolling {
+                        "New column right"
+                    } else {
+                        "Split right"
+                    },
                     "Ctrl Shift D",
                     PaneAction::Split("horizontal"),
                 ),

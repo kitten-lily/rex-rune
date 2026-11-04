@@ -24,9 +24,11 @@ fn letter(ev: &KeyEvent, tx: &Tx, c: char) -> bool {
         'k' => Code::KeyK,
         'f' => Code::KeyF,
         'n' => Code::KeyN,
+        'm' => Code::KeyM,
         'p' => Code::KeyP,
         'r' => Code::KeyR,
         't' => Code::KeyT,
+        's' => Code::KeyS,
         'v' => Code::KeyV,
         'w' => Code::KeyW,
         _ => return false,
@@ -100,6 +102,10 @@ fn shortcut(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.close_focused(tx);
         } else if letter(ev, tx, 'd') {
             s.perform(Intent::Split("horizontal"), tx);
+        } else if letter(ev, tx, 's') {
+            s.perform(Intent::CycleColumnWidth, tx);
+        } else if letter(ev, tx, 'm') {
+            s.perform(Intent::MaximizeColumn, tx);
         } else if letter(ev, tx, 'f') {
             s.open_search();
         } else if ev.key == Key::Enter {

@@ -12,7 +12,7 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 ## Features
 
-- Multiple saved hosts, each with its sessions; session windows are tabs and splits follow the server's order and nesting. Tabs can draw those splits tiled to the window or as half-width columns in a horizontal strip. The scrolling view is local to this client: the server and other clients keep their own geometry.
+- Multiple saved hosts, each with its sessions; session windows are tabs and splits follow the server's order and nesting. Tabs can draw those splits tiled to the window or as locally sized columns in a horizontal strip. Scrolling columns default to half a window, remember their widths on this client and keep splits inside them at the server's ratios; the server and other clients keep their own geometry.
 - Unix-socket and HTTPS/WSS endpoints (for example a Tailscale-exposed Rex server).
 - A single toolbar with session identity, tabs, commands and the window's own controls. A tab with one pane draws it edge to edge; splits are rounded pane cards. Tabs close from their right-click menu, a middle-click or `Ctrl Shift W`, always behind a confirmation. Host-grouped session navigation opens on demand, with an optional sidebar (Ctrl Shift B) that opens at launch as it was left.
 - Searchable session switcher (`Ctrl K`) and command palette (`Ctrl Shift P`).
@@ -134,11 +134,11 @@ desktop step needs `desktop-file-install`, `desktop-file-validate` and
 
 ## Configuration
 
-Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-linux/workspace.json` (default `~/.config/rex-linux/workspace.json`): saved hosts (label, endpoint, collapsed state, optional default shell), the last host and session per host, whether the sidebar is open and its width, the default tab layout (`tab_layout`) and per-host/session/tab choices (`tab_layouts`), terminal font family (`font_family`), ordered explicit fallbacks (`font_fallbacks`), font size, the terminal theme by name (`terminal_theme`, absent for the chrome's built-in theme), interface zoom (`ui_scale`), the corner notices appear in (`notice_position`), the activity and notification choices (`notifications`) and whether agents may name sessions (`agent_session_naming`). Use `--config <path>` to keep a separate workspace.
+Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-linux/workspace.json` (default `~/.config/rex-linux/workspace.json`): saved hosts (label, endpoint, collapsed state, optional default shell), the last host and session per host, whether the sidebar is open and its width, the default tab layout (`tab_layout`), per-host/session/tab choices (`tab_layouts`) and client-local scrolling-column widths (`column_widths`), terminal font family (`font_family`), ordered explicit fallbacks (`font_fallbacks`), font size, the terminal theme by name (`terminal_theme`, absent for the chrome's built-in theme), interface zoom (`ui_scale`), the corner notices appear in (`notice_position`), the activity and notification choices (`notifications`) and whether agents may name sessions (`agent_session_naming`). Use `--config <path>` to keep a separate workspace.
 
 Settings (`Ctrl ,`, or Settings… in Commands) has Interface (zoom, sidebar, default tab layout, notice corner), Terminal (font family, explicit fallbacks, size, theme and each host's default shell), Notifications (activity in tabs, desktop notifications and which changes send one), Integrations (Rex's skill and hooks for coding agents on this machine), Remote Hosts (add, edit or remove saved hosts) and Shortcuts sections. Font-family changes apply after reopening the client; they never restart the server or its sessions. Explicit fallbacks are tried in order before fontconfig's automatic fallback chain. `--font` and `--font-fallback` override saved choices for one launch without replacing them. A launcher installed with `REX_INSTALL_FONT` therefore continues to override the family selected in Settings.
 
-A tab's right-click menu or Commands can change that tab alone between **Tiled** and **Scrolling**. Removing a host only stops this client connecting to it; its sessions keep running on the server. A changed endpoint connects to that server as a new host.
+A tab's right-click menu or Commands can change that tab alone between **Tiled** and **Scrolling**. Commands and the active tab's menu also expose scrolling-column width, maximize/restore and centering controls. Removing a host only stops this client connecting to it; its sessions keep running on the server. A changed endpoint connects to that server as a new host.
 
 A host's default shell (empty means the server user's login shell) is used for every new session, tab and split this client creates on that host. Host endpoints must be `unix://` with an absolute path, or `https://`, `http://`, `wss://` or `ws://` URLs.
 
@@ -150,12 +150,14 @@ A host's default shell (empty means the server user's login shell) is used for e
 | Ctrl Shift P | Search commands, sessions and current-session tabs |
 | Ctrl Shift F | Search the focused terminal's screen and scrollback |
 | Ctrl Shift N / T | New session on the active host / new tab |
-| Ctrl Shift D / Ctrl Alt D | Split right / down |
+| Ctrl Shift D / Ctrl Alt D | Split right / down; in a scrolling tab, split right creates a new column after the focused column |
 | Ctrl PageUp / PageDown | Previous / next tab |
 | Alt arrows | Focus an adjacent pane |
 | Ctrl Shift Enter | Zoom / restore the focused pane |
 | Ctrl Shift Space | Focused-pane actions |
 | Ctrl Shift W | Close the focused pane, or the tab when it has one pane (asks first) |
+| Ctrl Shift S | Cycle the focused scrolling column through 1/3, 1/2 and 2/3 window widths |
+| Ctrl Shift M | Maximize / restore the focused scrolling column |
 | Ctrl , | Settings |
 | Ctrl Shift B | Collapse / restore the sidebar |
 | Ctrl Shift C / V | Copy selection / paste (bracketed-paste aware) |
@@ -165,7 +167,7 @@ A host's default shell (empty means the server user's login shell) is used for e
 
 These chords are reserved by the client and do not reach terminal programs; every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work.
 
-Other interactions: click the session/host identity for grouped navigation, or right-click it for the current session's actions; in the switcher, rename a session in place (right-click its row, F2 or the pencil; Enter saves, Esc cancels) or close it with its ×; right-click a pane for actions targeting that pane; drag dividers to resize splits and the sidebar's edge to resize it (double-click resets); double-click a tab to rename it. In a scrolling tab, horizontal wheel or trackpad scroll pans the strip, and moving focus brings its column fully into view. Closing a pane or tab asks for confirmation, with **Keep running** as the default. The active window takes size ownership of a terminal automatically. On the borderless window, the toolbar's empty space moves it (double-click maximizes; right-click requests the window manager's menu on Wayland).
+Other interactions: click the session/host identity for grouped navigation, or right-click it for the current session's actions; in the switcher, rename a session in place (right-click its row, F2 or the pencil; Enter saves, Esc cancels) or close it with its ×; right-click a pane for actions targeting that pane; drag dividers to resize server splits and, in a scrolling tab, drag a full-height column boundary to resize the adjacent local columns; drag the sidebar's edge to resize it (double-click resets); double-click a tab to rename it. In a scrolling tab, horizontal wheel or trackpad scroll pans the strip, moving focus brings its column fully into view, and **Center column** in Commands or the active tab's menu centers it. Closing a pane or tab asks for confirmation, with **Keep running** as the default. The active window takes size ownership of a terminal automatically. On the borderless window, the toolbar's empty space moves it (double-click maximizes; right-click requests the window manager's menu on Wayland).
 
 ## Development
 
