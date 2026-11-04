@@ -1146,27 +1146,24 @@ mod tests {
             None,
             &[],
             &m,
-            &TermColors::of(&TerminalTheme::midnight()),
+            &TermColors::of(&TerminalTheme::builtin()),
         ))
     }
 
     #[test]
     fn the_default_background_takes_the_theme_only_on_its_own_side() {
-        let midnight = TermColors::of(&TerminalTheme::midnight());
-        assert_eq!(midnight.body(0x000000), 0x001528, "the server's black");
+        let builtin = TermColors::of(&TerminalTheme::builtin());
+        let ground = builtin.background;
+        assert_eq!(builtin.body(0x000000), ground, "the server's black");
+        assert_eq!(builtin.body(0x1e1e2e), ground, "another owner's dark theme");
         assert_eq!(
-            midnight.body(0x1e1e2e),
-            0x001528,
-            "another owner's dark theme"
-        );
-        assert_eq!(
-            midnight.body(0xfdf6e3),
+            builtin.body(0xfdf6e3),
             0xfdf6e3,
             "another owner's light theme"
         );
         let light = TermColors::of(&TerminalTheme {
             background: 0xfdf6e3,
-            ..TerminalTheme::midnight()
+            ..TerminalTheme::builtin()
         });
         assert_eq!(light.body(0xfdf6e3), 0xfdf6e3);
         assert_eq!(light.body(0xeeeeee), 0xfdf6e3);

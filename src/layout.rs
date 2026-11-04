@@ -15,7 +15,7 @@ pub fn shell_layout(shell: Option<&str>, theme: &Value) -> Value {
 #[cfg(test)]
 #[test]
 fn shell_layout_sets_the_shell_only_when_given() {
-    let theme = crate::terminal_theme::TerminalTheme::midnight().args();
+    let theme = crate::terminal_theme::TerminalTheme::builtin().args();
     assert!(
         shell_layout(None, &theme)["block"]["options"]
             .get("shell")

@@ -16,8 +16,8 @@ fn ticket(session: &str, block: &str, expires_in_ms: u64) -> session::DataTicket
     }
 }
 
-fn midnight() -> Value {
-    crate::terminal_theme::TerminalTheme::midnight().args()
+fn builtin() -> Value {
+    crate::terminal_theme::TerminalTheme::builtin().args()
 }
 
 #[test]
@@ -181,7 +181,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
         .await;
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
+    let host = HostConnection::spawn(endpoint, None, None, None, false, builtin());
     connected(&host).await;
     {
         let model = host.model.lock().unwrap();
@@ -254,7 +254,7 @@ async fn failed_bootstrap_closes_and_retries_without_old_identity() {
         .await;
         assert!(matches!(second.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
+    let host = HostConnection::spawn(endpoint, None, None, None, false, builtin());
     connected(&host).await;
     assert_eq!(host.model.lock().unwrap().protocol.bootstrap_requests, 2);
     drop(host);
@@ -557,7 +557,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
         // No second session.view: the next message is the client closing.
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
+    let host = HostConnection::spawn(endpoint, None, None, None, false, builtin());
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             {
@@ -693,7 +693,7 @@ async fn destroying_a_session_forgets_it_without_an_error() {
         .await;
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
+    let host = HostConnection::spawn(endpoint, None, None, None, false, builtin());
     connected(&host).await;
     host.commands
         .send(HostCommand::Request {

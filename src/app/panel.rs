@@ -1,5 +1,5 @@
 //! Popup and dialog state, and the action lists the switcher, Commands and menus show.
-use super::theme::{MONITOR, SERVER};
+use super::theme::{CHROME, MONITOR, SERVER};
 use super::workspace::Workspace;
 use rune::TextEdit;
 use serde_json::Value;
@@ -32,7 +32,8 @@ pub enum Intent {
     Retry,
     /// The terminal theme picker, from Settings.
     ChooseTheme,
-    /// Draw terminals in this Ghostty theme, or Midnight for none, then return to Settings.
+    /// Draw terminals in this Ghostty theme, or the built-in one for none, then return to
+    /// Settings.
     Theme(Option<String>),
 }
 impl Intent {
@@ -319,12 +320,15 @@ impl Workspace {
         entries
     }
 
-    /// Midnight, then the dark and the light Ghostty themes whose names contain `lower`.
+    /// The built-in theme, then the dark and the light Ghostty themes whose names contain
+    /// `lower`.
     fn theme_entries(&self, lower: &str) -> Vec<Entry> {
         let current = self.term_theme.name.as_deref();
         let mut entries = Vec::new();
-        if "midnight".contains(lower) {
-            let mut e = Entry::new("Midnight", "", "Built in", Intent::Theme(None));
+        // "rose" finds Rosé Pine, the built-in theme of that chrome.
+        let builtin = CHROME.name.to_lowercase();
+        if builtin.contains(lower) || builtin.replace('é', "e").contains(lower) {
+            let mut e = Entry::new(CHROME.name, "", "Built in", Intent::Theme(None));
             e.current = current.is_none();
             entries.push(e);
         }

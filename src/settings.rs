@@ -67,7 +67,7 @@ pub struct Settings {
     pub notifications: NotificationsConfig,
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
     pub agent_session_naming: bool,
-    /// The Ghostty theme terminals are drawn in, by name; none is the built-in Midnight.
+    /// The Ghostty theme terminals are drawn in, by name; none is the chrome's built-in theme.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_theme: Option<String>,
 }

@@ -1,4 +1,4 @@
-//! Building blocks on the Midnight tokens: chrome icon buttons, pill buttons, list rows with a
+//! Building blocks on the chrome tokens: chrome icon buttons, pill buttons, list rows with a
 //! sliding highlight, scroll thumbs and hint lines.
 use super::{theme::*, workspace::Workspace};
 use rune::{Color, Cursor, El, Icon, Live, LiveText, ScrollPos, Tx, el, icon, row, text};
@@ -67,7 +67,7 @@ pub fn pill(
 ) -> El {
     let (ink, e) = match kind {
         Pill::Primary => (
-            rgb(0x061220),
+            rgb(ON_ACCENT),
             row()
                 .linear_gradient(
                     1.9,

@@ -1,5 +1,6 @@
-//! Midnight: Rex's tokens, the kit pinned to them, shared surfaces (chips,
-//! glass, cards) and the app's icons.
+//! The chrome's tokens (Midnight, Rosé Pine or Rosé Pine Moon, picked by `REX_CHROME` at
+//! build time), the kit pinned to them, shared surfaces (chips, glass, cards) and the app's
+//! icons.
 use rune::{Color, El, Icon, Shadow, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use std::sync::OnceLock;
@@ -51,19 +52,59 @@ pub fn inset(y: f32, color: Color) -> Shadow {
     }
 }
 
+pub use rex_linux::terminal_theme::CHROME;
+
 /// The ground, and every chrome surface that sits on it (pane cards and their headers). A
-/// terminal is drawn on its theme's background, which in the built-in Midnight theme is
-/// this same navy, so a single pane and the toolbar read as one surface.
-pub const GROUND: u32 = rex_linux::terminal_theme::MIDNIGHT_BACKGROUND;
-pub const POPOVER: u32 = 0x0d1524;
-pub const INK: u32 = 0xe8eef6;
-pub const MUTED: u32 = 0x93a3b8;
-pub const ACCENT: u32 = 0x7cc4ff;
-pub const ACCENT2: u32 = 0xa78bfa;
-pub const LIVE: u32 = 0x5eead4;
-pub const WARNING: u32 = 0xf5d48a;
-pub const DANGER: u32 = 0xff8a8a;
-pub const TERMINAL_SELECTION: u32 = 0x2f4a6e;
+/// terminal is drawn on its theme's background, which in the chrome's built-in theme is this
+/// same colour, so a single pane and the toolbar read as one surface.
+pub const GROUND: u32 = CHROME.background;
+pub use tokens::*;
+
+#[cfg(chrome = "midnight")]
+mod tokens {
+    pub const POPOVER: u32 = 0x0d1524;
+    pub const INK: u32 = 0xe8eef6;
+    pub const MUTED: u32 = 0x93a3b8;
+    pub const ACCENT: u32 = 0x7cc4ff;
+    pub const ACCENT2: u32 = 0xa78bfa;
+    pub const LIVE: u32 = 0x5eead4;
+    pub const WARNING: u32 = 0xf5d48a;
+    pub const DANGER: u32 = 0xff8a8a;
+    /// Text on an accent fill (primary buttons).
+    pub const ON_ACCENT: u32 = 0x061220;
+    /// The selection overlay when the terminal theme names none.
+    pub const TERMINAL_SELECTION: u32 = 0x2f4a6e;
+}
+
+/// Rosé Pine's roles: surface, text, subtle, iris, foam, pine, gold, love, highlight med.
+#[cfg(chrome = "rose-pine")]
+mod tokens {
+    pub const POPOVER: u32 = 0x1f1d2e;
+    pub const INK: u32 = 0xe0def4;
+    pub const MUTED: u32 = 0x908caa;
+    pub const ACCENT: u32 = 0xc4a7e7;
+    pub const ACCENT2: u32 = 0x9ccfd8;
+    pub const LIVE: u32 = 0x31748f;
+    pub const WARNING: u32 = 0xf6c177;
+    pub const DANGER: u32 = 0xeb6f92;
+    pub const ON_ACCENT: u32 = 0x191724;
+    pub const TERMINAL_SELECTION: u32 = 0x403d52;
+}
+
+/// Rosé Pine Moon's roles, as for Rosé Pine.
+#[cfg(chrome = "rose-pine-moon")]
+mod tokens {
+    pub const POPOVER: u32 = 0x2a273f;
+    pub const INK: u32 = 0xe0def4;
+    pub const MUTED: u32 = 0x908caa;
+    pub const ACCENT: u32 = 0xc4a7e7;
+    pub const ACCENT2: u32 = 0x9ccfd8;
+    pub const LIVE: u32 = 0x3e8fb0;
+    pub const WARNING: u32 = 0xf6c177;
+    pub const DANGER: u32 = 0xeb6f92;
+    pub const ON_ACCENT: u32 = 0x232136;
+    pub const TERMINAL_SELECTION: u32 = 0x44415a;
+}
 
 pub const TOOLBAR: f32 = 52.;
 pub const GUTTER: f32 = 8.;

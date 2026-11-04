@@ -305,7 +305,7 @@ fn terminal(s: &Workspace) -> El {
                         s.term_theme
                             .name
                             .as_deref()
-                            .unwrap_or("Midnight")
+                            .unwrap_or(CHROME.name)
                             .to_owned(),
                     )
                     .font(medium(13.))

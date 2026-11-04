@@ -1076,7 +1076,11 @@ fn the_theme_picker_filters_applies_to_every_host_and_returns_to_settings() {
     assert_eq!(
         rows(&rt.state),
         [
-            ("Midnight".to_owned(), "Built in".to_owned(), true),
+            (
+                super::theme::CHROME.name.to_owned(),
+                "Built in".to_owned(),
+                true,
+            ),
             ("Catppuccin Mocha".into(), "Dark".into(), false),
             ("Paper".into(), "Light".into(), false),
         ]

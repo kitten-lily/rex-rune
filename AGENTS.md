@@ -20,6 +20,8 @@ cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
 
 Requirements are listed in the README (Rust 1.96+, Zig 0.17.x for `ghostty-vt`, Linux graphics and input libraries). `Cargo.lock` is committed; keep `--locked` working.
 
+The chrome palette is chosen at build time with `REX_CHROME` (`midnight`, the default, `rose-pine` or `rose-pine-moon`; see `build.rs`). When changing tokens in `src/app/theme.rs` or the built-in themes in `src/terminal_theme.rs`, run clippy and the tests with each value.
+
 Some probes and Python scripts in `scripts/` connect to the configured Rex server and create sessions there; others start their own server. Run them only against a disposable server or socket you control, and check each script's requirements in its docstring. Anything that exercises the UI against real input (`x11-smoke.py`, `rune-acceptance-x11.py`, `wayland-seat-smoke.py`) needs a built binary and the tools it names.
 
 ## Code layout

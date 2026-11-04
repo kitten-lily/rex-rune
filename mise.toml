@@ -2,12 +2,22 @@
 rust = { version = "1.96.1", components = "clippy,rustfmt" }
 zig = "0.17.1"
 
+# Records REX_CHROME in a file the build watches, so changing it rebuilds; the file only
+# changes when the chrome does.
+[tasks.chrome]
+description = "Record the chrome (REX_CHROME) the next build uses"
+hide = true
+run = 'mkdir -p target && c="${REX_CHROME:-midnight}" && { [ "$(cat target/.rex-chrome 2>/dev/null)" = "$c" ] || printf "%s" "$c" > target/.rex-chrome; }'
+
 [tasks.build]
-description = "Build the release application"
+description = "Build the release application (optional REX_CHROME)"
+depends = ["chrome"]
 run = "cargo build --locked --release --bin rex-linux && touch target/release/.rex-linux-build.stamp"
 sources = [
     "Cargo.toml",
     "Cargo.lock",
+    "build.rs",
+    "target/.rex-chrome",
     "src/**/*",
     "resources/icons/256x256/apps/dev.shuv.rex-linux.png",
     "vendor/rune/crates/{rune,rune-motion,rune-staging,procwatch}/Cargo.toml",

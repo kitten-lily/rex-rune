@@ -5,6 +5,7 @@ use super::{
     notify::{Note, Notifier},
     panel::*,
     term::{Term, TermColors},
+    theme::CHROME,
     widgets::ScrollFx,
 };
 use rex_linux::{
@@ -96,7 +97,7 @@ pub struct Workspace {
     /// Notifications headless tests would have sent.
     pub outbox: Vec<Note>,
     pub integrations: super::integrations::Integrations,
-    /// The theme terminals are drawn in: Midnight or the Ghostty theme Settings names.
+    /// The theme terminals are drawn in: the built-in one or the Ghostty theme Settings names.
     pub term_theme: TerminalTheme,
     /// Where Ghostty themes are read from.
     pub theme_dirs: ThemeDirs,
@@ -158,10 +159,10 @@ impl Workspace {
         // file is back.
         let theme_dirs = ThemeDirs::from_env();
         let (term_theme, theme_error) = match settings.terminal_theme.as_deref() {
-            None => (TerminalTheme::midnight(), None),
+            None => (TerminalTheme::builtin(), None),
             Some(name) => match theme_dirs.load(name) {
                 Ok(theme) => (theme, None),
-                Err(error) => (TerminalTheme::midnight(), Some(error)),
+                Err(error) => (TerminalTheme::builtin(), Some(error)),
             },
         };
         let mut this = Self {
@@ -210,7 +211,7 @@ impl Workspace {
             themes: Vec::new(),
         };
         if let Some(error) = theme_error {
-            this.notify(format!("{error:#}; using Midnight"));
+            this.notify(format!("{error:#}; using {}", CHROME.name));
         }
         for index in 0..this.settings.hosts.len() {
             this.connect_host(index, explicit);
@@ -689,11 +690,11 @@ impl Workspace {
         TermColors::of(&self.term_theme)
     }
 
-    /// Draw terminals in Ghostty theme `name` (Midnight when none), remember it, and declare
-    /// it to every host. Nothing changes when the theme can't be read.
+    /// Draw terminals in Ghostty theme `name` (the built-in theme when none), remember it, and
+    /// declare it to every host. Nothing changes when the theme can't be read.
     pub fn apply_theme(&mut self, name: Option<String>) -> anyhow::Result<()> {
         let theme = match name.as_deref() {
-            None => TerminalTheme::midnight(),
+            None => TerminalTheme::builtin(),
             Some(name) => self.theme_dirs.load(name)?,
         };
         let args = theme.args();

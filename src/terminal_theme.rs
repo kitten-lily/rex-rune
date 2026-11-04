@@ -1,4 +1,4 @@
-//! Terminal colour themes: the built-in Midnight and Ghostty theme files.
+//! Terminal colour themes: the built-in one that matches the chrome, and Ghostty theme files.
 //!
 //! A theme is declared to the server with `terminal.set_theme`, which applies it while this
 //! client owns a block and sends it back on the block's stream; the client never recolours
@@ -12,12 +12,67 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Midnight's background: the navy the chrome is drawn in.
-pub const MIDNIGHT_BACKGROUND: u32 = 0x001528;
+/// The chrome this build draws (`REX_CHROME` when it was built) and the built-in terminal
+/// theme drawn in its colours, whose background is the chrome's ground.
+pub struct Chrome {
+    pub name: &'static str,
+    pub background: u32,
+    foreground: Option<u32>,
+    cursor: Option<u32>,
+    cursor_text: Option<u32>,
+    selection_background: Option<u32>,
+    selection_foreground: Option<u32>,
+    /// Palette colours 0–15.
+    palette: &'static [u32],
+}
+
+#[cfg(chrome = "midnight")]
+pub const CHROME: Chrome = Chrome {
+    name: "Midnight",
+    background: 0x001528,
+    foreground: None,
+    cursor: None,
+    cursor_text: None,
+    selection_background: None,
+    selection_foreground: None,
+    palette: &[],
+};
+
+/// Rosé Pine, as its Ghostty theme draws it.
+#[cfg(chrome = "rose-pine")]
+pub const CHROME: Chrome = Chrome {
+    name: "Rosé Pine",
+    background: 0x191724,
+    foreground: Some(0xe0def4),
+    cursor: Some(0xe0def4),
+    cursor_text: Some(0x191724),
+    selection_background: Some(0x403d52),
+    selection_foreground: Some(0xe0def4),
+    palette: &[
+        0x26233a, 0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4, 0x6e6a86,
+        0xeb6f92, 0x31748f, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xebbcba, 0xe0def4,
+    ],
+};
+
+/// Rosé Pine Moon, as its Ghostty theme draws it.
+#[cfg(chrome = "rose-pine-moon")]
+pub const CHROME: Chrome = Chrome {
+    name: "Rosé Pine Moon",
+    background: 0x232136,
+    foreground: Some(0xe0def4),
+    cursor: Some(0xe0def4),
+    cursor_text: Some(0x232136),
+    selection_background: Some(0x44415a),
+    selection_foreground: Some(0xe0def4),
+    palette: &[
+        0x393552, 0xeb6f92, 0x3e8fb0, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xea9a97, 0xe0def4, 0x6e6a86,
+        0xeb6f92, 0x3e8fb0, 0xf6c177, 0x9ccfd8, 0xc4a7e7, 0xea9a97, 0xe0def4,
+    ],
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerminalTheme {
-    /// The Ghostty theme's name; none is the built-in Midnight.
+    /// The Ghostty theme's name; none is the built-in theme of this build's chrome.
     pub name: Option<String>,
     pub background: u32,
     pub foreground: Option<u32>,
@@ -30,16 +85,17 @@ pub struct TerminalTheme {
 }
 
 impl TerminalTheme {
-    pub fn midnight() -> Self {
+    /// The built-in theme: the chrome's own colours.
+    pub fn builtin() -> Self {
         Self {
             name: None,
-            background: MIDNIGHT_BACKGROUND,
-            foreground: None,
-            cursor: None,
-            cursor_text: None,
-            selection_background: None,
-            selection_foreground: None,
-            palette: Vec::new(),
+            background: CHROME.background,
+            foreground: CHROME.foreground,
+            cursor: CHROME.cursor,
+            cursor_text: CHROME.cursor_text,
+            selection_background: CHROME.selection_background,
+            selection_foreground: CHROME.selection_foreground,
+            palette: (0..).zip(CHROME.palette.iter().copied()).collect(),
         }
     }
 
@@ -49,7 +105,13 @@ impl TerminalTheme {
     pub fn parse(name: &str, text: &str) -> Result<Self> {
         let mut theme = Self {
             name: Some(name.to_owned()),
-            ..Self::midnight()
+            background: CHROME.background,
+            foreground: None,
+            cursor: None,
+            cursor_text: None,
+            selection_background: None,
+            selection_foreground: None,
+            palette: Vec::new(),
         };
         let mut known = false;
         for line in text.lines().map(str::trim) {
@@ -100,8 +162,8 @@ impl TerminalTheme {
         Ok(theme)
     }
 
-    /// The `terminal.set_theme` arguments. Midnight says it is dark; a Ghostty theme leaves
-    /// that to the server, which judges its background's brightness.
+    /// The `terminal.set_theme` arguments. The built-in theme says it is dark; a Ghostty
+    /// theme leaves that to the server, which judges its background's brightness.
     pub fn args(&self) -> Value {
         let mut set = SetTheme::new().background(hex(self.background));
         if let Some(color) = self.foreground {
@@ -257,12 +319,26 @@ selection-background = #f5e0dc
 selection-foreground = #1e1e2e
 ";
 
+    #[cfg(chrome = "midnight")]
     #[test]
     fn midnight_declares_the_navy_and_dark() {
         assert_eq!(
-            TerminalTheme::midnight().args(),
+            TerminalTheme::builtin().args(),
             json!({"background":"#001528","scheme":"dark"})
         );
+    }
+
+    #[test]
+    fn the_builtin_theme_is_the_chromes_and_ghostty_themes_never_inherit_it() {
+        let args = TerminalTheme::builtin().args();
+        assert_eq!(args["background"], hex(CHROME.background));
+        assert_eq!(args["scheme"], "dark");
+        assert_eq!(
+            args["palette"].as_array().map_or(0, Vec::len),
+            CHROME.palette.len()
+        );
+        let plain = TerminalTheme::parse("plain", "background = #101010\n").unwrap();
+        assert_eq!(plain.args(), json!({"background":"#101010"}));
     }
 
     #[test]

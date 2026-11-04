@@ -466,7 +466,7 @@ fn card(
                 );
             }
             // The terminal's background sits inside the card's border, never over it. Where
-            // it is the card's own navy (Midnight), the card draws it, edge included.
+            // it is the card's own ground (the built-in theme), the card draws it, edge included.
             let (edge, radius) = if bleed {
                 (0., 0.)
             } else {
