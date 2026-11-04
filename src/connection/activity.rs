@@ -38,6 +38,14 @@ pub enum BlockedKind {
     Auth,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalProgress {
+    Set(Option<u8>),
+    Indeterminate,
+    Paused(Option<u8>),
+    Error(Option<u8>),
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusRecord {
     pub state: ProgramState,
@@ -108,6 +116,13 @@ pub enum BlockEvent {
         text: String,
         owner: Option<u64>,
     },
+    /// A program wrote text with OSC 52. `text` is absent when it must be fetched in chunks.
+    Clipboard {
+        id: u64,
+        text: Option<String>,
+    },
+    Bell,
+    Progress(Option<TerminalProgress>),
     Notification {
         title: String,
         body: String,
@@ -142,6 +157,27 @@ pub fn parse_block_event(payload: &Value) -> Option<(String, BlockEvent)> {
             title: body["title"].as_str().unwrap_or_default().to_owned(),
             body: body["body"].as_str().unwrap_or_default().to_owned(),
         },
+        "clipboard_written" => BlockEvent::Clipboard {
+            id: body["id"].as_u64()?,
+            text: body["text"].as_str().map(str::to_owned),
+        },
+        "bell" => BlockEvent::Bell,
+        "progress_report" => BlockEvent::Progress(match body["state"].as_str()? {
+            "remove" => None,
+            "indeterminate" => Some(TerminalProgress::Indeterminate),
+            state @ ("set" | "pause" | "error") => {
+                let progress = body["progress"]
+                    .as_u64()
+                    .filter(|value| *value <= 100)
+                    .map(|value| value as u8);
+                Some(match state {
+                    "pause" => TerminalProgress::Paused(progress),
+                    "error" => TerminalProgress::Error(progress),
+                    _ => TerminalProgress::Set(progress),
+                })
+            }
+            _ => return None,
+        }),
         _ => return None,
     };
     Some((block, event))

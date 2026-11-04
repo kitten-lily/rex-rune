@@ -85,13 +85,13 @@ fn tab_track(s: &Workspace) -> El {
             let active = view.active_window_id.as_ref() == Some(&id);
             let label = tab_name(model, tab);
             let activity = tab_activity(model, tab);
-            let word = tab_word(&activity, s.unseen(&id))
+            let word = tab_word(&activity, s.unseen(&id), s.bell(&id))
                 .filter(|_| s.settings.notifications.show_in_tabs);
             let (press_id, rename_id, menu_id) = (id.clone(), id.clone(), id.clone());
             let mut tab_el = row()
                 .key(format!("tab:{id}"))
                 .role("tab")
-                .label(match word {
+                .label(match &word {
                     Some((word, _)) => format!("{label} · {word}"),
                     None => label.clone(),
                 })
@@ -154,11 +154,12 @@ fn tab_track(s: &Workspace) -> El {
             );
             // The label truncates first; the word always stays whole.
             if let Some((word, tone)) = word {
+                let is_done = word == "Done";
                 let mut mark = text(word)
                     .key(format!("tab-word:{id}"))
                     .font(medium(11.5))
                     .color(rgb(tone));
-                if let Some(msg) = activity.msg.clone().filter(|_| word != "Done") {
+                if let Some(msg) = activity.msg.clone().filter(|_| !is_done) {
                     mark = mark.help(msg);
                 }
                 tab_el = tab_el.child(mark);

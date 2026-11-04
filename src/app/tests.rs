@@ -1169,7 +1169,7 @@ fn set_activity(
 #[test]
 fn a_tab_folds_its_records_by_priority_and_shows_its_program() {
     use super::activity::{program_icon, tab_activity, tab_word};
-    use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
+    use rex_linux::connection::activity::{BlockedKind, ProgramState::*, TerminalProgress};
     let (mut ws, _rx) = tabbed_workspace("single");
     let model = &mut ws.hosts[0].model;
     model.programs.insert("block:a".into(), "nvim".into());
@@ -1189,14 +1189,31 @@ fn a_tab_folds_its_records_by_priority_and_shows_its_program() {
     assert_eq!(single.state, Idle);
     assert_eq!(single.program.as_deref(), Some("nvim"));
     assert!(std::ptr::eq(program_icon(Some("nvim")), &super::theme::VIM));
-    assert_eq!(tab_word(&single, false), None);
+    assert_eq!(tab_word(&single, false, false), None);
+    model
+        .progress
+        .insert("block:a".into(), TerminalProgress::Set(Some(42)));
+    let single = tab_activity(model, &view.windows[0]);
+    assert_eq!(
+        tab_word(&single, false, false).map(|word| word.0),
+        Some("42%".into())
+    );
+    model.progress.clear();
+    let single = tab_activity(model, &view.windows[0]);
+    assert_eq!(
+        tab_word(&single, false, true).map(|word| word.0),
+        Some("Bell".into())
+    );
     let split = tab_activity(model, &view.windows[1]);
     // Blocked beats Error beats Working, across both panes of the split.
     assert_eq!(split.state, Blocked);
     assert_eq!(split.msg.as_deref(), Some("Run cargo test?"));
     // The focused pane (block:b) reports through claude, which beats its foreground shell.
     assert_eq!(split.program.as_deref(), Some("claude"));
-    assert_eq!(tab_word(&split, false).map(|w| w.0), Some("Needs approval"));
+    assert_eq!(
+        tab_word(&split, false, false).map(|w| w.0),
+        Some("Needs approval".into())
+    );
     assert!(std::ptr::eq(
         program_icon(Some("bash")),
         &super::theme::TERMINAL

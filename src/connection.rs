@@ -4,7 +4,7 @@ use crate::{
     transport::{self, Client},
     wire,
 };
-use activity::{BlockEvent, DesktopNotice, StatusRecord};
+use activity::{BlockEvent, DesktopNotice, StatusRecord, TerminalProgress};
 use anyhow::{Context, Result};
 use rexrs::api::session;
 use serde_json::{Value, json};
@@ -60,6 +60,9 @@ pub enum Command {
     Wheel(Value),
     Resize(u16, u16, u16, u16),
     Scroll(isize),
+    Search(String),
+    /// `true` selects the next older result; `false` the previous newer result.
+    SearchStep(bool),
     TakeControl,
     Reconnect,
 }
@@ -142,6 +145,12 @@ pub struct HostModel {
     pub titles: HashMap<String, (String, Option<u64>)>,
     /// Program notifications not yet taken by the UI.
     pub notices: Vec<DesktopNotice>,
+    /// OSC 52 copies not yet written to the local desktop clipboard.
+    pub clipboard: Vec<String>,
+    /// OSC 9;4 progress for each terminal block.
+    pub progress: HashMap<String, TerminalProgress>,
+    /// Bells not yet observed by the UI, as (session, block).
+    pub bells: Vec<(String, String)>,
     /// Bumped whenever `activity` is dropped wholesale (on reconnect), so the UI starts its
     /// before-and-after comparison over instead of reading the gap as programs finishing.
     pub activity_epoch: u64,
@@ -191,6 +200,28 @@ impl HostModel {
                     });
                 }
             }
+            BlockEvent::Clipboard { text, .. } => {
+                if let Some(text) = text {
+                    // Keep the newest few writes if the UI thread is briefly busy.
+                    if self.clipboard.len() == 8 {
+                        self.clipboard.remove(0);
+                    }
+                    self.clipboard.push(text);
+                }
+            }
+            BlockEvent::Progress(progress) => match progress {
+                Some(progress) => {
+                    self.progress.insert(block, progress);
+                }
+                None => {
+                    self.progress.remove(&block);
+                }
+            },
+            BlockEvent::Bell => {
+                if self.bells.len() < 32 {
+                    self.bells.push((session.into(), block));
+                }
+            }
         }
     }
     fn forget_block(&mut self, block: &str) {
@@ -198,6 +229,7 @@ impl HostModel {
         self.programs.remove(block);
         self.foreground.remove(block);
         self.titles.remove(block);
+        self.progress.remove(block);
     }
 
     /// The block's terminal title while it's current. Shells rarely clear a title when the
@@ -458,6 +490,8 @@ enum DataCommand {
     Visible(bool),
     Scroll(isize),
     Bottom,
+    Search(String),
+    SearchStep(bool),
     Reconnect,
     Stop,
 }
@@ -851,6 +885,38 @@ fn apply_bootstrap(
     state.add_tickets(boot.data_tickets, started);
 }
 
+/// Read an OSC 52 copy whose event was too large to carry inline.
+async fn read_clipboard(
+    control: &mut Client,
+    session: &str,
+    block: &str,
+    id: u64,
+) -> Result<String> {
+    const CHUNK: i64 = 960 * 1024;
+    let method = format!("{}.clipboard_read", activity::TERMINAL);
+    let mut text = String::new();
+    loop {
+        let reply = request(
+            control,
+            &method,
+            json!({
+                "session_id": session,
+                "block_id": block,
+                "args": {"id": id, "offset": text.len(), "max_bytes": CHUNK},
+            }),
+        )
+        .await?;
+        let part = reply["data"].as_str().context("clipboard data")?;
+        if part.is_empty() && !reply["eof"].as_bool().unwrap_or(false) {
+            anyhow::bail!("clipboard read made no progress");
+        }
+        text.push_str(part);
+        if reply["eof"].as_bool().unwrap_or(false) {
+            return Ok(text);
+        }
+    }
+}
+
 async fn handle_event(
     event: rexrs::Event,
     control: &mut Client,
@@ -924,12 +990,20 @@ async fn handle_event(
             }
         }
         "block_event" => {
-            let (Some(id), Some((block, change))) = (
+            let (Some(id), Some((block, mut change))) = (
                 event.session_id.as_deref(),
                 activity::parse_block_event(&event.payload),
             ) else {
                 return Ok(());
             };
+            if let BlockEvent::Clipboard {
+                id: copy_id,
+                text: text @ None,
+            } = &mut change
+                && let Ok(copy) = read_clipboard(control, id, &block, *copy_id).await
+            {
+                *text = Some(copy);
+            }
             let unplaced = {
                 let m = shared.model.lock().expect("host model");
                 !m.views.contains_key(id) && m.sessions.iter().any(|s| s.session_id == id)
@@ -1232,6 +1306,12 @@ async fn handle_command(
                 Command::Scroll(delta) => {
                     let _ = worker.commands.send(DataCommand::Scroll(delta));
                 }
+                Command::Search(query) => {
+                    let _ = worker.commands.send(DataCommand::Search(query));
+                }
+                Command::SearchStep(next) => {
+                    let _ = worker.commands.send(DataCommand::SearchStep(next));
+                }
                 Command::Reconnect => {
                     let _ = worker.commands.send(DataCommand::Reconnect);
                 }
@@ -1334,6 +1414,25 @@ async fn resize(
     Ok(())
 }
 
+fn reveal_search_match(
+    search: &ghostty_vt::search::Search,
+    terminal: &mut ghostty_vt::Terminal,
+) -> Result<()> {
+    use ghostty_vt::terminal::{PointSpace, ScrollViewport};
+    let row = if let Some(selection) = search.selected_match(terminal)? {
+        terminal
+            .point_from_grid_ref(&selection.start(), PointSpace::Screen)?
+            .map(|point| point.y as usize)
+    } else {
+        None
+    };
+    if let Some(row) = row {
+        let center = terminal.rows()? as usize / 2;
+        terminal.scroll_viewport(ScrollViewport::Row(row.saturating_sub(center)));
+    }
+    Ok(())
+}
+
 async fn run_data(
     endpoint: String,
     session: String,
@@ -1343,8 +1442,15 @@ async fn run_data(
     shared: PaneShared,
 ) {
     let mut welcome: Option<wire::Welcome> = None;
+    if let Err(error) = ghostty_vt::kitty::graphics::set_png_decoder(Some(Box::new(
+        ghostty_vt::kitty::graphics::RustPngDecoder::new(),
+    ))) {
+        shared.status(format!("Image decoder failed: {error:#}"), false);
+        return;
+    }
     let mut stream: Option<TerminalStream> = None;
     let mut visible = true;
+    let mut search: Option<ghostty_vt::search::Search> = None;
     let mut renderer = match Renderer::new() {
         Ok(r) => r,
         Err(e) => {
@@ -1366,6 +1472,7 @@ async fn run_data(
             if socket.is_none() {
                 let (next, fresh) = open_data(&endpoint, &session, &block, &host).await?;
                 stream = Some(TerminalStream::new(fresh.nonce)); welcome = Some(fresh);
+                search = None;
                 shared.update(|m|m.restore_generation+=1);
                 renderer = Renderer::new()?; socket = Some(next);
                 shared.status("Restoring terminal…", false);
@@ -1379,18 +1486,40 @@ async fn run_data(
                 tokio::select! {
                     bytes = wire::next_binary(&mut socket) => {
                         if let Err(error) = stream.feed(&bytes?) { welcome = None; return Err(error); }
+                        if let (Some(active), Some(terminal)) = (&mut search, &stream.terminal) {
+                            active.run(terminal)?;
+                        }
                         dirty = true;
                     }
                     command = commands.recv_async() => match command {
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } visible = value; }
                         Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); dirty = true; },
                         Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); dirty = true; },
+                        Ok(DataCommand::Search(query)) => if let Some(terminal) = &mut stream.terminal {
+                            if query.is_empty() {
+                                search = None;
+                            } else {
+                                let active = search.get_or_insert(ghostty_vt::search::Search::new(terminal)?);
+                                active.set_needle(terminal, Some(&query))?;
+                                active.run(terminal)?;
+                                if active.selected_index()?.is_none() {
+                                    active.select_next(terminal)?;
+                                }
+                                reveal_search_match(active, terminal)?;
+                            }
+                            dirty = true;
+                        },
+                        Ok(DataCommand::SearchStep(next)) => if let (Some(active), Some(terminal)) = (&mut search, &mut stream.terminal) {
+                            if next { active.select_next(terminal)?; } else { active.select_prev(terminal)?; }
+                            reveal_search_match(active, terminal)?;
+                            dirty = true;
+                        },
                         Ok(DataCommand::Reconnect) => { shared.status("Reconnecting terminal…", false); return Ok(false); }
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
                     _ = tick.tick(), if dirty && visible => {
                         if let Some(terminal) = &stream.terminal {
-                            let frame = Arc::new(renderer.frame(terminal)?);
+                            let frame = Arc::new(renderer.frame_with_search(terminal, search.as_ref())?);
                             let mut transitioned = false;
                             shared.update(|m| {
                                 m.frame = Some(frame);

@@ -404,7 +404,37 @@ fn unknown_states_kinds_and_events_stay_quiet() {
     assert_eq!(record.app.as_deref(), Some("x"));
     let event = |creator: &str, name: &str| json!({"block_id":"b","creator_name":creator,"name":name,"payload":{}});
     assert!(activity::parse_block_event(&event("other.creator", "process_changed")).is_none());
-    assert!(activity::parse_block_event(&event(activity::TERMINAL, "bell")).is_none());
+    assert_eq!(
+        activity::parse_block_event(&event(activity::TERMINAL, "bell")),
+        Some(("b".into(), BlockEvent::Bell))
+    );
+    assert_eq!(
+        activity::parse_block_event(&json!({
+            "block_id":"b",
+            "creator_name":activity::TERMINAL,
+            "name":"progress_report",
+            "payload":{"state":"set","progress":42}
+        })),
+        Some((
+            "b".into(),
+            BlockEvent::Progress(Some(activity::TerminalProgress::Set(Some(42))))
+        ))
+    );
+    assert_eq!(
+        activity::parse_block_event(&json!({
+            "block_id":"b",
+            "creator_name":activity::TERMINAL,
+            "name":"clipboard_written",
+            "payload":{"id":9,"bytes":4,"text":"copy"}
+        })),
+        Some((
+            "b".into(),
+            BlockEvent::Clipboard {
+                id: 9,
+                text: Some("copy".into())
+            }
+        ))
+    );
     assert_eq!(
         activity::parse_block_event(&event(activity::TERMINAL, "process_changed")),
         Some((

@@ -22,6 +22,7 @@ fn letter(ev: &KeyEvent, tx: &Tx, c: char) -> bool {
         'c' => Code::KeyC,
         'd' => Code::KeyD,
         'k' => Code::KeyK,
+        'f' => Code::KeyF,
         'n' => Code::KeyN,
         'p' => Code::KeyP,
         'r' => Code::KeyR,
@@ -99,6 +100,8 @@ fn shortcut(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             s.close_focused(tx);
         } else if letter(ev, tx, 'd') {
             s.perform(Intent::Split("horizontal"), tx);
+        } else if letter(ev, tx, 'f') {
+            s.open_search();
         } else if ev.key == Key::Enter {
             s.perform(Intent::Zoom, tx);
         } else if space(ev, tx) {
@@ -206,6 +209,26 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Keys handled by the focused terminal search field.
+pub fn search_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if zoom_key(s, ev, tx) {
+        return true;
+    }
+    match ev.key {
+        Key::Escape => {
+            s.close_search(tx);
+            true
+        }
+        Key::Enter => {
+            if let Some(term) = s.active_terminal_mut() {
+                term.send(Command::SearchStep(!ev.mods.shift));
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Keys the switcher row being renamed takes: Enter saves, Esc goes back to browsing.

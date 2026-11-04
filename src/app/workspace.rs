@@ -48,6 +48,7 @@ pub struct Notice {
 
 pub struct Workspace {
     pub logo: Option<rune::Image>,
+    pub images: Option<rune::ImageCache>,
     pub options: Options,
     pub settings: Settings,
     pub settings_path: PathBuf,
@@ -87,6 +88,8 @@ pub struct Workspace {
     pub tab_states: TabStates,
     /// Tabs whose programs finished while the user wasn't looking; they show "Done".
     pub unseen_done: HashSet<(HostId, String)>,
+    /// Tabs that rang while they weren't in front; cleared when seen.
+    pub unseen_bells: HashSet<(HostId, String)>,
     pub activity_epochs: HashMap<HostId, u64>,
     pub notifier: Option<Notifier>,
     /// Notifications headless tests would have sent.
@@ -146,6 +149,7 @@ impl Workspace {
             .collapsed();
         let mut this = Self {
             logo: None,
+            images: None,
             options,
             settings,
             settings_path: path,
@@ -179,6 +183,7 @@ impl Workspace {
             settings_section: SettingsSection::default(),
             tab_states: HashMap::new(),
             unseen_done: HashSet::new(),
+            unseen_bells: HashSet::new(),
             activity_epochs: HashMap::new(),
             notifier: None,
             outbox: Vec::new(),
@@ -240,6 +245,7 @@ impl Workspace {
         self.claimed.retain(|(host, _)| *host != id);
         self.tab_states.retain(|(host, _), _| *host != id);
         self.unseen_done.retain(|(host, _)| *host != id);
+        self.unseen_bells.retain(|(host, _)| *host != id);
         self.activity_epochs.remove(&id);
     }
 
@@ -315,14 +321,16 @@ impl Workspace {
     pub fn sync(&mut self, index: usize, tx: &mut Tx) {
         let id = self.hosts[index].id;
         let old_session = self.hosts[index].model.selected.clone();
-        let (model, notices) = {
+        let (model, notices, clipboard, bells) = {
             let mut shared = self.hosts[index]
                 .connection
                 .model
                 .lock()
                 .expect("host model");
             let notices = std::mem::take(&mut shared.notices);
-            (shared.clone(), notices)
+            let clipboard = std::mem::take(&mut shared.clipboard);
+            let bells = std::mem::take(&mut shared.bells);
+            (shared.clone(), notices, clipboard, bells)
         };
         for (block, connection) in &model.terminals {
             let key = (id, block.clone());
@@ -358,6 +366,10 @@ impl Workspace {
         self.hosts[index].model = model;
         self.track_activity(index);
         self.deliver_program_notices(index, notices);
+        for text in clipboard {
+            tx.copy(text);
+        }
+        self.track_bells(index, bells);
         if self
             .panel
             .as_ref()
@@ -579,6 +591,44 @@ impl Workspace {
     pub fn active_terminal_mut(&mut self) -> Option<&mut Term> {
         let key = self.term_key(&self.focused_block()?);
         self.terminals.get_mut(&key)
+    }
+
+    pub fn open_search(&mut self) {
+        if let Some(term) = self.active_terminal_mut() {
+            let edit = term.search.get_or_insert_with(|| TextEdit::new(""));
+            edit.focused = true;
+        }
+    }
+
+    pub fn search_input(&mut self, key: &(HostId, String)) -> &mut TextEdit {
+        if self
+            .terminals
+            .get(key)
+            .is_some_and(|term| term.search.is_some())
+        {
+            return self
+                .terminals
+                .get_mut(key)
+                .and_then(|term| term.search.as_mut())
+                .expect("checked search input");
+        }
+        &mut self.scratch
+    }
+
+    pub fn search_changed(&mut self, key: &(HostId, String)) {
+        if let Some(term) = self.terminals.get_mut(key)
+            && let Some(edit) = &term.search
+        {
+            term.send(Command::Search(edit.text.clone()));
+        }
+    }
+
+    pub fn close_search(&mut self, tx: &mut Tx) {
+        if let Some(term) = self.active_terminal_mut() {
+            term.search = None;
+            term.send(Command::Search(String::new()));
+        }
+        tx.blur();
     }
 
     pub fn send(&mut self, index: usize, command: HostCommand) {

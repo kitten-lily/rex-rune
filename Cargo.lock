@@ -1054,6 +1054,7 @@ dependencies = [
  "dirs",
  "ghostty-vt-sys",
  "int-enum",
+ "png 0.18.1",
 ]
 
 [[package]]

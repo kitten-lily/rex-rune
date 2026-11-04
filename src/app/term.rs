@@ -2,14 +2,16 @@
 //! and the cell grid, drawn on a fixed column grid.
 use super::{
     keys,
-    theme::{CARD, TERMINAL_SELECTION, mix, rgb},
+    theme::{ACCENT, CARD, TERMINAL_SELECTION, mix, rgb},
 };
 use rex_linux::{
     connection::{Command, Connection},
     links::Link,
-    terminal::{Cell, Frame},
+    terminal::{Cell, CursorShape, Frame},
 };
-use rune::{El, Mods, Span, TextStyle, el, memo, rich, text};
+use rune::{
+    El, LineCap, Mods, Path, Shape, Span, TextEdit, TextStyle, canvas, el, memo, rich, text,
+};
 use serde_json::json;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
@@ -27,6 +29,9 @@ pub struct Term {
     /// The first live frame stays hidden until the server acknowledges this grid's size.
     initial_size: InitialSize,
     pub selection: Option<(usize, usize)>,
+    selection_mode: SelectionMode,
+    selection_anchor: Option<(usize, usize)>,
+    pub search: Option<TextEdit>,
     pub preedit: String,
     pub notice: Option<String>,
     pub scroll: f32,
@@ -73,6 +78,13 @@ pub struct MouseGesture {
     pub button: &'static str,
 }
 
+#[derive(Clone, Copy, Default)]
+enum SelectionMode {
+    #[default]
+    Cell,
+    Word,
+    Line,
+}
 #[derive(Clone, Copy, PartialEq)]
 pub struct Metrics {
     pub cell: (f32, f32),
@@ -114,6 +126,9 @@ impl Term {
             rect: [0.; 4],
             initial_size: InitialSize::default(),
             selection: None,
+            selection_mode: SelectionMode::default(),
+            selection_anchor: None,
+            search: None,
             preedit: String::new(),
             notice: None,
             scroll: 0.,
@@ -276,6 +291,40 @@ impl Term {
         let (a, b) = self.selection?;
         Some(self.frame.as_ref()?.selected_text(a, b))
     }
+
+    pub fn begin_selection(&mut self, index: usize, clicks: u32) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        self.selection_mode = match clicks {
+            2 => SelectionMode::Word,
+            3.. => SelectionMode::Line,
+            _ => SelectionMode::Cell,
+        };
+        let range = match self.selection_mode {
+            SelectionMode::Cell => (index, index),
+            SelectionMode::Word => frame.word_range(index),
+            SelectionMode::Line => frame.line_range(index),
+        };
+        self.selection_anchor = Some(range);
+        self.selection = Some(range);
+    }
+
+    pub fn extend_selection(&mut self, index: usize) {
+        let (Some(frame), Some(anchor)) = (&self.frame, self.selection_anchor) else {
+            return;
+        };
+        let target = match self.selection_mode {
+            SelectionMode::Cell => (index, index),
+            SelectionMode::Word => frame.word_range(index),
+            SelectionMode::Line => frame.line_range(index),
+        };
+        self.selection = Some(if target.1 < anchor.0 {
+            (anchor.1, target.0)
+        } else {
+            (anchor.0, target.1)
+        });
+    }
 }
 
 /// How the cursor draws: owning the keyboard (filled), visible but not (hollow), or not at all.
@@ -287,14 +336,15 @@ pub enum CursorLook {
 
 fn hash_cell(cell: &Cell, h: &mut DefaultHasher) {
     cell.text.hash(h);
-    (cell.fg, cell.bg, cell.spacer_tail).hash(h);
+    (cell.fg, cell.bg, cell.underline_color, cell.spacer_tail).hash(h);
     let s = &cell.style;
     (
         s.bold,
         s.italic,
         s.faint,
         s.strikethrough,
-        s.underline != ghostty_vt::style::Underline::None,
+        s.underline,
+        s.overline,
     )
         .hash(h);
 }
@@ -305,7 +355,9 @@ struct RunStyle {
     bold: bool,
     italic: bool,
     faint: bool,
-    underline: bool,
+    underline: ghostty_vt::style::Underline,
+    underline_color: u32,
+    overline: bool,
     strike: bool,
 }
 impl RunStyle {
@@ -324,7 +376,9 @@ impl RunStyle {
             bold: s.bold,
             italic: s.italic,
             faint: s.faint,
-            underline: s.underline != ghostty_vt::style::Underline::None,
+            underline: s.underline,
+            underline_color: tint(cell.underline_color),
+            overline: s.overline,
             strike: s.strikethrough,
         }
     }
@@ -334,17 +388,7 @@ fn glyph_run(content: String, style: RunStyle, x: f32, y: f32, m: &Metrics) -> E
     let font = face(m, style.bold, style.italic);
     let color = rgb(style.fg);
     let len = content.len();
-    let mut e = if style.underline {
-        rich(
-            content,
-            vec![Span {
-                underline: Some(color),
-                ..Span::new(0, len)
-            }],
-        )
-    } else {
-        text(content)
-    };
+    let mut e = text(content);
     if style.strike {
         e = e.strike(0, len, Some(color));
     }
@@ -417,9 +461,6 @@ impl Segment {
                     span.weight = Some(700.);
                 }
                 span.italic = style.italic;
-                if style.underline {
-                    span.underline = Some(color);
-                }
                 self.spans.push(span);
                 if style.strike {
                     self.strikes.push((self.start, end, style.fg));
@@ -437,26 +478,19 @@ impl Segment {
     }
     fn finish(mut self, m: &Metrics) -> Option<El> {
         self.close_span();
-        // Trailing undecorated blanks draw nothing.
+        // Trailing blanks need no glyph; underline and overline are separate shapes.
         while self.text.ends_with(' ')
-            && self
-                .spans
-                .last()
-                .is_some_and(|s| s.underline.is_none() && (s.end as usize) == self.text.len())
             && !self.strikes.iter().any(|&(_, e, _)| e == self.text.len())
         {
             self.text.pop();
             if let Some(last) = self.spans.last_mut() {
-                last.end -= 1;
+                last.end = last.end.min(self.text.len() as u32);
                 if last.end <= last.start {
                     self.spans.pop();
                 }
             }
         }
-        if self.text.trim().is_empty()
-            && self.strikes.is_empty()
-            && !self.spans.iter().any(|s| s.underline.is_some())
-        {
+        if self.text.trim().is_empty() && self.strikes.is_empty() {
             return None;
         }
         let mut e = rich(self.text, self.spans)
@@ -471,7 +505,256 @@ impl Segment {
     }
 }
 
-fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m: &Metrics) -> El {
+fn decoration_shape(style: RunStyle, width: f32, height: f32) -> Shape {
+    use ghostty_vt::style::Underline;
+    let mut shape = Shape::new();
+    let color = rgb(style.underline_color);
+    let y = height - 2.;
+    match style.underline {
+        Underline::Single => {
+            shape = shape.line([0., y], [width, y], 1., LineCap::Butt, color);
+        }
+        Underline::Double => {
+            shape = shape
+                .line([0., y - 2.], [width, y - 2.], 1., LineCap::Butt, color)
+                .line([0., y], [width, y], 1., LineCap::Butt, color);
+        }
+        Underline::Curly => {
+            let mut path = Path::new().move_to([0., y]);
+            let mut x = 0.;
+            while x < width {
+                let end = (x + 4.).min(width);
+                path = path.quad_to([(x + end) / 2., y + 1.5], [end, y]);
+                x = end;
+                if x < width {
+                    let end = (x + 4.).min(width);
+                    path = path.quad_to([(x + end) / 2., y - 1.5], [end, y]);
+                    x = end;
+                }
+            }
+            shape = shape.stroke_path(&path, 1., LineCap::Round, color);
+        }
+        Underline::Dotted => {
+            let mut x = 0.;
+            while x < width {
+                shape = shape.line([x, y], [x + 0.1, y], 1.5, LineCap::Round, color);
+                x += 3.;
+            }
+        }
+        Underline::Dashed => {
+            let mut x = 0.;
+            while x < width {
+                shape = shape.line([x, y], [(x + 4.).min(width), y], 1., LineCap::Butt, color);
+                x += 7.;
+            }
+        }
+        _ => {}
+    }
+    if style.overline {
+        shape = shape.line([0., 1.], [width, 1.], 1., LineCap::Butt, rgb(style.fg));
+    }
+    shape
+}
+
+fn rect(shape: Shape, x: f32, y: f32, w: f32, h: f32, color: rune::Color) -> Shape {
+    shape.fill(vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]], color)
+}
+
+/// Font-independent terminal sprites for characters whose edges must meet cell boundaries.
+fn terminal_shape(glyph: char, width: f32, height: f32, color: rune::Color) -> Option<Shape> {
+    let mut shape = Shape::new();
+    if ('\u{2580}'..='\u{259f}').contains(&glyph) {
+        let eighth = height / 8.;
+        shape = match glyph {
+            '\u{2580}' => rect(shape, 0., 0., width, height / 2., color),
+            '\u{2581}'..='\u{2587}' => {
+                let n = glyph as u32 - 0x2580;
+                rect(
+                    shape,
+                    0.,
+                    height - n as f32 * eighth,
+                    width,
+                    n as f32 * eighth,
+                    color,
+                )
+            }
+            '\u{2588}' => rect(shape, 0., 0., width, height, color),
+            '\u{2589}'..='\u{258f}' => {
+                let n = 0x2590 - glyph as u32;
+                rect(shape, 0., 0., width * n as f32 / 8., height, color)
+            }
+            '\u{2590}' => rect(shape, width / 2., 0., width / 2., height, color),
+            '\u{2591}' => rect(shape, 0., 0., width, height, color.alpha(0.25)),
+            '\u{2592}' => rect(shape, 0., 0., width, height, color.alpha(0.5)),
+            '\u{2593}' => rect(shape, 0., 0., width, height, color.alpha(0.75)),
+            '\u{2594}' => rect(shape, 0., 0., width, eighth, color),
+            '\u{2595}' => rect(shape, width * 7. / 8., 0., width / 8., height, color),
+            quadrant => {
+                let bits = match quadrant {
+                    '\u{2596}' => 0b0100,
+                    '\u{2597}' => 0b1000,
+                    '\u{2598}' => 0b0001,
+                    '\u{2599}' => 0b1101,
+                    '\u{259a}' => 0b1001,
+                    '\u{259b}' => 0b0111,
+                    '\u{259c}' => 0b1011,
+                    '\u{259d}' => 0b0010,
+                    '\u{259e}' => 0b0110,
+                    '\u{259f}' => 0b1110,
+                    _ => 0,
+                };
+                let mut result = shape;
+                for (bit, x, y) in [
+                    (1, 0., 0.),
+                    (2, width / 2., 0.),
+                    (4, 0., height / 2.),
+                    (8, width / 2., height / 2.),
+                ] {
+                    if bits & bit != 0 {
+                        result = rect(result, x, y, width / 2., height / 2., color);
+                    }
+                }
+                result
+            }
+        };
+        return Some(shape);
+    }
+    if !('\u{2500}'..='\u{257f}').contains(&glyph) {
+        return None;
+    }
+    if matches!(glyph, '\u{2571}' | '\u{2572}' | '\u{2573}') {
+        if matches!(glyph, '\u{2571}' | '\u{2573}') {
+            shape = shape.line([width, 0.], [0., height], 1., LineCap::Butt, color);
+        }
+        if matches!(glyph, '\u{2572}' | '\u{2573}') {
+            shape = shape.line([0., 0.], [width, height], 1., LineCap::Butt, color);
+        }
+        return Some(shape);
+    }
+    if glyph == '═' {
+        return Some(rect(
+            rect(shape, 0., height / 2. - 2., width, 1., color),
+            0.,
+            height / 2. + 1.,
+            width,
+            1.,
+            color,
+        ));
+    }
+    if glyph == '║' {
+        return Some(rect(
+            rect(shape, width / 2. - 2., 0., 1., height, color),
+            width / 2. + 1.,
+            0.,
+            1.,
+            height,
+            color,
+        ));
+    }
+    let horizontal = "─━╌╍┄┅┈┉═";
+    let vertical = "│┃╎╏┆┇┊┋║";
+    let right_down = "┌┍┎┏╒╓╔╭";
+    let left_down = "┐┑┒┓╕╖╗╮";
+    let right_up = "└┕┖┗╘╙╚╰";
+    let left_up = "┘┙┚┛╛╜╝╯";
+    let right_up_down = "├┝┞┟┠┡┢┣╞╟╠";
+    let left_up_down = "┤┥┦┧┨┩┪┫╡╢╣";
+    let left_right_down = "┬┭┮┯┰┱┲┳╤╥╦";
+    let left_right_up = "┴┵┶┷┸┹┺┻╧╨╩";
+    let all = "┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╪╫╬";
+    let left = horizontal.contains(glyph)
+        || left_down.contains(glyph)
+        || left_up.contains(glyph)
+        || left_up_down.contains(glyph)
+        || left_right_down.contains(glyph)
+        || left_right_up.contains(glyph)
+        || all.contains(glyph);
+    let right = horizontal.contains(glyph)
+        || right_down.contains(glyph)
+        || right_up.contains(glyph)
+        || right_up_down.contains(glyph)
+        || left_right_down.contains(glyph)
+        || left_right_up.contains(glyph)
+        || all.contains(glyph);
+    let up = vertical.contains(glyph)
+        || right_up.contains(glyph)
+        || left_up.contains(glyph)
+        || right_up_down.contains(glyph)
+        || left_up_down.contains(glyph)
+        || left_right_up.contains(glyph)
+        || all.contains(glyph);
+    let down = vertical.contains(glyph)
+        || right_down.contains(glyph)
+        || left_down.contains(glyph)
+        || right_up_down.contains(glyph)
+        || left_up_down.contains(glyph)
+        || left_right_down.contains(glyph)
+        || all.contains(glyph);
+    if !(left || right || up || down) {
+        return None;
+    }
+    let stroke = if "━┃┅┇┉┋┏┓┗┛┣┫┳┻╋".contains(glyph) {
+        2.
+    } else {
+        1.
+    };
+    let center = [width / 2., height / 2.];
+    let double = "═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬".contains(glyph);
+    for (draw, end) in [
+        (left, [0., center[1]]),
+        (right, [width, center[1]]),
+        (up, [center[0], 0.]),
+        (down, [center[0], height]),
+    ] {
+        if draw && double {
+            if end[1] == center[1] {
+                shape = shape
+                    .line(
+                        [center[0], center[1] - 1.5],
+                        [end[0], end[1] - 1.5],
+                        1.,
+                        LineCap::Butt,
+                        color,
+                    )
+                    .line(
+                        [center[0], center[1] + 1.5],
+                        [end[0], end[1] + 1.5],
+                        1.,
+                        LineCap::Butt,
+                        color,
+                    );
+            } else {
+                shape = shape
+                    .line(
+                        [center[0] - 1.5, center[1]],
+                        [end[0] - 1.5, end[1]],
+                        1.,
+                        LineCap::Butt,
+                        color,
+                    )
+                    .line(
+                        [center[0] + 1.5, center[1]],
+                        [end[0] + 1.5, end[1]],
+                        1.,
+                        LineCap::Butt,
+                        color,
+                    );
+            }
+        } else if draw {
+            shape = shape.line(center, end, stroke, LineCap::Butt, color);
+        }
+    }
+    Some(shape)
+}
+
+fn row_el(
+    cells: &[Cell],
+    y: f32,
+    frame_bg: u32,
+    sel: Option<(usize, usize)>,
+    search: &[(usize, usize, bool)],
+    m: &Metrics,
+) -> El {
     let (cw, ch) = m.cell;
     // Memoized rows are flattened on their own, so each says again that it never animates:
     // otherwise a glyph run that leaves a changed row fades out over its replacement.
@@ -492,6 +775,13 @@ fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m:
             );
         }
         start = end;
+    }
+    for &(a, b, selected) in search {
+        row = row.child(
+            el().absolute(a as f32 * cw, 0.)
+                .size((b + 1 - a) as f32 * cw, ch)
+                .fill(rgb(ACCENT).alpha(if selected { 0.55 } else { 0.25 })),
+        );
     }
     if let Some((a, b)) = sel {
         row = row.child(
@@ -514,9 +804,28 @@ fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m:
         let mut chars = text.chars();
         let single = chars.next().filter(|_| chars.next().is_none());
         let wide = cells.get(col + 1).is_some_and(|c| c.spacer_tail);
+        if let Some(glyph) = single
+            && let Some(shape) =
+                terminal_shape(glyph, if wide { cw * 2. } else { cw }, ch, rgb(style.fg))
+        {
+            if let Some(done) = segment.take().and_then(|s| s.finish(m)) {
+                row = row.child(done);
+            }
+            row = row.child(
+                canvas(shape)
+                    .absolute(col as f32 * cw, 0.)
+                    .size(if wide { cw * 2. } else { cw }, ch),
+            );
+            continue;
+        }
         let fits = !wide && single.is_some_and(|c| fits_cell(c, style.bold, style.italic, m));
         if fits {
-            if text == " " && segment.is_none() && !style.underline && !style.strike {
+            if text == " "
+                && segment.is_none()
+                && style.underline == ghostty_vt::style::Underline::None
+                && !style.overline
+                && !style.strike
+            {
                 continue;
             }
             segment
@@ -532,6 +841,33 @@ fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m:
     if let Some(done) = segment.and_then(|s| s.finish(m)) {
         row = row.child(done);
     }
+    // Terminal decorations use their requested style and colour rather than the font's
+    // single-underline implementation.
+    let mut start = 0;
+    while start < cells.len() {
+        let style = RunStyle::of(&cells[start], frame_bg);
+        let mut end = start + 1;
+        while end < cells.len() {
+            let next = RunStyle::of(&cells[end], frame_bg);
+            if next.underline != style.underline
+                || next.underline_color != style.underline_color
+                || next.overline != style.overline
+                || next.fg != style.fg
+            {
+                break;
+            }
+            end += 1;
+        }
+        let shape = decoration_shape(style, (end - start) as f32 * cw, ch);
+        if !shape.is_empty() {
+            row = row.child(
+                canvas(shape)
+                    .absolute(start as f32 * cw, 0.)
+                    .size((end - start) as f32 * cw, ch),
+            );
+        }
+        start = end;
+    }
     row
 }
 
@@ -541,7 +877,13 @@ pub struct GridLook {
 }
 
 /// The visible rows of `term`'s frame, each memoized by its content.
-pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
+pub fn grid(
+    key: &str,
+    term: &Term,
+    m: &Metrics,
+    images: Option<&rune::ImageCache>,
+    look: GridLook,
+) -> El {
     let Some(frame) = term.display_frame() else {
         return el().w_full().h_full();
     };
@@ -553,22 +895,68 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
     // A size another client owns can be wider or taller than this grid: crop it here, not at
     // the card's edge, so it never covers the padding or the card's border.
     let mut grid = el().w_full().h_full().instant_changes().clip_rounded(0.);
+    let add_images = |mut grid: El, above: bool| {
+        let Some(cache) = images else { return grid };
+        for placement in frame.images.iter().filter(|image| (image.z >= 0) == above) {
+            let image = cache.rgba(
+                placement.source_size.0,
+                placement.source_size.1,
+                placement.rgba.clone(),
+            );
+            let cell_px = (
+                placement.cell_size_px.0.max(1.),
+                placement.cell_size_px.1.max(1.),
+            );
+            let x = placement.col as f32 * cw + placement.x_offset_px as f32 / cell_px.0 * cw;
+            let y = (placement.row as f32 - start as f32) * ch
+                + placement.y_offset_px as f32 / cell_px.1 * ch;
+            let width = placement.pixel_size.0 as f32 / cell_px.0 * cw;
+            let height = placement.pixel_size.1 as f32 / cell_px.1 * ch;
+            grid = grid.child(
+                el().key(format!("{key}/image/{}-{}", placement.key, placement.z))
+                    .absolute(x, y)
+                    .size(width, height)
+                    .pixels(image.pixels()),
+            );
+        }
+        grid
+    };
+    grid = add_images(grid, false);
     for (y, cells) in frame.cells.iter().enumerate().skip(start).take(visible) {
         let sel = selection.and_then(|(a, b)| {
             let (row0, row1) = (y * cols, y * cols + cols - 1);
             (a <= row1 && b >= row0).then(|| (a.max(row0) - row0, b.min(row1) - row0))
         });
+        let search: Vec<_> = frame
+            .search_matches
+            .iter()
+            .filter_map(|found| {
+                let (y0, y1) = (found.start.1 as usize, found.end.1 as usize);
+                (y0 <= y && y <= y1).then(|| {
+                    (
+                        if y == y0 { found.start.0 as usize } else { 0 },
+                        if y == y1 {
+                            found.end.0 as usize
+                        } else {
+                            cols - 1
+                        },
+                        frame.search_selected == Some(*found),
+                    )
+                })
+            })
+            .collect();
         let mut h = DefaultHasher::new();
         for cell in cells {
             hash_cell(cell, &mut h);
         }
-        (sel, frame.bg, cw.to_bits(), ch.to_bits(), m.style).hash(&mut h);
+        (sel, &search, frame.bg, cw.to_bits(), ch.to_bits(), m.style).hash(&mut h);
         let top = (y - start) as f32 * ch;
         let id = format!("{key}/r{}", y - start);
         grid = grid.child(memo(id, h.finish(), || {
-            row_el(cells, top, frame.bg, sel, m)
+            row_el(cells, top, frame.bg, sel, &search, m)
         }));
     }
+    grid = add_images(grid, true);
     // The link Ctrl+click would open, underlined in its own colour, row by row.
     if let Some((_, link)) = &term.link {
         let color = frame
@@ -605,21 +993,49 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         let (px, py) = (x as f32 * cw, (y as usize - start) as f32 * ch);
         let cell = frame.cells.get(y as usize).and_then(|r| r.get(x as usize));
         let color = rgb(frame.cursor_color);
-        let mut cursor = el()
-            .key(format!("{key}/cursor"))
-            .absolute(px, py)
-            .size(cw, ch);
-        cursor = match cursor_look {
-            CursorLook::Block => cursor.fill(color),
-            CursorLook::Hollow => cursor.border(1., color),
+        let requested = if cursor_look == CursorLook::Hollow {
+            CursorShape::Hollow
+        } else {
+            frame.cursor_shape
         };
-        if look.ime {
-            cursor = cursor.ime_cursor();
-        }
+        // Blink state is decoded, but terminal content remains static by product design.
+        let (cursor, filled) = match requested {
+            CursorShape::Bar => (
+                el().key(format!("{key}/cursor"))
+                    .absolute(px, py)
+                    .size(2., ch)
+                    .fill(color),
+                false,
+            ),
+            CursorShape::Underline => (
+                el().key(format!("{key}/cursor"))
+                    .absolute(px, py + ch - 2.)
+                    .size(cw, 2.)
+                    .fill(color),
+                false,
+            ),
+            CursorShape::Hollow => (
+                el().key(format!("{key}/cursor"))
+                    .absolute(px, py)
+                    .size(cw, ch)
+                    .border(1., color),
+                false,
+            ),
+            CursorShape::Block => (
+                el().key(format!("{key}/cursor"))
+                    .absolute(px, py)
+                    .size(cw, ch)
+                    .fill(color),
+                true,
+            ),
+        };
+        let cursor = if look.ime {
+            cursor.ime_cursor()
+        } else {
+            cursor
+        };
         grid = grid.child(cursor);
-        if cursor_look == CursorLook::Block
-            && let Some(cell) = cell.filter(|c| !c.text.is_empty())
-        {
+        if filled && let Some(cell) = cell.filter(|c| !c.text.is_empty()) {
             let style = RunStyle {
                 fg: CARD,
                 ..RunStyle::of(cell, frame.bg)
@@ -659,7 +1075,7 @@ mod tests {
         let m = metrics(15.);
         el().w_full()
             .h_full()
-            .child(row_el(&s.cells, 0., 0, None, &m))
+            .child(row_el(&s.cells, 0., 0, None, &[], &m))
     }
 
     #[test]

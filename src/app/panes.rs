@@ -12,6 +12,7 @@ use super::{
 use rex_linux::{connection::Command, layout};
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, el, row, text};
+use rune_kit::TextInput;
 
 /// The area cards are laid out in, in the pane area's own points.
 fn inner(s: &Workspace) -> [f32; 4] {
@@ -328,12 +329,8 @@ fn card(
                     }
                     let i = t.index(d.x, d.y, cell);
                     match d.phase {
-                        Phase::Down => t.selection = Some((i, i)),
-                        Phase::Move => {
-                            if let Some((a, _)) = t.selection {
-                                t.selection = Some((a, i));
-                            }
-                        }
+                        Phase::Down => t.begin_selection(i, d.clicks),
+                        Phase::Move => t.extend_selection(i),
                         Phase::Up => {}
                     }
                 })
@@ -416,7 +413,56 @@ fn card(
                     }
                     true
                 })
-                .child(term::grid(&format!("g{block}"), t, m, look));
+                .child(term::grid(
+                    &format!("g{block}"),
+                    t,
+                    m,
+                    s.images.as_ref(),
+                    look,
+                ));
+            let mut grid = grid;
+            if let Some(edit) = &t.search {
+                let (edit_key, change_key) = (key.clone(), key.clone());
+                let status = t.frame.as_ref().map_or_else(
+                    || "0/0".into(),
+                    |frame| match frame.search_index {
+                        Some(index) => format!("{}/{}", index + 1, frame.search_total),
+                        None => format!("0/{}", frame.search_total),
+                    },
+                );
+                grid = grid.child(
+                    row()
+                        .key(format!("search:{block}"))
+                        .w(260.)
+                        .h(34.)
+                        .px(2.)
+                        .center_y()
+                        .radius(8.)
+                        .continuous_corners()
+                        .fill(rgb(CARD))
+                        .border(1., white(0.12))
+                        .box_shadow(shadow(0., 4., 16., black(0.45)))
+                        .pin(None, Some(6.), Some(6.), None)
+                        .child(
+                            TextInput::new(edit)
+                                .placeholder("Search scrollback")
+                                .leading_icon(&SEARCH)
+                                .leading_icon_size(14.)
+                                .text_style(ui(13.))
+                                .height(32.)
+                                .plain()
+                                .trailing(text(status).font(medium(10.5)).color(rgb(MUTED)))
+                                .on_edit(move |s: &mut Workspace| s.search_input(&edit_key))
+                                .on_change(move |s: &mut Workspace, _: &mut Tx| {
+                                    s.search_changed(&change_key)
+                                })
+                                .on_key(super::input::search_key)
+                                .width(None)
+                                .build(kit())
+                                .w_full(),
+                        ),
+                );
+            }
             c.child(
                 col()
                     .grow(1.)

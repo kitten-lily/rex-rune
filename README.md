@@ -16,11 +16,12 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 - Unix-socket and HTTPS/WSS endpoints (for example a Tailscale-exposed Rex server).
 - A single toolbar with session identity, tabs, commands and the window's own controls. A tab with one pane draws it edge to edge; splits are rounded pane cards. Tabs close from their right-click menu, a middle-click or `Ctrl Shift W`, always behind a confirmation. Host-grouped session navigation opens on demand, with an optional sidebar (Ctrl Shift B) that starts collapsed on every launch.
 - Searchable session switcher (`Ctrl K`) and command palette (`Ctrl Shift P`).
-- Snapshot restore, live output, physical-layout key forwarding with dead-key composition, bracketed paste, text selection and copy, local scrollback, and mouse/wheel reporting for terminal programs. Right-click always opens the pane menu; Shift+right-click sends the click to a program that tracks the mouse, and Shift with the left button selects text locally.
+- Snapshot restore, live output, physical-layout key forwarding with dead-key composition, bracketed paste, local scrollback, and mouse/wheel reporting for terminal programs. Terminal search opens with `Ctrl Shift F`; Enter and Shift+Enter move between matches. Drag selects by cell, double-click by word and triple-click by wrapped line. OSC 52 writes the desktop clipboard. Right-click always opens the pane menu; Shift+right-click sends the click to a program that tracks the mouse, and Shift with the left button selects text locally.
+- Ghostty terminal rendering includes program-selected cursor shapes, underline styles and colours, overlines, font-independent box/block glyphs, and inline Kitty graphics. Cursor blink requests remain visually steady: terminal content does not animate.
 - Links: Ctrl+click opens an `http`, `https`, `ftp` or `mailto` link with `xdg-open`, whether it is an OSC 8 hyperlink or a URL in the text (including one that soft-wraps across rows). Holding Ctrl over a link underlines it and shows a hand pointer. Ctrl+click works over programs that track the mouse too; clicks elsewhere still go to the program. Other schemes, `file://` among them, are never opened, since output may come from a remote host.
 - The terminal's dark background is declared to the server for every pane this client streams or creates, so programs that ask for the background colour (OSC 11) get the colour drawn behind them. Fish uses it to pick the light or dark variant of a colour-theme-aware theme.
 - Reconnect handling: a transport failure pauses input on affected panes (input is never replayed) while parsed output survives reconnects and session changes.
-- Program activity on tabs. Programs that report their status with OSC 7501 (coding agents, for example) mark their tab with a word when they need you ("Needs approval", "Question", "Needs sign-in", "Needs input") or fail ("Error"), and with "Done" when they finish in a tab you weren't looking at. Each tab shows its focused pane's program icon (Claude Code, Codex, OpenCode, Pi, Vim, Git, Cargo, SSH; otherwise `>_`), and a tab you haven't renamed takes the title its program sets (OSC 0 or 2), as a terminal window would. Needs a server with API revision 8.
+- Program activity on tabs. Programs that report their status with OSC 7501 (coding agents, for example) mark their tab with a word when they need you ("Needs approval", "Question", "Needs sign-in", "Needs input") or fail ("Error"), and with "Done" when they finish in a tab you weren't looking at. OSC 9;4 progress shows its percentage, working, paused or error state; a bell in a background tab latches "Bell" until that tab is seen. Each tab shows its focused pane's program icon (Claude Code, Codex, OpenCode, Pi, Vim, Git, Cargo, SSH; otherwise `>_`), and a tab you haven't renamed takes the title its program sets (OSC 0 or 2), as a terminal window would. Needs a server with API revision 8.
 - Desktop notifications through the freedesktop notification service when a tab you aren't looking at needs you, fails or finishes, and for notifications programs send themselves (OSC 9 and OSC 777). Clicking one raises the window and shows that tab. Each kind can be turned off in Settings → Notifications.
 - Agent integrations (Settings → Integrations): installs, updates or removes Rex's skill and session hooks for Claude Code, Codex, OpenCode, Pi and OMP on this machine with the local `rex skill` command. OMP reads the shared `~/.agents/skills/rex` skill used by Codex, OpenCode and Pi; it does not have a Rex session hook. Every change is previewed with a dry run first, including every agent affected by that shared skill. "Let agents name sessions" is passed to every setup explicitly.
 - Interface zoom (70–150%) and a configurable terminal font and size.
@@ -131,6 +132,7 @@ A host's default shell (empty means the server user's login shell) is used for e
 | --- | --- |
 | Ctrl K | Search sessions across saved hosts |
 | Ctrl Shift P | Search commands, sessions and current-session tabs |
+| Ctrl Shift F | Search the focused terminal's screen and scrollback |
 | Ctrl Shift N / T | New session on the active host / new tab |
 | Ctrl Shift D / Ctrl Alt D | Split right / down |
 | Ctrl PageUp / PageDown | Previous / next tab |
@@ -203,7 +205,7 @@ Each patch is meant to be dropped once the corresponding upstream release has eq
 
 Still needing hands-on validation: physical Wayland pointer gestures (move, edge resize, double-click, window menu), minimize on Wayland, multi-seat Wayland desktops, input methods beyond dead-key composition, and sustained daily use. On X11, winit has no window-menu request, so right-clicking the drag region does nothing there.
 
-Not implemented: terminal-content search, complete Kitty graphics, accessibility (AT-SPI) and distribution packages.
+Not implemented: accessibility (AT-SPI) and distribution packages.
 
 ## Third-party software and assets
 

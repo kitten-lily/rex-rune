@@ -3,11 +3,16 @@ use anyhow::{Result, ensure};
 use ghostty_vt::{
     RenderState, Terminal,
     render::{CellIterator, RowIterator},
+    search::Search,
     style::RgbColor,
-    terminal::{Point, PointCoordinate},
+    terminal::{Point, PointCoordinate, PointSpace},
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 /// The default background Rex Linux draws behind terminal output.
 pub const DEFAULT_BACKGROUND: u32 = 0x001528;
@@ -91,9 +96,10 @@ impl TerminalStream {
         self.received += bytes.len() as u64;
         let tail;
         let bytes = if self.terminal.is_none() {
-            let Some((terminal, rest)) = self.snapshot.push(bytes)? else {
+            let Some((mut terminal, rest)) = self.snapshot.push(bytes)? else {
                 return Ok(());
             };
+            terminal.set_kitty_image_storage_limit(64 * 1024 * 1024)?;
             self.terminal = Some(terminal);
             self.snapshot_count += 1;
             tail = rest;
@@ -179,12 +185,41 @@ pub fn rgb(color: RgbColor) -> u32 {
     (color.r as u32) << 16 | (color.g as u32) << 8 | color.b as u32
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum CursorShape {
+    Bar,
+    Block,
+    Underline,
+    Hollow,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct SearchMatch {
+    pub start: (u16, u32),
+    pub end: (u16, u32),
+}
+
+#[derive(Clone, Debug)]
+pub struct KittyPlacement {
+    pub key: u64,
+    pub rgba: Arc<[u8]>,
+    pub source_size: (u32, u32),
+    pub col: i32,
+    pub row: i32,
+    pub x_offset_px: u32,
+    pub y_offset_px: u32,
+    pub pixel_size: (u32, u32),
+    pub cell_size_px: (f32, f32),
+    pub z: i32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Cell {
     pub text: String,
     pub spacer_tail: bool,
     pub fg: u32,
     pub bg: u32,
+    pub underline_color: u32,
     pub style: ghostty_vt::style::Style,
     /// The cell's OSC 8 hyperlink target.
     pub link: Option<Arc<str>>,
@@ -198,10 +233,17 @@ pub struct Frame {
     pub bg: u32,
     pub cursor: Option<(u16, u16)>,
     pub cursor_color: u32,
+    pub cursor_shape: CursorShape,
+    pub cursor_blinking: bool,
     /// The program asked for mouse reports (DEC 9, 1000, 1002 or 1003).
     pub mouse_tracking: bool,
     /// Per row: the row soft-wraps into the next one.
     pub wrapped: Vec<bool>,
+    pub search_matches: Vec<SearchMatch>,
+    pub search_selected: Option<SearchMatch>,
+    pub search_index: Option<usize>,
+    pub search_total: usize,
+    pub images: Vec<KittyPlacement>,
 }
 
 impl Frame {
@@ -235,11 +277,59 @@ impl Frame {
         }
         lines.join("\n")
     }
+
+    pub fn word_range(&self, index: usize) -> (usize, usize) {
+        let cols = self.cols as usize;
+        let row = index / cols;
+        let cells = match self.cells.get(row) {
+            Some(cells) => cells,
+            None => return (index, index),
+        };
+        let mut col = (index % cols).min(cells.len().saturating_sub(1));
+        if cells.get(col).is_some_and(|cell| cell.spacer_tail) && col > 0 {
+            col -= 1;
+        }
+        let class = |cell: &Cell| {
+            let ch = cell.text.chars().next().unwrap_or(' ');
+            if ch.is_whitespace() {
+                0
+            } else if ch.is_alphanumeric() || ch == '_' {
+                1
+            } else {
+                2
+            }
+        };
+        let wanted = class(&cells[col]);
+        let mut start = col;
+        while start > 0 && class(&cells[start - 1]) == wanted {
+            start -= 1;
+        }
+        let mut end = col;
+        while end + 1 < cells.len() && class(&cells[end + 1]) == wanted {
+            end += 1;
+        }
+        (row * cols + start, row * cols + end)
+    }
+
+    pub fn line_range(&self, index: usize) -> (usize, usize) {
+        let cols = self.cols as usize;
+        let mut first = (index / cols).min(self.cells.len().saturating_sub(1));
+        while first > 0 && self.wrapped.get(first - 1).copied().unwrap_or(false) {
+            first -= 1;
+        }
+        let mut last = index / cols;
+        while last + 1 < self.cells.len() && self.wrapped.get(last).copied().unwrap_or(false) {
+            last += 1;
+        }
+        (first * cols, (last + 1) * cols - 1)
+    }
 }
 pub struct Renderer {
     state: RenderState,
     rows: RowIterator,
     cells: CellIterator,
+    placements: ghostty_vt::kitty::graphics::PlacementIterator,
+    image_cache: HashMap<ImageKey, Arc<[u8]>>,
 }
 impl Renderer {
     pub fn new() -> Result<Self> {
@@ -247,9 +337,19 @@ impl Renderer {
             state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
+            placements: ghostty_vt::kitty::graphics::PlacementIterator::new()?,
+            image_cache: HashMap::new(),
         })
     }
     pub fn frame(&mut self, terminal: &Terminal) -> Result<Frame> {
+        self.frame_with_search(terminal, None)
+    }
+
+    pub fn frame_with_search(
+        &mut self,
+        terminal: &Terminal,
+        search: Option<&Search>,
+    ) -> Result<Frame> {
         let snapshot = self.state.update(terminal)?;
         let colors = snapshot.colors()?;
         let fg = rgb(colors.foreground);
@@ -266,8 +366,20 @@ impl Renderer {
                 None
             },
             cursor_color: snapshot.cursor_color()?.map(rgb).unwrap_or(fg),
+            cursor_shape: match snapshot.cursor_visual_style()? {
+                ghostty_vt::render::CursorVisualStyle::Bar => CursorShape::Bar,
+                ghostty_vt::render::CursorVisualStyle::Underline => CursorShape::Underline,
+                ghostty_vt::render::CursorVisualStyle::BlockHollow => CursorShape::Hollow,
+                _ => CursorShape::Block,
+            },
+            cursor_blinking: snapshot.cursor_blinking()?,
             mouse_tracking: terminal.is_mouse_tracking()?,
             wrapped: Vec::new(),
+            search_matches: Vec::new(),
+            search_selected: None,
+            search_index: None,
+            search_total: 0,
+            images: Vec::new(),
         };
         let mut uri = Vec::new();
         let mut rows = self.rows.update(&snapshot)?;
@@ -303,11 +415,19 @@ impl Renderer {
                 } else {
                     None
                 };
+                let underline_color = match style.underline_color {
+                    ghostty_vt::style::StyleColor::Rgb(color) => rgb(color),
+                    ghostty_vt::style::StyleColor::Palette(index) => {
+                        rgb(colors.palette[index.0 as usize])
+                    }
+                    ghostty_vt::style::StyleColor::None => fg,
+                };
                 line.push(Cell {
                     text,
                     spacer_tail: raw.wide()? == ghostty_vt::screen::CellWide::SpacerTail,
                     fg,
                     bg,
+                    underline_color,
                     style,
                     link,
                 });
@@ -315,9 +435,148 @@ impl Renderer {
             frame.cells.push(line);
             y += 1;
         }
+        if let Some(search) = search {
+            frame.search_total = search.total_matches()?;
+            frame.search_index = search.selected_index()?;
+            for selection in search.viewport_matches(terminal)? {
+                if let Some(found) = search_match(terminal, &selection)? {
+                    frame.search_matches.push(found);
+                }
+            }
+            frame.search_selected = search
+                .selected_match(terminal)?
+                .as_ref()
+                .map(|selection| search_match(terminal, selection))
+                .transpose()?
+                .flatten();
+        }
+        render_kitty(
+            terminal,
+            &mut self.placements,
+            &mut self.image_cache,
+            &mut frame,
+        )?;
         snapshot.clean()?;
         Ok(frame)
     }
+}
+
+fn search_match(
+    terminal: &Terminal,
+    selection: &ghostty_vt::selection::Selection<'_>,
+) -> Result<Option<SearchMatch>> {
+    let Some(start) = terminal.point_from_grid_ref(&selection.start(), PointSpace::Viewport)?
+    else {
+        return Ok(None);
+    };
+    let Some(end) = terminal.point_from_grid_ref(&selection.end(), PointSpace::Viewport)? else {
+        return Ok(None);
+    };
+    Ok(Some(SearchMatch {
+        start: (start.x, start.y),
+        end: (end.x, end.y),
+    }))
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct ImageKey {
+    generation: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+fn render_kitty(
+    terminal: &Terminal,
+    placements: &mut ghostty_vt::kitty::graphics::PlacementIterator,
+    cache: &mut HashMap<ImageKey, Arc<[u8]>>,
+    frame: &mut Frame,
+) -> Result<()> {
+    use ghostty_vt::kitty::graphics::ImageFormat;
+    let graphics = terminal.kitty_graphics()?;
+    let mut used = HashSet::new();
+    let mut iteration = placements.update(&graphics)?;
+    while iteration.next().is_some() {
+        let Some(image) = graphics.image(iteration.image_id()?) else {
+            continue;
+        };
+        let info = iteration.placement_render_info(&image, terminal)?;
+        if !info.viewport_visible || info.source_width == 0 || info.source_height == 0 {
+            continue;
+        }
+        let key = ImageKey {
+            generation: image.generation()?,
+            x: info.source_x,
+            y: info.source_y,
+            width: info.source_width,
+            height: info.source_height,
+        };
+        used.insert(key);
+        let rgba = if let Some(rgba) = cache.get(&key) {
+            rgba.clone()
+        } else {
+            let image_width = image.width()?;
+            let image_height = image.height()?;
+            let bytes = image.data()?;
+            let channels = match image.format()? {
+                ImageFormat::Rgb => 3,
+                ImageFormat::Rgba | ImageFormat::Png => 4,
+                ImageFormat::GrayAlpha => 2,
+                ImageFormat::Gray => 1,
+                _ => continue,
+            };
+            let Some(expected) = (image_width as usize)
+                .checked_mul(image_height as usize)
+                .and_then(|pixels| pixels.checked_mul(channels))
+            else {
+                continue;
+            };
+            if bytes.len() < expected
+                || info.source_x.saturating_add(info.source_width) > image_width
+                || info.source_y.saturating_add(info.source_height) > image_height
+            {
+                continue;
+            }
+            let mut out =
+                Vec::with_capacity(info.source_width as usize * info.source_height as usize * 4);
+            for y in info.source_y..info.source_y + info.source_height {
+                for x in info.source_x..info.source_x + info.source_width {
+                    let at = (y as usize * image_width as usize + x as usize) * channels;
+                    match channels {
+                        4 => out.extend_from_slice(&bytes[at..at + 4]),
+                        3 => out.extend_from_slice(&[bytes[at], bytes[at + 1], bytes[at + 2], 255]),
+                        2 => {
+                            out.extend_from_slice(&[bytes[at], bytes[at], bytes[at], bytes[at + 1]])
+                        }
+                        _ => out.extend_from_slice(&[bytes[at], bytes[at], bytes[at], 255]),
+                    }
+                }
+            }
+            let rgba: Arc<[u8]> = out.into();
+            cache.insert(key, rgba.clone());
+            rgba
+        };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        frame.images.push(KittyPlacement {
+            key: hasher.finish(),
+            rgba,
+            source_size: (info.source_width, info.source_height),
+            col: info.viewport_col,
+            row: info.viewport_row,
+            x_offset_px: iteration.x_offset()?,
+            y_offset_px: iteration.y_offset()?,
+            pixel_size: (info.pixel_width, info.pixel_height),
+            cell_size_px: (
+                terminal.width_px()? as f32 / frame.cols.max(1) as f32,
+                terminal.height_px()? as f32 / frame.rows.max(1) as f32,
+            ),
+            z: iteration.z()?,
+        });
+    }
+    cache.retain(|key, _| used.contains(key));
+    Ok(())
 }
 
 /// Reads the OSC 8 target of the viewport cell `at` into `uri`; false if it has none.
@@ -382,6 +641,57 @@ mod tests {
     }
 
     #[test]
+    fn word_line_cursor_and_decoration_state_reach_the_frame() {
+        let mut terminal = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 12,
+            rows: 4,
+            ..Default::default()
+        })
+        .unwrap();
+        terminal.vt_write(b"alpha beta\r\nabcdefghijklmnop\r\n");
+        terminal.vt_write(b"\x1b[5 q\x1b[4:3;58:2::1:2:3mX");
+        let frame = Renderer::new().unwrap().frame(&terminal).unwrap();
+        assert_eq!(frame.word_range(7), (6, 9));
+        assert_eq!(frame.line_range(13), (12, 35));
+        assert_eq!(frame.cursor_shape, CursorShape::Bar);
+        assert!(frame.cursor_blinking);
+        let decorated = frame
+            .cells
+            .iter()
+            .flatten()
+            .find(|cell| cell.text == "X")
+            .expect("decorated cell");
+        assert_eq!(
+            decorated.style.underline,
+            ghostty_vt::style::Underline::Curly
+        );
+        assert_eq!(decorated.underline_color, 0x010203);
+    }
+
+    #[test]
+    fn search_selects_and_exposes_viewport_matches() {
+        let mut terminal = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 20,
+            rows: 3,
+            max_scrollback: 1 << 20,
+        })
+        .unwrap();
+        terminal.vt_write(b"needle one\r\nother\r\nneedle two\r\n");
+        let mut search = Search::new(&terminal).unwrap();
+        search.set_needle(&terminal, Some("needle")).unwrap();
+        search.run(&terminal).unwrap();
+        assert!(search.select_next(&terminal).unwrap());
+        let frame = Renderer::new()
+            .unwrap()
+            .frame_with_search(&terminal, Some(&search))
+            .unwrap();
+        assert_eq!(frame.search_total, 2);
+        assert_eq!(frame.search_index, Some(0));
+        assert!(frame.search_selected.is_some());
+        assert!(!frame.search_matches.is_empty());
+    }
+
+    #[test]
     fn corrupted_snapshot_never_installs_a_terminal() {
         let terminal = Terminal::new(ghostty_vt::TerminalOptions::default()).unwrap();
         let mut bytes = ghostty_vt::snapshot::encode(&terminal).unwrap().to_vec();
@@ -399,7 +709,11 @@ mod tests {
         })
         .unwrap();
         terminal.set_kitty_image_storage_limit(1 << 20).unwrap();
+        terminal.resize(10, 3, 9, 21).unwrap();
         terminal.vt_write(b"\x1b_Ga=T,f=24,s=1,v=1;CQkJ\x1b\\\r\n");
+        let frame = Renderer::new().unwrap().frame(&terminal).unwrap();
+        assert_eq!(frame.images.len(), 1);
+        assert_eq!(frame.images[0].rgba.as_ref(), &[9, 9, 9, 255]);
         for line in 0..2000 {
             terminal.vt_write(format!("line {line}\r\n").as_bytes());
         }

@@ -7,7 +7,7 @@ Rex Linux draws calm, dark chrome around terminals that the server owns. The tok
 - **The terminal is the content.** Chrome frames it and stays out of the way. Terminal text, colours, cursor and split geometry come from the server and are never recoloured. The one exception: the server's default terminal background is drawn in the navy `CARD` colour, the same as the ground, so a single pane and the toolbar read as one surface; explicit colours are preserved.
 - **Chrome moves, content doesn't.** Popups spring open from their anchor and highlights and the sidebar slide; terminal content, pane geometry and cell rendering never animate.
 - **One working row.** Session identity, tabs, commands and the window's own controls share a single toolbar. Navigation (hosts → sessions) opens on demand, with an optional sidebar.
-- **Quiet when healthy.** A connected host, a live pane and the active tab carry no status dots or "Connected" labels; names and host icons are enough. Words appear only for trouble ("Offline", "Reconnecting", "input paused"), in `WARNING`, next to the action that fixes it. The one exception is program activity: a tab whose programs finished while the user was away says "Done" in `ACCENT` until it is seen.
+- **Quiet when healthy.** A connected host, a live pane and an idle active tab carry no status dots or "Connected" labels; names and host icons are enough. Words appear for trouble ("Offline", "Reconnecting", "input paused"), unseen completion or bell, and terminal-reported progress.
 - **Distinct states.** The current session, the keyboard-selected row, a captured pane target and live terminal focus each have a different cue. Keyboard selection is never fill alone.
 - **Name the target.** Creation actions name their host; destructive confirmations name the pane, tab and host and default to **Keep running**; closing the app leaves server programs running.
 
@@ -53,7 +53,7 @@ Chrome uses Inter (bundled with the kit) in 10–13 pt steps, weights about 450 
 - Right-click captures the specific pane under the pointer; its menu names tab and pane and keeps a target outline through rename and close. A target that disappears dismisses the menu with a notice instead of retargeting.
 - Size ownership is automatic: the active window owns terminal size and typing claims it. A non-owner or reconnecting terminal shows an exception strip with **Take control** or **Retry**, and never sends a resize.
 - A transport failure marks affected panes input-paused, keeps their output, and never queues or replays input. Notices are toasts: errors are sticky, information leaves after about 6 seconds, and at most three notices are retained.
-- Focus cues: a filled block cursor in the focused terminal, a hollow outline cursor in others, and an accent outline on the focused pane when no panel is open.
+- Focus cues: the focused terminal uses the program-requested block, bar, underline or hollow cursor; other panes use a hollow cursor. The focused pane has an accent outline when no panel is open. Cursor blink requests stay visually steady with the rest of terminal content.
 - Links open only on Ctrl+click (press and release on the same link), never on a plain click, so selecting text and clicking into programs stay unchanged. Holding Ctrl over a link underlines it in its own text colour and shows the hand pointer.
 
 ## Do and don't

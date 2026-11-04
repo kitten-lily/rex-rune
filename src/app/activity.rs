@@ -8,7 +8,7 @@ use super::{
 };
 use rex_linux::connection::{
     DEFAULT_TAB_LABEL, HostModel,
-    activity::{BlockedKind, ProgramState},
+    activity::{BlockedKind, ProgramState, TerminalProgress},
 };
 use rexrs::api::session;
 use rune::Tx;
@@ -26,6 +26,8 @@ pub struct TabActivity {
     pub source: Option<String>,
     /// The focused block's program: the one reporting, else the foreground process.
     pub program: Option<String>,
+    /// OSC 9;4 progress from a terminal in the tab.
+    pub progress: Option<TerminalProgress>,
 }
 
 fn blocks(window: &session::Window) -> impl Iterator<Item = &str> {
@@ -69,6 +71,13 @@ pub fn tab_activity(model: &HostModel, window: &session::Window) -> TabActivity 
             .and_then(|r| r.app.clone())
             .or_else(|| model.programs.get(b).cloned())
     });
+    let progress = blocks(window)
+        .filter_map(|block| model.progress.get(block).copied())
+        .max_by_key(|progress| match progress {
+            TerminalProgress::Error(_) => 3,
+            TerminalProgress::Paused(_) => 2,
+            TerminalProgress::Set(_) | TerminalProgress::Indeterminate => 1,
+        });
     TabActivity {
         state: top.map(|r| r.state).unwrap_or_default(),
         kind: top.and_then(|r| r.kind),
@@ -76,6 +85,7 @@ pub fn tab_activity(model: &HostModel, window: &session::Window) -> TabActivity 
         live: top.is_some_and(|r| r.live),
         source: top.and_then(|r| r.app.clone()),
         program,
+        progress,
     }
 }
 
@@ -94,14 +104,27 @@ pub fn program_icon(program: Option<&str>) -> &'static rune::Icon {
     }
 }
 
-/// The word a pill shows after its label, with its colour: trouble always, and Done until
-/// the tab is seen. Idle and Working show nothing.
-pub fn tab_word(activity: &TabActivity, unseen_done: bool) -> Option<(&'static str, u32)> {
+/// The word a pill shows after its label, with its colour: trouble, bell, terminal progress,
+/// and Done until the tab is seen. Idle and ordinary working records show nothing.
+pub fn tab_word(activity: &TabActivity, unseen_done: bool, bell: bool) -> Option<(String, u32)> {
     match activity.state {
-        ProgramState::Blocked => Some((blocked_word(activity.kind), WARNING)),
-        ProgramState::Error => Some(("Error", DANGER)),
-        _ if unseen_done => Some(("Done", ACCENT)),
-        _ => None,
+        ProgramState::Blocked => Some((blocked_word(activity.kind).into(), WARNING)),
+        ProgramState::Error => Some(("Error".into(), DANGER)),
+        _ if bell => Some(("Bell".into(), WARNING)),
+        _ => match activity.progress {
+            Some(TerminalProgress::Error(_)) => Some(("Error".into(), DANGER)),
+            Some(TerminalProgress::Paused(value)) => Some((
+                value.map_or_else(|| "Paused".into(), |n| format!("Paused {n}%")),
+                WARNING,
+            )),
+            Some(TerminalProgress::Set(value)) => Some((
+                value.map_or_else(|| "Working".into(), |n| format!("{n}%")),
+                ACCENT,
+            )),
+            Some(TerminalProgress::Indeterminate) => Some(("Working".into(), ACCENT)),
+            None if unseen_done => Some(("Done".into(), ACCENT)),
+            None => None,
+        },
     }
 }
 
@@ -180,6 +203,44 @@ impl Workspace {
             .extend(now.into_iter().map(|(k, (state, ..))| (k, state)));
         for (state, session, window, activity) in notes {
             self.notify_state(index, state, session, window, &activity);
+        }
+    }
+
+    /// Latch bells for background tabs and clear them as soon as the tab is seen.
+    pub fn track_bells(&mut self, index: usize, bells: Vec<(String, String)>) {
+        let id = self.hosts[index].id;
+        for (session, block) in bells {
+            let window = self.hosts[index]
+                .model
+                .views
+                .get(&session)
+                .and_then(|view| {
+                    view.windows
+                        .iter()
+                        .find(|window| blocks(window).any(|b| b == block))
+                })
+                .and_then(|window| window.window_id.clone());
+            if let Some(window) = window
+                && !self.tab_seen(index, &session, &window)
+            {
+                self.unseen_bells.insert((id, window));
+            }
+        }
+        let seen: Vec<_> = self
+            .unseen_bells
+            .iter()
+            .filter(|(host, window)| {
+                *host == id
+                    && self.hosts[index]
+                        .model
+                        .selected
+                        .as_deref()
+                        .is_some_and(|session| self.tab_seen(index, session, window))
+            })
+            .cloned()
+            .collect();
+        for key in seen {
+            self.unseen_bells.remove(&key);
         }
     }
 
@@ -336,6 +397,11 @@ impl Workspace {
     /// Whether `window` on the active host shows "Done" until seen.
     pub fn unseen(&self, window: &str) -> bool {
         self.unseen_done
+            .contains(&(self.hosts[self.active].id, window.to_owned()))
+    }
+
+    pub fn bell(&self, window: &str) -> bool {
+        self.unseen_bells
             .contains(&(self.hosts[self.active].id, window.to_owned()))
     }
 }
