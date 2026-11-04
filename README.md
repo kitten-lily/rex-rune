@@ -79,7 +79,7 @@ Options:
 | `--session <LABEL\|ID>` | Select a session by exact label or ID. Missing or ambiguous names never pick an arbitrary session. |
 | `--new <LABEL>` | Explicitly create a persistent session (conflicts with `--session`). Ordinary attachment never creates or destroys sessions. |
 | `--block <ID>` | Initially focus this terminal block. |
-| `--font <FAMILY>`, `--font-size <PX>` | Terminal font (default `JetBrainsMono Nerd Font`, 15) resolved through fontconfig. If the family is missing, the bundled IBM Plex Mono is used and a line is printed on stderr. |
+| `--font <FAMILY>`, `--font-size <PX>` | Terminal font (default `JetBrainsMono Nerd Font`, 15) resolved through fontconfig with its ordered fallback chain. If the primary family is missing, the bundled IBM Plex Mono is used and a line is printed on stderr. |
 | `--config <PATH>` | Use a separate workspace preferences file. |
 | `--window-size <WxH>` | Requested startup size (default `1440x900`); tiling compositors may override it. |
 

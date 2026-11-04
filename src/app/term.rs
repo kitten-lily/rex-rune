@@ -8,7 +8,7 @@ use rex_linux::{
     connection::{Command, Connection},
     terminal::{Cell, Frame},
 };
-use rune::{El, Family, Mods, Span, TextStyle, el, memo, rich, text};
+use rune::{El, Mods, Span, TextStyle, el, memo, rich, text};
 use serde_json::json;
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
@@ -47,14 +47,11 @@ pub struct Metrics {
 
 const FEATURES: &str = "'liga' 0, 'calt' 0, 'clig' 0, 'kern' 0";
 
-pub fn metrics(size: f32, family: Option<&'static str>) -> Metrics {
-    let base = TextStyle::new(size, 400.)
+pub fn metrics(size: f32) -> Metrics {
+    let style = TextStyle::new(size, 400.)
         .lh((size * 1.4).ceil())
-        .features(FEATURES);
-    let style = match family {
-        Some(name) => base.family(Family::Named(name)),
-        None => base.mono(),
-    };
+        .features(FEATURES)
+        .mono();
     let width = rune::text::advance("M", style).max(1.);
     Metrics {
         cell: (width, (size * 1.4).ceil()),
@@ -135,11 +132,11 @@ impl Term {
     }
 
     /// A non-owner never resizes; an owner sends its grid size whenever it changes.
-    pub fn resize_if_owner(&mut self, font: f32, family: Option<&'static str>) {
+    pub fn resize_if_owner(&mut self, font: f32) {
         if self.rect[2] <= 0. || self.rect[3] <= 0. {
             return;
         }
-        let Metrics { cell, .. } = metrics(font, family);
+        let Metrics { cell, .. } = metrics(font);
         let status = self.status();
         let cols = (self.rect[2] / cell.0).floor().clamp(1., 65535.) as u16;
         let rows = (self.rect[3] / cell.1).floor().clamp(1., 65535.) as u16;
@@ -288,8 +285,8 @@ fn glyph_run(content: String, style: RunStyle, x: f32, y: f32, m: &Metrics) -> E
     e.no_wrap().font(font).color(color).absolute(x, y)
 }
 
-/// (character, bold, italic, size bits, family) → advances exactly one cell.
-type FitCache = std::collections::HashMap<(char, bool, bool, u32, &'static str), bool>;
+/// (character, bold, italic, size bits) → advances exactly one cell.
+type FitCache = std::collections::HashMap<(char, bool, bool, u32), bool>;
 
 thread_local! {
     /// Whether a character, in a given face, advances exactly one cell: only those join
@@ -312,11 +309,7 @@ fn fits_cell(ch: char, bold: bool, italic: bool, m: &Metrics) -> bool {
     if ch.is_ascii_graphic() || ch == ' ' {
         return true;
     }
-    let family = match m.style.family {
-        Family::Named(name) => name,
-        _ => "",
-    };
-    let key = (ch, bold, italic, m.style.size.to_bits(), family);
+    let key = (ch, bold, italic, m.style.size.to_bits());
     FITS.with_borrow_mut(|cache| {
         *cache.entry(key).or_insert_with(|| {
             let advance = rune::text::advance(&ch.to_string(), face(m, bold, italic));
@@ -565,10 +558,9 @@ mod tests {
 
     struct RowState {
         cells: Vec<Cell>,
-        family: Option<&'static str>,
     }
     fn view(s: &RowState, _: &mut Cx<RowState>) -> El {
-        let m = metrics(15., s.family);
+        let m = metrics(15.);
         el().w_full()
             .h_full()
             .child(row_el(&s.cells, 0., 0, None, &m))
@@ -585,10 +577,7 @@ mod tests {
         let mut renderer = rex_linux::terminal::Renderer::new().unwrap();
         let fonts = crate::app::fonts::load("JetBrainsMono Nerd Font");
         let mut rt = Runtime::with_text(
-            RowState {
-                cells: vec![],
-                family: fonts.terminal,
-            },
+            RowState { cells: vec![] },
             view,
             (2300., 100.),
             Env::new(true, 1.5),

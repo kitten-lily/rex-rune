@@ -374,10 +374,10 @@ impl Workspace {
             self.save();
         }
         self.claim_visible();
-        let (font, family) = (self.settings.font_size, self.terminal_family);
+        let font = self.settings.font_size;
         for ((host, _), term) in self.terminals.iter_mut() {
             if *host == id {
-                term.resize_if_owner(font, family);
+                term.resize_if_owner(font);
             }
         }
         self.update_title(tx);
@@ -425,7 +425,7 @@ impl Workspace {
         let font = self.settings.font_size;
         if let Some(term) = self.terminals.get_mut(key) {
             term.refresh();
-            term.resize_if_owner(font, self.terminal_family);
+            term.resize_if_owner(font);
         }
     }
 
@@ -1311,7 +1311,7 @@ impl Workspace {
         }
         let font = self.settings.font_size;
         for term in self.terminals.values_mut() {
-            term.resize_if_owner(font, self.terminal_family);
+            term.resize_if_owner(font);
         }
         self.save();
     }
