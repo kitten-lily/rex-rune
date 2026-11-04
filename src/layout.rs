@@ -2,22 +2,23 @@
 use rexrs::api::session::{ViewLayoutNode, Window};
 use serde_json::{Value, json};
 
-/// One new terminal block for a layout, starting `shell` when one is set (else the server
-/// user's login shell).
+/// One new terminal block for a layout with this client's theme, starting `shell` when one
+/// is set (else the server user's login shell).
 pub fn shell_layout(shell: Option<&str>) -> Value {
-    let mut block = json!({"flavor": "com.superlogical.terminal.shell"});
+    let mut options = json!({"theme": crate::terminal::theme()});
     if let Some(shell) = shell.map(str::trim).filter(|s| !s.is_empty()) {
-        block["options"] = json!({"shell": shell});
+        options["shell"] = json!(shell);
     }
-    json!({"block": block})
+    json!({"block": {"flavor": "com.superlogical.terminal.shell", "options": options}})
 }
 
 #[cfg(test)]
 #[test]
 fn shell_layout_sets_the_shell_only_when_given() {
-    assert_eq!(
-        shell_layout(None),
-        json!({"block":{"flavor":"com.superlogical.terminal.shell"}})
+    assert!(
+        shell_layout(None)["block"]["options"]
+            .get("shell")
+            .is_none()
     );
     assert_eq!(shell_layout(Some("  ")), shell_layout(None));
     assert_eq!(

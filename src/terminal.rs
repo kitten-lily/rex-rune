@@ -5,7 +5,16 @@ use ghostty_vt::{
     render::{CellIterator, RowIterator},
     style::RgbColor,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
+
+/// The default background Rex Linux draws behind terminal output.
+pub const DEFAULT_BACKGROUND: u32 = 0x001528;
+
+/// The colours this client draws, declared to the server so that it answers a program's
+/// background-colour query (OSC 11) and colour-scheme query with them.
+pub fn theme() -> Value {
+    json!({"background": format!("#{DEFAULT_BACKGROUND:06x}"), "scheme": "dark"})
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Part {

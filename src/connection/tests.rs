@@ -553,6 +553,73 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
 }
 
 #[tokio::test]
+async fn streamed_blocks_declare_the_drawn_theme_once_per_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 8).await;
+        let request = recv(&mut ws).await;
+        let mut boot = serde_json::to_value(boot()).unwrap();
+        boot["selected_session"]["view"]["windows"] = json!([{"window_id":"w",
+            "layers":[{"kind":"tiled","layout":{"block_id":"block:a"},
+                "blocks":[{"block_id":"block:a","creator_name":activity::TERMINAL}]}]}]);
+        reply(&mut ws, &request, 1, boot).await;
+        let (mut seq, mut themes) = (1, Vec::new());
+        loop {
+            let request: Value = match ws.next().await {
+                Some(Ok(Message::Text(text))) => serde_json::from_str(&text).unwrap(),
+                Some(Ok(Message::Close(_))) | None => break,
+                _ => continue,
+            };
+            seq += 1;
+            let payload = match request["method"].as_str() {
+                Some("data.connect") => json!({"ticket":"AAAAAAAAAAAAAAAAAAAAAA"}),
+                _ => json!({}),
+            };
+            reply(&mut ws, &request, seq, payload).await;
+            if request["method"] == "com.superlogical.terminal.set_theme" {
+                themes.push(request["payload"].clone());
+                // Every later event runs the declaration again; it must not repeat.
+                seq += 1;
+                send(
+                    &mut ws,
+                    json!({"type":"event","seq":seq,"payload":{"type":"session_event","payload":{
+                    "session_id":SESSION,"event":{"type":"block_owner_changed",
+                    "payload":{"block_id":"block:a","owner":"client:test"}}}}}),
+                )
+                .await;
+            }
+        }
+        themes
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, true);
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let owner = host
+                .model
+                .lock()
+                .unwrap()
+                .terminals
+                .get("block:a")
+                .is_some_and(|c| c.model.lock().unwrap().owner);
+            if owner {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(host);
+    let themes = server.await.unwrap();
+    assert_eq!(
+        themes,
+        [json!({"session_id":SESSION,"block_id":"block:a","args":crate::terminal::theme()})]
+    );
+}
+
+#[tokio::test]
 async fn destroying_a_session_forgets_it_without_an_error() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());

@@ -279,6 +279,8 @@ struct ControlState {
     queried: HashSet<String>,
     /// Unattached sessions fetched once with session.view to place their block events.
     viewed: HashSet<String>,
+    /// Streamed blocks this connection has declared its theme for.
+    themed: HashSet<String>,
     // This pool is scoped to the terminal data ref and subprotocol; other sources
     // are filtered out before insertion. It lives only as long as this control socket.
     tickets: HashMap<(String, String), PendingTicket>,
@@ -779,6 +781,25 @@ async fn query_activity(
     }
 }
 
+/// Tell the server once per connection which colours this client draws for each block it
+/// streams. The server applies them while this client owns the block, which lets programs
+/// such as fish read the background. Servers without set_theme leave blocks unthemed.
+async fn declare_themes(
+    control: &mut Client,
+    state: &mut ControlState,
+    workers: &HashMap<String, PaneWorker>,
+) {
+    for (block, worker) in workers {
+        if !state.themed.insert(block.clone()) {
+            continue;
+        }
+        let method = format!("{}.set_theme", activity::TERMINAL);
+        let target =
+            json!({"session_id":worker.session, "block_id":block, "args":crate::terminal::theme()});
+        let _ = request(control, &method, target).await;
+    }
+}
+
 fn remove_session(shared: &Shared, workers: &mut HashMap<String, PaneWorker>, id: &str) {
     let blocks: Vec<_> = workers
         .iter()
@@ -1022,6 +1043,7 @@ async fn run_host(
                 if let Some((cols, rows, w, h)) = worker.size { resize(&mut control, &worker.session, block, cols, rows, w, h).await?; }
             }
             reconcile(&endpoint, shared, &sender, &mut workers);
+            declare_themes(&mut control, &mut state, &workers).await;
             query_activity(&mut control, shared, &mut state, &workers).await;
             retry = 0;
             loop {
@@ -1030,6 +1052,7 @@ async fn run_host(
                         handle_event(event?, &mut control, shared, &mut workers, &mut state).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
+                        declare_themes(&mut control, &mut state, &workers).await;
                         query_activity(&mut control, shared, &mut state, &workers).await;
                     }
                     command = commands.recv_async() => {
@@ -1044,6 +1067,7 @@ async fn run_host(
                         }
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
+                        declare_themes(&mut control, &mut state, &workers).await;
                         query_activity(&mut control, shared, &mut state, &workers).await;
                     }
                 }
