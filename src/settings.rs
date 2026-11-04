@@ -67,6 +67,9 @@ pub struct Settings {
     pub notifications: NotificationsConfig,
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
     pub agent_session_naming: bool,
+    /// The Ghostty theme terminals are drawn in, by name; none is the built-in Midnight.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_theme: Option<String>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -88,6 +91,7 @@ impl Default for Settings {
             notice_position: NoticePosition::default(),
             notifications: NotificationsConfig::default(),
             agent_session_naming: false,
+            terminal_theme: None,
         }
     }
 }

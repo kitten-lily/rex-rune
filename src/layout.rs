@@ -2,10 +2,10 @@
 use rexrs::api::session::{ViewLayoutNode, Window};
 use serde_json::{Value, json};
 
-/// One new terminal block for a layout with this client's theme, starting `shell` when one
-/// is set (else the server user's login shell).
-pub fn shell_layout(shell: Option<&str>) -> Value {
-    let mut options = json!({"theme": crate::terminal::theme()});
+/// One new terminal block for a layout with this client's `theme` (`set_theme` arguments),
+/// starting `shell` when one is set (else the server user's login shell).
+pub fn shell_layout(shell: Option<&str>, theme: &Value) -> Value {
+    let mut options = json!({"theme": theme});
     if let Some(shell) = shell.map(str::trim).filter(|s| !s.is_empty()) {
         options["shell"] = json!(shell);
     }
@@ -15,14 +15,15 @@ pub fn shell_layout(shell: Option<&str>) -> Value {
 #[cfg(test)]
 #[test]
 fn shell_layout_sets_the_shell_only_when_given() {
+    let theme = crate::terminal_theme::TerminalTheme::midnight().args();
     assert!(
-        shell_layout(None)["block"]["options"]
+        shell_layout(None, &theme)["block"]["options"]
             .get("shell")
             .is_none()
     );
-    assert_eq!(shell_layout(Some("  ")), shell_layout(None));
+    assert_eq!(shell_layout(Some("  "), &theme), shell_layout(None, &theme));
     assert_eq!(
-        shell_layout(Some("zsh"))["block"]["options"]["shell"],
+        shell_layout(Some("zsh"), &theme)["block"]["options"]["shell"],
         "zsh"
     );
 }

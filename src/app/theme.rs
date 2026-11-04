@@ -51,11 +51,10 @@ pub fn inset(y: f32, color: Color) -> Shadow {
     }
 }
 
-pub const GROUND: u32 = 0x001528;
-/// The card, and the terminal's default background (the server's default black is replaced).
-/// The same navy as the ground, so a single pane and the toolbar read as one surface. The
-/// server is told this colour so programs that ask for the background get it.
-pub const CARD: u32 = rex_linux::terminal::DEFAULT_BACKGROUND;
+/// The ground, and every chrome surface that sits on it (pane cards and their headers). A
+/// terminal is drawn on its theme's background, which in the built-in Midnight theme is
+/// this same navy, so a single pane and the toolbar read as one surface.
+pub const GROUND: u32 = rex_linux::terminal_theme::MIDNIGHT_BACKGROUND;
 pub const POPOVER: u32 = 0x0d1524;
 pub const INK: u32 = 0xe8eef6;
 pub const MUTED: u32 = 0x93a3b8;
@@ -111,7 +110,7 @@ pub fn kit() -> &'static Kit {
         );
         let c = &mut k.c;
         (c.page, c.bg_base, c.surface_base) = (rgb(GROUND), rgb(GROUND), rgb(GROUND));
-        c.bg_deep = rgb(CARD);
+        c.bg_deep = rgb(GROUND);
         for slot in [
             &mut c.layer_01,
             &mut c.layer_02,

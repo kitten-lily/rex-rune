@@ -2,12 +2,13 @@
 //! and the cell grid, drawn on a fixed column grid.
 use super::{
     keys,
-    theme::{ACCENT, CARD, TERMINAL_SELECTION, mix, rgb},
+    theme::{ACCENT, TERMINAL_SELECTION, mix, rgb},
 };
 use rex_linux::{
     connection::{Command, Connection},
     links::Link,
     terminal::{Cell, CursorShape, Frame},
+    terminal_theme::{TerminalTheme, is_light},
 };
 use rune::{
     El, LineCap, Mods, Path, Shape, Span, TextEdit, TextStyle, canvas, el, memo, rich, text,
@@ -361,11 +362,11 @@ struct RunStyle {
     strike: bool,
 }
 impl RunStyle {
-    /// `default_bg` is the server's default background, which draws as the card colour
-    /// wherever it shows (inverse video's foreground included).
-    fn of(cell: &Cell, default_bg: u32) -> Self {
+    /// `default_bg` is the server's default background, which draws as `body` wherever it
+    /// shows (inverse video's foreground included).
+    fn of(cell: &Cell, default_bg: u32, body: u32) -> Self {
         let s = &cell.style;
-        let tint = |c: u32| if c == default_bg { CARD } else { c };
+        let tint = |c: u32| if c == default_bg { body } else { c };
         Self {
             // Faint text is pre-mixed toward its cell in sRGB.
             fg: if s.faint {
@@ -754,7 +755,9 @@ fn row_el(
     sel: Option<(usize, usize)>,
     search: &[(usize, usize, bool)],
     m: &Metrics,
+    colors: &TermColors,
 ) -> El {
+    let body = colors.body(frame_bg);
     let (cw, ch) = m.cell;
     // Memoized rows are flattened on their own, so each says again that it never animates:
     // otherwise a glyph run that leaves a changed row fades out over its replacement.
@@ -787,7 +790,7 @@ fn row_el(
         row = row.child(
             el().absolute(a as f32 * cw, 0.)
                 .size((b + 1 - a) as f32 * cw, ch)
-                .fill(rgb(TERMINAL_SELECTION)),
+                .fill(rgb(colors.selection_bg)),
         );
     }
     let mut segment: Option<Segment> = None;
@@ -795,7 +798,12 @@ fn row_el(
         if cell.spacer_tail {
             continue;
         }
-        let style = RunStyle::of(cell, frame_bg);
+        let mut style = RunStyle::of(cell, frame_bg, body);
+        if let (Some(fg), Some((a, b))) = (colors.selection_fg, sel)
+            && (a..=b).contains(&col)
+        {
+            style.fg = fg;
+        }
         let text = if cell.text.is_empty() {
             " "
         } else {
@@ -845,10 +853,10 @@ fn row_el(
     // single-underline implementation.
     let mut start = 0;
     while start < cells.len() {
-        let style = RunStyle::of(&cells[start], frame_bg);
+        let style = RunStyle::of(&cells[start], frame_bg, body);
         let mut end = start + 1;
         while end < cells.len() {
-            let next = RunStyle::of(&cells[end], frame_bg);
+            let next = RunStyle::of(&cells[end], frame_bg, body);
             if next.underline != style.underline
                 || next.underline_color != style.underline_color
                 || next.overline != style.overline
@@ -874,6 +882,47 @@ fn row_el(
 pub struct GridLook {
     pub cursor: Option<CursorLook>,
     pub ime: bool,
+    pub colors: TermColors,
+}
+
+/// The colours the terminal area is drawn in, from the chosen terminal theme. The theme's
+/// default colours and palette reach the frame through the server; these are the ones the
+/// client draws itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TermColors {
+    pub background: u32,
+    pub selection_bg: u32,
+    pub selection_fg: Option<u32>,
+    pub cursor_text: Option<u32>,
+}
+impl TermColors {
+    pub fn of(theme: &TerminalTheme) -> Self {
+        Self {
+            background: theme.background,
+            selection_bg: theme.selection_background.unwrap_or(TERMINAL_SELECTION),
+            selection_fg: theme.selection_foreground,
+            cursor_text: theme.cursor_text,
+        }
+    }
+
+    /// What the server's default background `frame_bg` draws as: the theme's background
+    /// when both are equally light or dark (the server's built-in black, or another owner's
+    /// theme), otherwise the server's own, so default text drawn for it stays readable.
+    pub fn body(&self, frame_bg: u32) -> u32 {
+        if is_light(frame_bg) == is_light(self.background) {
+            self.background
+        } else {
+            frame_bg
+        }
+    }
+}
+
+impl Term {
+    /// The fill behind this pane's grid.
+    pub fn body(&self, colors: &TermColors) -> u32 {
+        self.display_frame()
+            .map_or(colors.background, |f| colors.body(f.bg))
+    }
 }
 
 /// The visible rows of `term`'s frame, each memoized by its content.
@@ -891,6 +940,7 @@ pub fn grid(
     let visible = term.visible_rows(m.cell);
     let start = frame.display_row_start(visible);
     let cols = frame.cols as usize;
+    let body = look.colors.body(frame.bg);
     let selection = term.selection.map(|(a, b)| (a.min(b), a.max(b)));
     // A size another client owns can be wider or taller than this grid: crop it here, not at
     // the card's edge, so it never covers the padding or the card's border.
@@ -949,11 +999,20 @@ pub fn grid(
         for cell in cells {
             hash_cell(cell, &mut h);
         }
-        (sel, &search, frame.bg, cw.to_bits(), ch.to_bits(), m.style).hash(&mut h);
+        (
+            sel,
+            &search,
+            frame.bg,
+            cw.to_bits(),
+            ch.to_bits(),
+            m.style,
+            look.colors,
+        )
+            .hash(&mut h);
         let top = (y - start) as f32 * ch;
         let id = format!("{key}/r{}", y - start);
         grid = grid.child(memo(id, h.finish(), || {
-            row_el(cells, top, frame.bg, sel, &search, m)
+            row_el(cells, top, frame.bg, sel, &search, m, &look.colors)
         }));
     }
     grid = add_images(grid, true);
@@ -963,7 +1022,7 @@ pub fn grid(
             .cells
             .get(link.start / cols)
             .and_then(|row| row.get(link.start % cols))
-            .map_or(frame.fg, |c| RunStyle::of(c, frame.bg).fg);
+            .map_or(frame.fg, |c| RunStyle::of(c, frame.bg, body).fg);
         for y in
             (link.start / cols..=link.end / cols).filter(|y| (start..start + visible).contains(y))
         {
@@ -1037,8 +1096,8 @@ pub fn grid(
         grid = grid.child(cursor);
         if filled && let Some(cell) = cell.filter(|c| !c.text.is_empty()) {
             let style = RunStyle {
-                fg: CARD,
-                ..RunStyle::of(cell, frame.bg)
+                fg: look.colors.cursor_text.unwrap_or(body),
+                ..RunStyle::of(cell, frame.bg, body)
             };
             grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
         }
@@ -1055,7 +1114,7 @@ pub fn grid(
                 .no_wrap()
                 .font(m.style)
                 .color(rgb(frame.fg))
-                .fill(rgb(CARD))
+                .fill(rgb(body))
                 .absolute(px, py),
             );
         }
@@ -1073,9 +1132,42 @@ mod tests {
     }
     fn view(s: &RowState, _: &mut Cx<RowState>) -> El {
         let m = metrics(15.);
-        el().w_full()
-            .h_full()
-            .child(row_el(&s.cells, 0., 0, None, &[], &m))
+        el().w_full().h_full().child(row_el(
+            &s.cells,
+            0.,
+            0,
+            None,
+            &[],
+            &m,
+            &TermColors::of(&TerminalTheme::midnight()),
+        ))
+    }
+
+    #[test]
+    fn the_default_background_takes_the_theme_only_on_its_own_side() {
+        let midnight = TermColors::of(&TerminalTheme::midnight());
+        assert_eq!(midnight.body(0x000000), 0x001528, "the server's black");
+        assert_eq!(
+            midnight.body(0x1e1e2e),
+            0x001528,
+            "another owner's dark theme"
+        );
+        assert_eq!(
+            midnight.body(0xfdf6e3),
+            0xfdf6e3,
+            "another owner's light theme"
+        );
+        let light = TermColors::of(&TerminalTheme {
+            background: 0xfdf6e3,
+            ..TerminalTheme::midnight()
+        });
+        assert_eq!(light.body(0xfdf6e3), 0xfdf6e3);
+        assert_eq!(light.body(0xeeeeee), 0xfdf6e3);
+        assert_eq!(
+            light.body(0x000000),
+            0x000000,
+            "a server without set_theme keeps its black under its light default text"
+        );
     }
 
     #[test]

@@ -16,6 +16,10 @@ fn ticket(session: &str, block: &str, expires_in_ms: u64) -> session::DataTicket
     }
 }
 
+fn midnight() -> Value {
+    crate::terminal_theme::TerminalTheme::midnight().args()
+}
+
 #[test]
 fn tickets_are_scoped_expiring_and_single_use() {
     let mut state = ControlState::default();
@@ -177,7 +181,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
         .await;
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false);
+    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
     connected(&host).await;
     {
         let model = host.model.lock().unwrap();
@@ -250,7 +254,7 @@ async fn failed_bootstrap_closes_and_retries_without_old_identity() {
         .await;
         assert!(matches!(second.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false);
+    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
     connected(&host).await;
     assert_eq!(host.model.lock().unwrap().protocol.bootstrap_requests, 2);
     drop(host);
@@ -553,7 +557,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
         // No second session.view: the next message is the client closing.
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false);
+    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             {
@@ -583,7 +587,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
 }
 
 #[tokio::test]
-async fn streamed_blocks_declare_the_drawn_theme_once_per_connection() {
+async fn streamed_blocks_declare_the_theme_once_and_again_when_it_changes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -599,9 +603,12 @@ async fn streamed_blocks_declare_the_drawn_theme_once_per_connection() {
         loop {
             let request: Value = match ws.next().await {
                 Some(Ok(Message::Text(text))) => serde_json::from_str(&text).unwrap(),
-                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(Message::Close(_))) | None => panic!("no session was created"),
                 _ => continue,
             };
+            if request["method"] == "session.create" {
+                return (themes, request["payload"].clone());
+            }
             seq += 1;
             let payload = match request["method"].as_str() {
                 Some("data.connect") => json!({"ticket":"AAAAAAAAAAAAAAAAAAAAAA"}),
@@ -621,9 +628,10 @@ async fn streamed_blocks_declare_the_drawn_theme_once_per_connection() {
                 .await;
             }
         }
-        themes
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, true);
+    let first = json!({"background":"#111111"});
+    let second = json!({"background":"#eeeeee","foreground":"#222222"});
+    let host = HostConnection::spawn(endpoint, None, None, None, true, first.clone());
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             let owner = host
@@ -641,11 +649,24 @@ async fn streamed_blocks_declare_the_drawn_theme_once_per_connection() {
     })
     .await
     .unwrap();
-    drop(host);
-    let themes = server.await.unwrap();
+    host.commands
+        .send(HostCommand::Theme(second.clone()))
+        .unwrap();
+    host.commands
+        .send(HostCommand::CreateSession {
+            label: None,
+            shell: None,
+        })
+        .unwrap();
+    let (themes, create) = tokio::time::timeout(Duration::from_secs(8), server)
+        .await
+        .unwrap()
+        .unwrap();
+    let declared = |args: &Value| json!({"session_id":SESSION,"block_id":"block:a","args":args});
+    assert_eq!(themes, [declared(&first), declared(&second)]);
     assert_eq!(
-        themes,
-        [json!({"session_id":SESSION,"block_id":"block:a","args":crate::terminal::theme()})]
+        create["initial_windows"][0]["layout"]["block"]["options"]["theme"], second,
+        "new blocks start with the current theme"
     );
 }
 
@@ -672,7 +693,7 @@ async fn destroying_a_session_forgets_it_without_an_error() {
         .await;
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
-    let host = HostConnection::spawn(endpoint, None, None, None, false);
+    let host = HostConnection::spawn(endpoint, None, None, None, false, midnight());
     connected(&host).await;
     host.commands
         .send(HostCommand::Request {

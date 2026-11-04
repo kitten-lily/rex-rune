@@ -293,6 +293,34 @@ fn terminal(s: &Workspace) -> El {
                 |s, _| s.change_font(1.),
             ),
         ))
+        .child(divider())
+        .child(setting(
+            "Theme",
+            "A Ghostty theme, from ~/.config/ghostty/themes or Ghostty's own.",
+            row()
+                .gap(10.)
+                .center_y()
+                .child(
+                    text(
+                        s.term_theme
+                            .name
+                            .as_deref()
+                            .unwrap_or("Midnight")
+                            .to_owned(),
+                    )
+                    .font(medium(13.))
+                    .color(rgb(INK))
+                    .truncate()
+                    .max_w(160.),
+                )
+                .child(pill(
+                    "terminal-theme",
+                    "Change…",
+                    Pill::Neutral,
+                    26.,
+                    |s, tx| s.perform(Intent::ChooseTheme, tx),
+                )),
+        ))
         .child(group("Default shell"));
     for (i, host) in s.settings.hosts.iter().enumerate() {
         let detail = match &host.shell {

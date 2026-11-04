@@ -135,7 +135,7 @@ fn strip(s: &Workspace, block: &str, width: f32, m: &Metrics) -> Option<El> {
             .gap(8.)
             .center_y()
             .radius(11.)
-            .fill(rgb(mix(WARNING, CARD, 0.1)))
+            .fill(rgb(mix(WARNING, GROUND, 0.1)))
             .border(1., rgb(WARNING).alpha(0.35))
             .shrink()
             .min_w(0.);
@@ -183,7 +183,7 @@ fn card(
         .key(format!("pane:{block}"))
         .absolute(rect[0], rect[1])
         .size(rect[2], rect[3])
-        .fill(rgb(CARD))
+        .fill(rgb(GROUND))
         .motion(SNAPPY)
         // Cards appear and leave at once (a tab or session switch never crossfades terminals);
         // only a card that stays springs to its new place.
@@ -218,9 +218,11 @@ fn card(
             } else {
                 CursorLook::Hollow
             };
+            let colors = s.term_colors();
             let look = GridLook {
                 cursor: Some(cursor),
                 ime: input && s.window_focused,
+                colors,
             };
             let (k1, k2, k3) = (key.clone(), key.clone(), key.clone());
             let (k4, k5, k6) = (key.clone(), key.clone(), key.clone());
@@ -439,7 +441,7 @@ fn card(
                         .center_y()
                         .radius(8.)
                         .continuous_corners()
-                        .fill(rgb(CARD))
+                        .fill(rgb(GROUND))
                         .border(1., white(0.12))
                         .box_shadow(shadow(0., 4., 16., black(0.45)))
                         .pin(None, Some(6.), Some(6.), None)
@@ -463,18 +465,29 @@ fn card(
                         ),
                 );
             }
-            c.child(
-                col()
-                    .grow(1.)
-                    .w_full()
-                    .min_h(0.)
-                    .px(PADDING + 4.)
-                    .pt(if bleed { PADDING } else { 0. })
-                    .pb(PADDING)
-                    .instant_changes()
-                    .motion(STILL)
-                    .child(grid),
-            )
+            // The terminal's background sits inside the card's border, never over it. Where
+            // it is the card's own navy (Midnight), the card draws it, edge included.
+            let (edge, radius) = if bleed {
+                (0., 0.)
+            } else {
+                (1., CARD_RADIUS - 1.)
+            };
+            let mut body = col()
+                .grow(1.)
+                .self_stretch()
+                .min_h(0.)
+                .mx(edge)
+                .mb(edge)
+                .px(PADDING + 4. - edge)
+                .pt(if bleed { PADDING } else { 0. })
+                .pb(PADDING - edge)
+                .corners([0., 0., radius, radius])
+                .continuous_corners();
+            let fill = t.body(&colors);
+            if fill != GROUND {
+                body = body.fill(rgb(fill));
+            }
+            c.child(body.instant_changes().motion(STILL).child(grid))
         }
         None => c.child(
             col().grow(1.).center().child(

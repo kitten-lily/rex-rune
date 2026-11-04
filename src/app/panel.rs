@@ -30,6 +30,10 @@ pub enum Intent {
     EditHost(usize),
     RemoveHost(usize),
     Retry,
+    /// The terminal theme picker, from Settings.
+    ChooseTheme,
+    /// Draw terminals in this Ghostty theme, or Midnight for none, then return to Settings.
+    Theme(Option<String>),
 }
 impl Intent {
     /// Actions that open another panel instead of closing the current one.
@@ -43,6 +47,7 @@ impl Intent {
                 | Intent::RenameWindow(_)
                 | Intent::CloseWindow(_)
                 | Intent::Settings
+                | Intent::ChooseTheme
                 | Intent::AddHost
                 | Intent::EditHost(_)
                 | Intent::RemoveHost(_)
@@ -155,6 +160,8 @@ pub enum PanelKind {
     Window(String),
     Form(Form),
     Settings,
+    /// Every Ghostty theme, filtered by the search field.
+    Themes,
     /// Confirm forgetting a saved host; its server and programs are untouched.
     RemoveHost(usize),
     Confirm {
@@ -223,6 +230,7 @@ impl Panel {
                 | PanelKind::Session
                 | PanelKind::Host(_)
                 | PanelKind::Window(_)
+                | PanelKind::Themes
         )
     }
 }
@@ -311,6 +319,33 @@ impl Workspace {
         entries
     }
 
+    /// Midnight, then the dark and the light Ghostty themes whose names contain `lower`.
+    fn theme_entries(&self, lower: &str) -> Vec<Entry> {
+        let current = self.term_theme.name.as_deref();
+        let mut entries = Vec::new();
+        if "midnight".contains(lower) {
+            let mut e = Entry::new("Midnight", "", "Built in", Intent::Theme(None));
+            e.current = current.is_none();
+            entries.push(e);
+        }
+        for (group, light) in [("Dark", false), ("Light", true)] {
+            for theme in &self.themes {
+                if theme.light != light || !theme.name.to_lowercase().contains(lower) {
+                    continue;
+                }
+                let mut e = Entry::new(
+                    theme.name.clone(),
+                    if theme.custom { "Custom" } else { "" },
+                    group,
+                    Intent::Theme(Some(theme.name.clone())),
+                );
+                e.current = current == Some(theme.name.as_str());
+                entries.push(e);
+            }
+        }
+        entries
+    }
+
     /// A sidebar host header's menu: New session, Default shell…, and Retry while offline.
     fn host_entries(&self, host: usize) -> Vec<Entry> {
         let connected = self.hosts[host].model.connected;
@@ -349,6 +384,9 @@ impl Workspace {
         };
         let query = self.query();
         let lower = query.to_lowercase();
+        if matches!(panel.kind, PanelKind::Themes) {
+            return self.theme_entries(&lower);
+        }
         if let PanelKind::Hosts(name) = &panel.kind {
             return self
                 .hosts

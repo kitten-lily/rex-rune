@@ -9,6 +9,7 @@ use clap::Parser;
 use rex_linux::{
     connection::{HostCommand, HostConnection, Options},
     settings::{Host, Settings},
+    terminal_theme::ThemeDirs,
 };
 use rune::{AppSpec, Env, Key, KeyEvent, Mods, Runtime};
 
@@ -1040,6 +1041,89 @@ fn settings_sections_and_their_forms_return_to_settings() {
         "back in Settings after removing"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_theme_picker_filters_applies_to_every_host_and_returns_to_settings() {
+    let root = std::env::temp_dir().join(format!("rex-linux-picker-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("Catppuccin Mocha"),
+        "background = #1e1e2e\nforeground = #cdd6f4\npalette = 1=#f38ba8\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("Paper"), "background = #f2eede\n").unwrap();
+    let mut ws = workspace_hosts(2);
+    ws.theme_dirs = ThemeDirs {
+        user: Some(root.clone()),
+        system: vec![],
+    };
+    let hosts = [capture_host(&mut ws, 0), capture_host(&mut ws, 1)];
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    let mut rt = runtime(ws);
+    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "terminal-theme");
+    assert!(matches!(
+        rt.state.panel.as_ref().map(|p| &p.kind),
+        Some(PanelKind::Themes)
+    ));
+    let rows = |ws: &Workspace| {
+        ws.entries()
+            .into_iter()
+            .map(|e| (e.label, e.group, e.current))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(&rt.state),
+        [
+            ("Midnight".to_owned(), "Built in".to_owned(), true),
+            ("Catppuccin Mocha".into(), "Dark".into(), false),
+            ("Paper".into(), "Light".into(), false),
+        ]
+    );
+    press(&mut rt, Key::Escape);
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Settings)
+        ),
+        "Escape goes back to Settings"
+    );
+    assert!(hosts.iter().all(|h| h.is_empty()), "nothing was declared");
+
+    click(&mut rt, "terminal-theme");
+    rt.update(|s, _| {
+        s.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("mocha");
+        s.query_changed();
+    });
+    assert_eq!(
+        rows(&rt.state),
+        [("Catppuccin Mocha".to_owned(), "Dark".to_owned(), false)]
+    );
+    press(&mut rt, Key::Enter);
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Settings)
+        ),
+        "applying goes back to Settings"
+    );
+    let theme = &rt.state.term_theme;
+    assert_eq!(theme.background, 0x1e1e2e);
+    for host in &hosts {
+        let declared: Vec<_> = host
+            .try_iter()
+            .filter_map(|c| match c {
+                HostCommand::Theme(args) => Some(args),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(declared, [theme.args()], "every host is told once");
+    }
+    let saved = Settings::load(&rt.state.settings_path).unwrap();
+    assert_eq!(saved.terminal_theme.as_deref(), Some("Catppuccin Mocha"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]

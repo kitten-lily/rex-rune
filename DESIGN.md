@@ -4,7 +4,7 @@ Rex Linux draws calm, dark chrome around terminals that the server owns. The tok
 
 ## Principles
 
-- **The terminal is the content.** Chrome frames it and stays out of the way. Terminal text, colours, cursor and split geometry come from the server and are never recoloured. The one exception: the server's default terminal background is drawn in the navy `CARD` colour, the same as the ground, so a single pane and the toolbar read as one surface; explicit colours are preserved.
+- **The terminal is the content.** Chrome frames it and stays out of the way. Terminal text, colours, cursor and split geometry come from the server and are never recoloured; the chosen terminal theme reaches the terminal through the server. The one exception: the server's default terminal background is drawn in the theme's background (Midnight's is the navy of the ground, so a single pane and the toolbar read as one surface) when both are equally dark or light; otherwise the server's own is kept so its default text stays readable. Explicit colours are preserved.
 - **Chrome moves, content doesn't.** Popups spring open from their anchor and highlights and the sidebar slide; terminal content, pane geometry and cell rendering never animate.
 - **One working row.** Session identity, tabs, commands and the window's own controls share a single toolbar. Navigation (hosts → sessions) opens on demand, with an optional sidebar.
 - **Quiet when healthy.** A connected host, a live pane and an idle active tab carry no status dots or "Connected" labels; names and host icons are enough. Words appear for trouble ("Offline", "Reconnecting", "input paused"), unseen completion or bell, and terminal-reported progress.
@@ -16,7 +16,7 @@ Rex Linux draws calm, dark chrome around terminals that the server owns. The tok
 | Token | Value | Use |
 | --- | --- | --- |
 | `GROUND` | `#001528` | Window ground and page background |
-| `CARD` | `#001528` | Pane cards; the terminal's default background (the same navy as the ground) |
+| Terminal background | `#001528` in Midnight | The area behind terminal text, from the terminal theme. Pane cards, their headers and strips stay on `GROUND`. |
 | `POPOVER` | `#0d1524` | Popovers, dialogs, raised surfaces (drawn at 95% over a backdrop blur) |
 | `INK` | `#e8eef6` | Primary text and icons |
 | `MUTED` | `#93a3b8` | Secondary text, labels, shortcuts and icons |
@@ -25,9 +25,9 @@ Rex Linux draws calm, dark chrome around terminals that the server owns. The tok
 | `LIVE` | `#5eead4` | Kit success colour |
 | `WARNING` | `#f5d48a` | Reconnecting, notices, ownership strips |
 | `DANGER` | `#ff8a8a` | Validation errors and destructive text |
-| `TERMINAL_SELECTION` | `#2f4a6e` | Local terminal text-selection overlay |
+| `TERMINAL_SELECTION` | `#2f4a6e` | Local terminal text-selection overlay, when the terminal theme has no `selection-background` (its `selection-foreground`, if any, recolours selected text) |
 
-Interaction fills are translucent white over the surface: hover 7%, pressed 11%; borders 6–20% white (focus uses `ACCENT`). Trouble states always carry a word, never colour alone; healthy states show nothing. No light theme is implemented.
+Interaction fills are translucent white over the surface: hover 7%, pressed 11%; borders 6–20% white (focus uses `ACCENT`). Trouble states always carry a word, never colour alone; healthy states show nothing. The chrome has no light theme; a light terminal theme changes only the terminal area.
 
 ## Typography
 
