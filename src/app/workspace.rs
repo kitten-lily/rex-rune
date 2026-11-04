@@ -65,6 +65,35 @@ struct ActiveColumn {
     width: f64,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct ColumnActions {
+    pub move_left: bool,
+    pub move_right: bool,
+    pub consume_left: bool,
+    pub consume_right: bool,
+    pub expel: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ColumnChangeKind {
+    Consume,
+    Expel,
+}
+
+struct PendingColumnChange {
+    host: usize,
+    session: String,
+    window: String,
+    moved: String,
+    anchor: String,
+    survivor: Option<String>,
+    source: String,
+    target: Option<String>,
+    source_width: f64,
+    target_width: Option<f64>,
+    kind: ColumnChangeKind,
+}
+
 pub struct Notice {
     pub id: u64,
     pub text: String,
@@ -88,6 +117,7 @@ pub struct Workspace {
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
     pub column_drag: Option<ColumnDrag>,
+    pending_column_change: Option<PendingColumnChange>,
     /// Physical keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<PhysicalKeyCode>,
     /// Panes this window has taken size ownership of since it last came forward.
@@ -221,6 +251,7 @@ impl Workspace {
             zoom_notice: None,
             drag: None,
             column_drag: None,
+            pending_column_change: None,
             forwarded: HashSet::new(),
             claimed: HashSet::new(),
             handle,
@@ -436,7 +467,8 @@ impl Workspace {
             );
         }
         self.hosts[index].model = model;
-        let columns_changed = self.reconcile_column_state(index);
+        let columns_changed =
+            self.apply_pending_column_change(index) | self.reconcile_column_state(index);
         self.track_activity(index);
         self.deliver_program_notices(index, notices);
         for text in clipboard {
@@ -455,6 +487,7 @@ impl Workspace {
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
             self.column_drag = None;
+            self.pending_column_change = None;
         }
         if (changed_session || columns_changed) && self.hosts[index].model.selected.is_some() {
             self.save();
@@ -470,6 +503,77 @@ impl Workspace {
             }
         }
         self.update_title(tx);
+    }
+
+    /// Carry local widths across a server-confirmed consume or expel operation.
+    pub(crate) fn apply_pending_column_change(&mut self, host: usize) -> bool {
+        let Some(pending) = self.pending_column_change.take() else {
+            return false;
+        };
+        if pending.host != host {
+            self.pending_column_change = Some(pending);
+            return false;
+        }
+        let found = self.hosts[host]
+            .model
+            .views
+            .get(&pending.session)
+            .and_then(|view| {
+                view.windows
+                    .iter()
+                    .find(|window| window.window_id.as_deref() == Some(&pending.window))
+            })
+            .and_then(|window| {
+                let strip = Strip::new(window, DEFAULT_COLUMN_WIDTH);
+                let moved = strip.column(&pending.moved)?.0.to_owned();
+                let anchor = strip.column(&pending.anchor)?.0.to_owned();
+                let survivor = pending
+                    .survivor
+                    .as_deref()
+                    .and_then(|block| strip.column(block))
+                    .map(|(column, _)| column.to_owned());
+                Some((moved, anchor, survivor))
+            });
+        let Some((moved, anchor, survivor)) = found else {
+            self.pending_column_change = Some(pending);
+            return false;
+        };
+        let complete = match pending.kind {
+            ColumnChangeKind::Consume => moved == anchor,
+            ColumnChangeKind::Expel => moved != anchor,
+        };
+        if !complete {
+            self.pending_column_change = Some(pending);
+            return false;
+        }
+
+        let endpoint = self.settings.hosts[host].endpoint.clone();
+        let widths = self
+            .settings
+            .column_widths
+            .entry(endpoint)
+            .or_default()
+            .entry(pending.session)
+            .or_default()
+            .entry(pending.window)
+            .or_default();
+        widths.remove(&pending.source);
+        if let Some(target) = &pending.target {
+            widths.remove(target);
+        }
+        match pending.kind {
+            ColumnChangeKind::Consume => {
+                widths.insert(moved, pending.target_width.unwrap_or(DEFAULT_COLUMN_WIDTH));
+                if let Some(survivor) = survivor {
+                    widths.insert(survivor, pending.source_width);
+                }
+            }
+            ColumnChangeKind::Expel => {
+                widths.insert(moved, pending.source_width);
+                widths.insert(anchor, pending.source_width);
+            }
+        }
+        true
     }
 
     /// Drop local widths and ephemeral state whose server-owned columns no longer exist.
@@ -805,6 +909,124 @@ impl Workspace {
 
     pub fn active_column_width(&self) -> Option<f64> {
         self.active_column().map(|column| column.width)
+    }
+
+    pub fn column_actions(&self) -> ColumnActions {
+        let Some(column) = self.active_column() else {
+            return ColumnActions::default();
+        };
+        let Some(window) = self.model().window() else {
+            return ColumnActions::default();
+        };
+        let strip = self.strip_for(self.active, &column.session, window);
+        ColumnActions {
+            move_left: strip.swap_target(&column.block, -1).is_some(),
+            move_right: strip.swap_target(&column.block, 1).is_some(),
+            consume_left: strip.consume_anchor(&column.block, -1).is_some(),
+            consume_right: strip.consume_anchor(&column.block, 1).is_some(),
+            expel: strip.expel_anchor(&column.block).is_some(),
+        }
+    }
+
+    pub fn move_column(&mut self, direction: i8) {
+        let Some(column) = self.active_column() else {
+            return;
+        };
+        let Some(window) = self.model().window() else {
+            return;
+        };
+        let Some(target) = self
+            .strip_for(self.active, &column.session, window)
+            .swap_target(&column.block, direction)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.request(
+            "session.swap_blocks",
+            json!({"block_id":column.block,"other_block_id":target}),
+        );
+        self.request("session.focus_block", json!({"block_id":column.block}));
+    }
+
+    pub fn consume_pane(&mut self, direction: i8) {
+        let Some(column) = self.active_column() else {
+            return;
+        };
+        let Some(window) = self.model().window() else {
+            return;
+        };
+        let strip = self.strip_for(self.active, &column.session, window);
+        let Some(anchor) = strip
+            .consume_anchor(&column.block, direction)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let Some((target, [_, target_width])) = strip.column(&anchor) else {
+            return;
+        };
+        let survivor = strip.expel_anchor(&column.block).map(str::to_owned);
+        self.pending_column_change = Some(PendingColumnChange {
+            host: self.active,
+            session: column.session,
+            window: column.window,
+            moved: column.block.clone(),
+            anchor: anchor.clone(),
+            survivor,
+            source: column.column,
+            target: Some(target.to_owned()),
+            source_width: column.width,
+            target_width: Some(target_width),
+            kind: ColumnChangeKind::Consume,
+        });
+        self.request(
+            "session.move_block",
+            json!({
+                "block_id":column.block,
+                "anchor_block_id":anchor,
+                "direction":"vertical",
+                "side":"after"
+            }),
+        );
+    }
+
+    pub fn expel_pane(&mut self, direction: i8) {
+        let Some(column) = self.active_column() else {
+            return;
+        };
+        let Some(window) = self.model().window() else {
+            return;
+        };
+        let Some(anchor) = self
+            .strip_for(self.active, &column.session, window)
+            .expel_anchor(&column.block)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.pending_column_change = Some(PendingColumnChange {
+            host: self.active,
+            session: column.session,
+            window: column.window,
+            moved: column.block.clone(),
+            anchor: anchor.clone(),
+            survivor: Some(anchor.clone()),
+            source: column.column,
+            target: None,
+            source_width: column.width,
+            target_width: None,
+            kind: ColumnChangeKind::Expel,
+        });
+        self.request(
+            "session.move_block",
+            json!({
+                "block_id":column.block,
+                "anchor_block_id":anchor,
+                "direction":"horizontal",
+                "side":if direction < 0 {"before"} else {"after"}
+            }),
+        );
     }
 
     fn remember_column_width(
@@ -1453,6 +1675,9 @@ impl Workspace {
             Intent::CycleColumnWidth => self.cycle_column_width(),
             Intent::MaximizeColumn => self.maximize_column(),
             Intent::CenterColumn => self.center_column(),
+            Intent::MoveColumn(direction) => self.move_column(direction),
+            Intent::ConsumePane(direction) => self.consume_pane(direction),
+            Intent::ExpelPane(direction) => self.expel_pane(direction),
             Intent::Zoom => {
                 if let Some(block) = self.focused_block() {
                     self.request("session.zoom_block", json!({"block_id":block}));

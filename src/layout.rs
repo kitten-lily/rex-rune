@@ -188,6 +188,34 @@ impl<'a> Strip<'a> {
             .map(|c| c.id)
     }
 
+    /// The single block in an adjacent single-pane column.
+    pub fn swap_target(&self, block: &str, direction: i8) -> Option<&'a str> {
+        let index = self.columns.iter().position(|c| contains(c.node, block))?;
+        let current = self.columns.get(index)?.node.block_id.as_deref()?;
+        (current == block).then_some(())?;
+        self.columns
+            .get(neighbor(index, self.columns.len(), direction)?)?
+            .node
+            .block_id
+            .as_deref()
+    }
+
+    /// A block in the adjacent column that `block` can be consumed beside.
+    pub fn consume_anchor(&self, block: &str, direction: i8) -> Option<&'a str> {
+        let index = self.columns.iter().position(|c| contains(c.node, block))?;
+        first(
+            self.columns
+                .get(neighbor(index, self.columns.len(), direction)?)?
+                .node,
+        )
+    }
+
+    /// Another block in `block`'s column, used to expel it horizontally.
+    pub fn expel_anchor(&self, block: &str) -> Option<&'a str> {
+        let column = self.columns.iter().find(|c| contains(c.node, block))?;
+        another(column.node, block)
+    }
+
     /// Center `block`'s column in the window, clamped at the strip's ends.
     pub fn center(&self, block: &str) -> Option<f64> {
         let [left, width] = self.column_span(block)?;
@@ -275,6 +303,23 @@ fn contains(node: &ViewLayoutNode, block: &str) -> bool {
                 .flatten()
                 .any(|n| contains(n, block))
         })
+}
+fn neighbor(index: usize, len: usize, direction: i8) -> Option<usize> {
+    match direction.cmp(&0) {
+        std::cmp::Ordering::Less => index.checked_sub(1),
+        std::cmp::Ordering::Greater => (index + 1 < len).then_some(index + 1),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+fn another<'a>(node: &'a ViewLayoutNode, block: &str) -> Option<&'a str> {
+    if let Some(candidate) = node.block_id.as_deref() {
+        return (candidate != block).then_some(candidate);
+    }
+    let split = node.split.as_ref()?;
+    [&split.before, &split.after]
+        .into_iter()
+        .flatten()
+        .find_map(|node| another(node, block))
 }
 fn zoomed(window: &Window) -> Option<Layout> {
     let block = window.zoomed_block_id.as_ref()?;
@@ -445,6 +490,17 @@ mod tests {
             "before":{"split":{"direction":"horizontal","ratio":0.5,"before":{"block_id":"a"},"after":{"block_id":"b"}}},
             "after":{"split":{"direction":"vertical","ratio":0.5,"before":{"block_id":"c"},"after":{"block_id":"d"}}}}}}]})).unwrap();
         let strip = Strip::new(&window, 0.5);
+        assert_eq!(strip.swap_target("a", 1), Some("b"));
+        assert_eq!(strip.swap_target("b", -1), Some("a"));
+        assert_eq!(
+            strip.swap_target("b", 1),
+            None,
+            "the next column has two panes"
+        );
+        assert_eq!(strip.consume_anchor("b", 1), Some("c"));
+        assert_eq!(strip.consume_anchor("c", -1), Some("b"));
+        assert_eq!(strip.expel_anchor("c"), Some("d"));
+        assert_eq!(strip.expel_anchor("a"), None);
         assert_eq!(strip.column_span("d"), Some([1., 0.5]));
         assert_eq!(strip.reveal(0., "d"), 0.5, "the right edge comes into view");
         assert_eq!(strip.reveal(0.5, "b"), 0.5, "already in view");

@@ -29,6 +29,9 @@ pub enum Intent {
     CycleColumnWidth,
     MaximizeColumn,
     CenterColumn,
+    MoveColumn(i8),
+    ConsumePane(i8),
+    ExpelPane(i8),
     Zoom,
     Sidebar,
     Settings,
@@ -374,7 +377,8 @@ impl Workspace {
         let Some(width) = self.active_column_width() else {
             return Vec::new();
         };
-        vec![
+        let actions = self.column_actions();
+        let mut entries = vec![
             Entry::new(
                 "Cycle column width",
                 "Ctrl Shift S",
@@ -392,7 +396,50 @@ impl Workspace {
                 Intent::MaximizeColumn,
             ),
             Entry::new("Center column", "", group, Intent::CenterColumn),
-        ]
+        ];
+        for (label, key, action, enabled) in [
+            (
+                "Move column left",
+                "Ctrl Alt Shift Left",
+                Intent::MoveColumn(-1),
+                actions.move_left,
+            ),
+            (
+                "Move column right",
+                "Ctrl Alt Shift Right",
+                Intent::MoveColumn(1),
+                actions.move_right,
+            ),
+            (
+                "Consume pane into left column",
+                "",
+                Intent::ConsumePane(-1),
+                actions.consume_left,
+            ),
+            (
+                "Consume pane into right column",
+                "",
+                Intent::ConsumePane(1),
+                actions.consume_right,
+            ),
+            (
+                "Expel pane to new column left",
+                "",
+                Intent::ExpelPane(-1),
+                actions.expel,
+            ),
+            (
+                "Expel pane to new column right",
+                "",
+                Intent::ExpelPane(1),
+                actions.expel,
+            ),
+        ] {
+            let mut entry = Entry::new(label, key, group, action);
+            entry.enabled = enabled;
+            entries.push(entry);
+        }
+        entries
     }
 
     /// A sidebar host header's menu: New session, Default shell…, and Retry while offline.
