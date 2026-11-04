@@ -1550,6 +1550,8 @@ async fn run_data(
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
                     _ = tick.tick(), if dirty && visible => {
+                        // Mid synchronized update: keep showing the last frame, check again next tick.
+                        if stream.render_held(Instant::now())? { continue; }
                         if let Some(terminal) = &stream.terminal {
                             let frame = Arc::new(renderer.frame_with_search(terminal, search.as_ref())?);
                             let mut transitioned = false;

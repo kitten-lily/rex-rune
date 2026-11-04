@@ -5,13 +5,14 @@ use ghostty_vt::{
     render::{CellIterator, RowIterator},
     search::Search,
     style::RgbColor,
-    terminal::{Point, PointCoordinate, PointSpace},
+    terminal::{Mode, Point, PointCoordinate, PointSpace},
 };
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +65,10 @@ impl ApcParser {
     }
 }
 
+/// How long a program may hold rendering with synchronized output (mode 2026) before the
+/// terminal is drawn anyway, as in Ghostty.
+pub const RENDER_HOLD_LIMIT: Duration = Duration::from_secs(1);
+
 pub struct TerminalStream {
     pub terminal: Option<Terminal>,
     snapshot: SnapshotBuffer,
@@ -71,6 +76,8 @@ pub struct TerminalStream {
     pub received: u64,
     pub snapshot_count: usize,
     pub exit_code: Option<i64>,
+    /// When the running program began its current synchronized update.
+    held_since: Option<Instant>,
 }
 impl TerminalStream {
     pub fn new(nonce: u64) -> Self {
@@ -81,7 +88,28 @@ impl TerminalStream {
             received: 0,
             snapshot_count: 0,
             exit_code: None,
+            held_since: None,
         }
+    }
+
+    /// The program is in the middle of a synchronized update (mode 2026), so drawing now
+    /// would show it half done: a full-screen program redrawing after a resize would flash
+    /// blank. A hold past [`RENDER_HOLD_LIMIT`] is ended here, as a program may never end it.
+    pub fn render_held(&mut self, now: Instant) -> Result<bool> {
+        let Some(terminal) = self.terminal.as_mut() else {
+            return Ok(false);
+        };
+        if !terminal.mode(Mode::SYNC_OUTPUT)? {
+            self.held_since = None;
+            return Ok(false);
+        }
+        let since = *self.held_since.get_or_insert(now);
+        if now.duration_since(since) < RENDER_HOLD_LIMIT {
+            return Ok(true);
+        }
+        terminal.set_mode(Mode::SYNC_OUTPUT, false)?;
+        self.held_since = None;
+        Ok(false)
     }
     pub fn feed(&mut self, bytes: &[u8]) -> Result<()> {
         self.received += bytes.len() as u64;
@@ -690,6 +718,39 @@ mod tests {
         let mut stream = TerminalStream::new(42);
         assert!(stream.feed(&bytes).is_err());
         assert!(stream.terminal.is_none());
+    }
+    #[test]
+    fn synchronized_output_holds_rendering_for_at_most_the_limit() {
+        let terminal = Terminal::new(ghostty_vt::TerminalOptions::default()).unwrap();
+        let mut stream = TerminalStream::new(42);
+        stream
+            .feed(&ghostty_vt::snapshot::encode(&terminal).unwrap())
+            .unwrap();
+        let start = Instant::now();
+        assert!(!stream.render_held(start).unwrap());
+        // A redraw: begin the update and clear, then (later) draw and end it.
+        stream.feed(b"\x1b[?2026h\x1b[2J").unwrap();
+        assert!(
+            stream.render_held(start).unwrap(),
+            "the cleared screen stays hidden"
+        );
+        stream.feed(b"redrawn\x1b[?2026l").unwrap();
+        assert!(
+            !stream.render_held(start).unwrap(),
+            "the finished update draws"
+        );
+
+        stream.feed(b"\x1b[?2026h").unwrap();
+        assert!(stream.render_held(start).unwrap());
+        let late = start + RENDER_HOLD_LIMIT;
+        assert!(
+            !stream.render_held(late).unwrap(),
+            "a hold never outlasts the limit"
+        );
+        assert!(
+            !stream.render_held(late).unwrap(),
+            "and is ended, not restarted"
+        );
     }
     #[test]
     fn snapshot_with_kitty_image_in_history_installs_a_terminal() {
