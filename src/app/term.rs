@@ -550,7 +550,9 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
     let start = frame.display_row_start(visible);
     let cols = frame.cols as usize;
     let selection = term.selection.map(|(a, b)| (a.min(b), a.max(b)));
-    let mut grid = el().w_full().h_full().instant_changes();
+    // A size another client owns can be wider or taller than this grid: crop it here, not at
+    // the card's edge, so it never covers the padding or the card's border.
+    let mut grid = el().w_full().h_full().instant_changes().clip_rounded(0.);
     for (y, cells) in frame.cells.iter().enumerate().skip(start).take(visible) {
         let sel = selection.and_then(|(a, b)| {
             let (row0, row1) = (y * cols, y * cols + cols - 1);
