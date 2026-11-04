@@ -54,7 +54,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             .child(sidebar::sidebar(s, cx))
             .child(sidebar::sidebar_edge(s));
     }
-    body = body.child(panes::area(s));
+    body = body.child(panes::area(s, cx.env().scale * scale));
     let mut root = el()
         .key("root")
         .absolute(0., 0.)

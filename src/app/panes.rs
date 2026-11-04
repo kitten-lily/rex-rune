@@ -415,13 +415,7 @@ fn card(
                     }
                     true
                 })
-                .child(term::grid(
-                    &format!("g{block}"),
-                    t,
-                    m,
-                    s.images.as_ref(),
-                    look,
-                ));
+                .child(term::grid(&format!("g{block}"), t, m, look));
             let mut grid = grid;
             if let Some(edit) = &t.search {
                 let (edit_key, change_key) = (key.clone(), key.clone());
@@ -583,8 +577,12 @@ fn target_block(s: &Workspace) -> Option<String> {
     .flatten()
 }
 
-pub fn area(s: &Workspace) -> El {
-    let m = term::metrics(s.settings.font_size);
+/// `px` is device pixels per point, for drawing terminal lines on whole pixels.
+pub fn area(s: &Workspace, px: f32) -> El {
+    let m = Metrics {
+        px,
+        ..term::metrics(s.settings.font_size)
+    };
     let mut area = el()
         .key("panes")
         .grow(1.)

@@ -376,7 +376,8 @@ impl Workspace {
                         }
                     })
                     .expect("terminal wake thread");
-                self.terminals.insert(key, Term::new(connection.clone()));
+                self.terminals
+                    .insert(key, Term::new(connection.clone(), self.images.as_ref()));
             }
         }
         self.terminals
@@ -465,7 +466,7 @@ impl Workspace {
     pub fn refresh_terminal(&mut self, key: &(HostId, String)) {
         let font = self.settings.font_size;
         if let Some(term) = self.terminals.get_mut(key) {
-            term.refresh();
+            term.refresh(self.images.as_ref());
             term.resize_if_owner(font);
         }
     }
