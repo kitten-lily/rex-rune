@@ -346,6 +346,25 @@ mod tests {
         assert!(stream.terminal.is_none());
     }
     #[test]
+    fn snapshot_with_kitty_image_in_history_installs_a_terminal() {
+        let mut terminal = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 1 << 20,
+        })
+        .unwrap();
+        terminal.set_kitty_image_storage_limit(1 << 20).unwrap();
+        terminal.vt_write(b"\x1b_Ga=T,f=24,s=1,v=1;CQkJ\x1b\\\r\n");
+        for line in 0..2000 {
+            terminal.vt_write(format!("line {line}\r\n").as_bytes());
+        }
+        let snapshot = ghostty_vt::snapshot::encode(&terminal).unwrap();
+        let mut stream = TerminalStream::new(42);
+        stream.feed(&snapshot).unwrap();
+        assert!(stream.terminal.is_some());
+        assert!(stream.text().unwrap().contains("line 0\n"));
+    }
+    #[test]
     fn every_apc_split_and_false_nonce() {
         let message = b"a\x1b_rex1;123;{\"type\":\"resize\",\"cols\":80,\"rows\":24}\x1b\\z";
         for split in 0..=message.len() {

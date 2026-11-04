@@ -131,16 +131,10 @@ impl SnapshotBuffer {
             }
             self.scan = end;
             if tag == 6 {
-                let mut decoder = snapshot::Decoder::from_slice(&self.bytes[..end]);
-                decoder.ready()?;
-                while decoder.next_page()?.is_some() {}
-                ensure!(
-                    decoder.source_offset()? == Some(end),
-                    "snapshot boundary mismatch"
-                );
-                let terminal = decoder
-                    .into_terminal()
-                    .ok_or_else(|| anyhow::anyhow!("snapshot has no terminal"))?;
+                // One-shot decode: ghostty-vt 0.8's `next_page` fails with
+                // InvalidValue on the Kitty image records that may follow
+                // READY. The slice ends at FINISH, so nothing else is read.
+                let terminal = snapshot::Decoder::from_slice(&self.bytes[..end]).decode()?;
                 let tail = self.bytes[end..].to_vec();
                 self.bytes.clear();
                 return Ok(Some((terminal, tail)));
