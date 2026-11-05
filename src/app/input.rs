@@ -149,8 +149,8 @@ fn shortcut(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             Intent::MoveColumn(if ev.key == Key::Left { -1 } else { 1 }),
             tx,
         );
-    } else if m.alt
-        && !ctrl(ev)
+    } else if ctrl(ev)
+        && m.alt
         && !m.shift
         && matches!(ev.key, Key::Left | Key::Right | Key::Up | Key::Down)
     {

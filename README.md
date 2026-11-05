@@ -152,7 +152,7 @@ A host's default shell (empty means the server user's login shell) is used for e
 | Ctrl Shift N / T | New session on the active host / new tab |
 | Ctrl Shift D / Ctrl Alt D | Split right / down; in a scrolling tab, split right creates a new column after the focused column |
 | Ctrl PageUp / PageDown | Previous / next tab |
-| Alt arrows | Focus an adjacent pane |
+| Ctrl Alt arrows | Focus an adjacent pane; in a scrolling tab, the strip scrolls to show it |
 | Ctrl Shift Enter | Zoom / restore the focused pane |
 | Ctrl Shift Space | Focused-pane actions |
 | Ctrl Shift W | Close the focused pane, or the tab when it has one pane (asks first) |

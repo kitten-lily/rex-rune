@@ -689,6 +689,38 @@ fn moving_single_pane_columns_uses_swap_and_keeps_block_widths() {
 }
 
 #[test]
+fn ctrl_alt_arrows_move_pane_focus_and_alt_arrows_reach_the_terminal() {
+    let (ws, rx) = tabbed_workspace("split");
+    let path = ws.settings_path.clone();
+    let mut rt = runtime(ws);
+    let arrow = |ctrl| KeyEvent {
+        key: Key::Right,
+        mods: Mods {
+            ctrl,
+            alt: true,
+            ..Mods::default()
+        },
+    };
+    rt.key(arrow(false));
+    rt.frame(1. / 60.);
+    assert!(
+        requests(&rx)
+            .iter()
+            .all(|(method, ..)| method != "session.focus_direction"),
+        "Alt+Right belongs to the terminal program"
+    );
+    rt.key(arrow(true));
+    rt.frame(1. / 60.);
+    let sent = requests(&rx);
+    let focus = sent
+        .iter()
+        .find(|(method, ..)| method == "session.focus_direction")
+        .expect("Ctrl+Alt+Right moves focus");
+    assert_eq!(focus.2["direction"], "right");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
 fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
     let endpoint = "unix:///nonexistent/rex-test.sock";
 
