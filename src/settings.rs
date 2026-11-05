@@ -5,6 +5,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub const DEFAULT_FONT_FAMILY: &str = "JetBrainsMono Nerd Font";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Host {
     pub label: String,
@@ -73,6 +75,8 @@ pub struct Settings {
     /// The sidebar was open when the app last saved, so it opens again at launch.
     pub sidebar_open: bool,
     pub font_size: f32,
+    pub font_family: String,
+    pub font_fallbacks: Vec<String>,
     pub ui_scale: f32,
     pub notice_position: NoticePosition,
     pub notifications: NotificationsConfig,
@@ -104,6 +108,8 @@ impl Default for Settings {
             sidebar_width: 236.,
             sidebar_open: false,
             font_size: 15.,
+            font_family: DEFAULT_FONT_FAMILY.into(),
+            font_fallbacks: Vec::new(),
             ui_scale: 1.,
             notice_position: NoticePosition::default(),
             notifications: NotificationsConfig::default(),
@@ -143,6 +149,8 @@ impl Settings {
             !settings.hosts.is_empty(),
             "workspace needs at least one host"
         );
+        (settings.font_family, settings.font_fallbacks) =
+            normalize_font_preferences(&settings.font_family, &settings.font_fallbacks)?;
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
@@ -157,6 +165,33 @@ impl Settings {
         std::fs::rename(temporary, path)?;
         Ok(())
     }
+}
+
+pub fn parse_font_family(family: &str) -> std::result::Result<String, String> {
+    let family = family.trim();
+    if family.is_empty() || family.chars().any(|ch| ch.is_control() || ch == ',') {
+        return Err("Enter one font family name, without commas or control characters.".into());
+    }
+    Ok(family.to_owned())
+}
+
+pub fn normalize_font_preferences(
+    family: &str,
+    fallbacks: &[String],
+) -> Result<(String, Vec<String>)> {
+    let family = parse_font_family(family).map_err(anyhow::Error::msg)?;
+    let mut names: Vec<String> = Vec::new();
+    for fallback in fallbacks {
+        let fallback = parse_font_family(fallback).map_err(anyhow::Error::msg)?;
+        if !fallback.eq_ignore_ascii_case(&family)
+            && !names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(&fallback))
+        {
+            names.push(fallback);
+        }
+    }
+    Ok((family, names))
 }
 
 pub fn normalize_ui_scale(scale: f32) -> f32 {
@@ -195,6 +230,8 @@ mod tests {
         assert_eq!(old.notifications, NotificationsConfig::default());
         assert_eq!(old.tab_layout, TabLayout::Tiled);
         assert!(old.tab_layouts.is_empty());
+        assert_eq!(old.font_family, DEFAULT_FONT_FAMILY);
+        assert!(old.font_fallbacks.is_empty());
         let partial: Settings =
             serde_json::from_str(r#"{"notifications":{"done":false}}"#).unwrap();
         assert!(!partial.notifications.done && partial.notifications.blocked);
@@ -216,5 +253,24 @@ mod tests {
             back.tab_layouts["unix:///run/rex.sock"]["session:a"]["window:a"],
             TabLayout::Tiled
         );
+    }
+
+    #[test]
+    fn font_preferences_normalize_and_reject_invalid_names() {
+        let (family, fallbacks) = normalize_font_preferences(
+            "  IBM Plex Mono  ",
+            &[
+                "Noto Sans CJK JP".into(),
+                " noto sans cjk jp ".into(),
+                "IBM Plex Mono".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(family, "IBM Plex Mono");
+        assert_eq!(fallbacks, ["Noto Sans CJK JP"]);
+        for invalid in ["", "   ", "bad\nname", "two,families"] {
+            assert!(normalize_font_preferences(invalid, &[]).is_err());
+            assert!(normalize_font_preferences("IBM Plex Mono", &[invalid.into()]).is_err());
+        }
     }
 }

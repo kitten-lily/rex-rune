@@ -717,3 +717,52 @@ async fn destroying_a_session_forgets_it_without_an_error() {
     drop(host);
     server.await.unwrap();
 }
+
+#[test]
+fn font_preferences_use_saved_values_unless_explicitly_overridden() {
+    use clap::Parser;
+    let settings = crate::settings::Settings {
+        font_family: "IBM Plex Mono".into(),
+        font_fallbacks: vec!["Inter".into()],
+        font_size: 22.,
+        ..Default::default()
+    };
+    let defaults = Options::parse_from(["rex-linux"]);
+    assert_eq!(
+        defaults.fonts(&settings),
+        ("IBM Plex Mono", settings.font_fallbacks.as_slice())
+    );
+    assert_eq!(defaults.font_size, None);
+
+    let explicit = Options::parse_from([
+        "rex-linux",
+        "--font",
+        "monospace",
+        "--font-size",
+        "15",
+        "--font-fallback",
+        "Noto Sans CJK JP",
+        "--font-fallback",
+        "Inter",
+    ]);
+    assert_eq!(
+        explicit.fonts(&settings),
+        (
+            "monospace",
+            &["Noto Sans CJK JP".into(), "Inter".into()][..]
+        )
+    );
+    assert_eq!(
+        explicit.font_size,
+        Some(15.),
+        "an explicit 15 is not the default sentinel"
+    );
+    for args in [
+        ["rex-linux", "--font", " "],
+        ["rex-linux", "--font-fallback", "a,b"],
+        ["rex-linux", "--font-size", "NaN"],
+        ["rex-linux", "--font-size", "inf"],
+    ] {
+        assert!(Options::try_parse_from(args).is_err());
+    }
+}

@@ -11,7 +11,9 @@ use super::{
 use rex_linux::{
     connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
     layout::{COLUMN_WIDTH, Divider, Placement, Strip, shell_layout},
-    settings::{Host, NoticePosition, Settings, TabLayout, validate_host},
+    settings::{
+        Host, NoticePosition, Settings, TabLayout, normalize_font_preferences, validate_host,
+    },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo},
 };
 use rexrs::api::session::Window;
@@ -157,8 +159,8 @@ impl Workspace {
         let active = wanted
             .and_then(|e| settings.hosts.iter().position(|h| &h.endpoint == e))
             .unwrap_or(0);
-        if options.font_size != 15. {
-            settings.font_size = options.font_size;
+        if let Some(size) = options.font_size {
+            settings.font_size = size;
         }
         // The sidebar opens as it was left, at its saved width.
         let sidebar = rune_kit::PaneState::new(236.)
@@ -936,6 +938,22 @@ impl Workspace {
                 self.open_panel(PanelKind::Hosts(query), &title, &[])
             }
             Intent::RetryHost(host) => self.send(host, HostCommand::Reconnect),
+            Intent::Fonts => {
+                let family = self.settings.font_family.clone();
+                let fallbacks = self.settings.font_fallbacks.join(", ");
+                self.open_panel(
+                    PanelKind::Form(Form::Fonts),
+                    "Terminal fonts",
+                    &[
+                        ("Font family", "JetBrainsMono Nerd Font", &family),
+                        (
+                            "Fallback families (comma-separated)",
+                            "Automatic system fallbacks when empty",
+                            &fallbacks,
+                        ),
+                    ],
+                );
+            }
             Intent::ChooseTheme => {
                 self.themes = self.theme_dirs.list();
                 self.open_panel(PanelKind::Themes, "Terminal theme", &[("", "Filter themes…", "")]);
@@ -1494,7 +1512,18 @@ impl Workspace {
         }
         match kind {
             PanelKind::Form(form) => {
-                let error = if let Form::HostShell(_) = form {
+                let font_preferences = matches!(form, Form::Fonts).then(|| {
+                    let fallbacks = values[1]
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    normalize_font_preferences(&values[0], &fallbacks)
+                });
+                let error = if let Some(result) = &font_preferences {
+                    result.as_ref().err().map(ToString::to_string)
+                } else if let Form::HostShell(_) = form {
                     // Empty clears it; the server takes one program name, never arguments.
                     values[0]
                         .chars()
@@ -1539,6 +1568,14 @@ impl Workspace {
                 let back = self.settings_back();
                 self.close_panel(tx);
                 match form {
+                    Form::Fonts => {
+                        let (family, fallbacks) = font_preferences
+                            .expect("font form")
+                            .expect("validated above");
+                        self.settings.font_family = family;
+                        self.settings.font_fallbacks = fallbacks;
+                        self.save();
+                    }
                     Form::HostShell(host) => {
                         self.settings.hosts[host].shell =
                             (!values[0].is_empty()).then(|| values[0].clone());

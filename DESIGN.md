@@ -50,7 +50,7 @@ Rosé Pine builds map the tokens onto Rosé Pine's roles; everything else (fills
 
 ## Typography
 
-Chrome uses Inter (bundled with the kit) in 10–13 pt steps, weights about 450 (body), 560 (medium), 620 (strong); group labels are 10.5 pt small capitals with 0.6 tracking. The terminal font is configurable (`--font`, `--font-size`, saved size 8–48 px; default JetBrainsMono Nerd Font 15) and falls back to bundled IBM Plex Mono. Cell width follows the font's advance; ligatures and kerning are off so the grid stays exact. Names keep their case and ellipsize when space is bounded, with tooltips for the full text. Server windows are called **tabs**.
+Chrome uses Inter (bundled with the kit) in 10–13 pt steps, weights about 450 (body), 560 (medium), 620 (strong); group labels are 10.5 pt small capitals with 0.6 tracking. The terminal family, ordered explicit fallbacks and 8–48 pt size are saved locally; `--font`, repeated `--font-fallback` and `--font-size` override them for one launch. The default is JetBrainsMono Nerd Font 15, explicit fallbacks precede fontconfig's automatic chain, and unavailable primaries use bundled IBM Plex Mono. Family changes apply after reopening the client. Cell width follows the primary font's advance; ligatures and kerning are off so the grid stays exact. Names keep their case and ellipsize when space is bounded, with tooltips for the full text. Server windows are called **tabs**.
 
 ## Layout and shape
 

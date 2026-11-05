@@ -1562,13 +1562,13 @@ mod tests {
         })
         .unwrap();
         let mut renderer = rex_linux::terminal::Renderer::new().unwrap();
-        let fonts = crate::app::fonts::load("JetBrainsMono Nerd Font");
+        let fonts = crate::app::fonts::load("JetBrainsMono Nerd Font", &[]);
         let mut rt = Runtime::with_text(
             RowState { cells: vec![] },
             view,
             (2300., 100.),
             Env::new(true, 1.5),
-            rune::text::TextSystem::new(fonts.files, fonts.families),
+            rune::text::TextSystem::new_with_paths(fonts.files, fonts.paths, fonts.families),
         );
         // Shell prompts mix fallback glyphs, styles and ASCII. Rebuild on every keystroke,
         // including runs preceded by blanks, at the user's fractional display scale.
@@ -1631,7 +1631,7 @@ mod tests {
             .unwrap()
             .frame(&terminal)
             .unwrap();
-        let fonts = crate::app::fonts::load("JetBrainsMono Nerd Font");
+        let fonts = crate::app::fonts::load("JetBrainsMono Nerd Font", &[]);
         let mut rt = Runtime::with_text(
             RowState {
                 cells: frame.cells[0].clone(),
@@ -1639,7 +1639,7 @@ mod tests {
             scaled_view,
             (600., 100.),
             Env::new(true, 1.5),
-            rune::text::TextSystem::new(fonts.files, fonts.families),
+            rune::text::TextSystem::new_with_paths(fonts.files, fonts.paths, fonts.families),
         );
         rt.frame(1. / 60.);
         // Horizontal strokes: everything no taller than a heavy line.

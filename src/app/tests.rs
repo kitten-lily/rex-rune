@@ -1098,7 +1098,7 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
         super::panel::SettingsSection::Terminal
     );
     let font = rt.state.settings.font_size;
-    for _ in 0..3 {
+    for _ in 0..4 {
         press(&mut rt, Key::Tab);
     }
     let path = focused(&rt).expect("a focused control");
@@ -1736,4 +1736,48 @@ fn a_missing_rex_explains_itself_and_naming_reapplies_to_installed_agents() {
     assert!(preview.contains(&"--session-naming=true".to_owned()));
     assert!(preview.contains(&"--dry-run".to_owned()));
     std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn font_preferences_save_locally_and_return_to_settings() {
+    let mut ws = workspace();
+    let requests = capture_host(&mut ws, 0);
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    let mut rt = runtime(ws);
+    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "font-change");
+    rt.state.panel.as_mut().unwrap().inputs[0].text = "monospace".into();
+    rt.state.panel.as_mut().unwrap().inputs[1].text = "Noto Sans CJK JP, Noto Color Emoji".into();
+    click(&mut rt, "save-form");
+    assert!(matches!(
+        rt.state.panel.as_ref().map(|panel| &panel.kind),
+        Some(PanelKind::Settings)
+    ));
+    let saved = Settings::load(&rt.state.settings_path).unwrap();
+    assert_eq!(saved.font_family, "monospace");
+    assert_eq!(
+        saved.font_fallbacks,
+        ["Noto Sans CJK JP", "Noto Color Emoji"]
+    );
+    assert!(
+        requests.try_iter().next().is_none(),
+        "font preferences are entirely local"
+    );
+    std::fs::remove_file(&rt.state.settings_path).unwrap();
+}
+
+#[test]
+fn font_preferences_validate_without_overwriting_the_saved_values() {
+    let mut ws = workspace();
+    ws.settings.font_fallbacks = vec!["Inter".into()];
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    let mut rt = runtime(ws);
+    click(&mut rt, "settings-section:terminal");
+    click(&mut rt, "font-change");
+    rt.state.panel.as_mut().unwrap().inputs[0].text.clear();
+    click(&mut rt, "save-form");
+    assert!(rt.state.panel.as_ref().unwrap().error.is_some());
+    assert!(!rt.state.settings_path.exists());
+    press(&mut rt, Key::Escape);
+    assert_eq!(rt.state.settings.font_fallbacks, ["Inter"]);
 }

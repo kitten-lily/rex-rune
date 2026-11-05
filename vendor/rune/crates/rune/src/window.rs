@@ -2208,16 +2208,24 @@ impl<S: 'static> Host<S> {
         // The first frame, now, so the window comes on screen with it instead of empty for a
         // frame or two. AppKit has ordered the window in, but it reaches the screen with this
         // turn's Core Animation commit, so nothing reports it visible yet.
-        let mut drew = false;
+        #[cfg(not(target_os = "macos"))]
+        let drew = false;
         #[cfg(target_os = "macos")]
-        if visible && !self.rt.minimize_request && !self.finished && !event_loop.exiting()
-            && self.win.as_ref().is_some_and(|w| w.panel.is_none() && w.window.is_minimized() != Some(true))
-        {
-            let presents = self.meter.totals().presents;
-            self.redraw();
-            drew = self.meter.totals().presents > presents;
-            self.shell(event_loop);
-        }
+        let drew = {
+            let mut drew = false;
+            if visible && !self.rt.minimize_request && !self.finished && !event_loop.exiting()
+                && self
+                    .win
+                    .as_ref()
+                    .is_some_and(|w| w.panel.is_none() && w.window.is_minimized() != Some(true))
+            {
+                let presents = self.meter.totals().presents;
+                self.redraw();
+                drew = self.meter.totals().presents > presents;
+                self.shell(event_loop);
+            }
+            drew
+        };
         if !drew && (visible || launcher) && let Some(w) = &self.win {
             w.window.request_redraw();
         }

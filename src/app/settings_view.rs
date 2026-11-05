@@ -290,16 +290,39 @@ fn notifications(s: &Workspace) -> El {
 }
 
 fn terminal(s: &Workspace) -> El {
-    let font = s.terminal_family.unwrap_or("IBM Plex Mono (bundled)");
+    let active = s.terminal_family.unwrap_or("IBM Plex Mono (bundled)");
+    let display_fallbacks = |families: &[String]| {
+        if families.is_empty() {
+            "Automatic".into()
+        } else {
+            families.join(", ")
+        }
+    };
+    let saved_fallbacks = display_fallbacks(&s.settings.font_fallbacks);
+    let active_fallbacks = display_fallbacks(if s.options.font_fallback.is_empty() {
+        &s.settings.font_fallbacks
+    } else {
+        &s.options.font_fallback
+    });
     let mut body = col()
         .gap(4.)
         .child(setting(
-            "Font",
-            "Choose another with --font when starting Rex.",
-            text(font.to_owned())
+            "Font family",
+            &format!("Saved: {}. Active: {active}.", s.settings.font_family),
+            pill("font-change", "Change…", Pill::Neutral, 26., |s, tx| {
+                s.perform(Intent::Fonts, tx)
+            }),
+        ))
+        .child(divider())
+        .child(setting(
+            "Fallback fonts",
+            &format!(
+                "Saved: {saved_fallbacks}. Used before automatic system fallbacks; changes apply next launch."
+            ),
+            text(active_fallbacks)
                 .font(medium(13.))
                 .color(rgb(INK))
-                .truncate()
+                .wrap()
                 .max_w(220.),
         ))
         .child(divider())

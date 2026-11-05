@@ -29,6 +29,8 @@ pub enum Intent {
     Zoom,
     Sidebar,
     Settings,
+    /// The terminal family and ordered fallback form, from Settings.
+    Fonts,
     AddHost,
     EditHost(usize),
     RemoveHost(usize),
@@ -51,6 +53,7 @@ impl Intent {
                 | Intent::RenameWindow(_)
                 | Intent::CloseWindow(_)
                 | Intent::Settings
+                | Intent::Fonts
                 | Intent::ChooseTheme
                 | Intent::AddHost
                 | Intent::EditHost(_)
@@ -98,6 +101,7 @@ pub enum PaneAction {
 
 #[derive(Clone, Debug)]
 pub enum Form {
+    Fonts,
     /// A host's default shell for new terminals.
     HostShell(usize),
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.

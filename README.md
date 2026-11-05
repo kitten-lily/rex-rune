@@ -94,7 +94,9 @@ Options:
 | `--session <LABEL\|ID>` | Select a session by exact label or ID. Missing or ambiguous names never pick an arbitrary session. |
 | `--new <LABEL>` | Explicitly create a persistent session (conflicts with `--session`). Ordinary attachment never creates or destroys sessions. |
 | `--block <ID>` | Initially focus this terminal block. |
-| `--font <FAMILY>`, `--font-size <PX>` | Terminal font (default `JetBrainsMono Nerd Font`, 15) resolved through fontconfig with its ordered fallback chain. If the primary family is missing, the bundled IBM Plex Mono is used and a line is printed on stderr. |
+| `--font <FAMILY>` | Override the saved terminal family for this launch. The family is resolved through fontconfig; if it is unavailable, bundled IBM Plex Mono is used and reported on stderr. |
+| `--font-fallback <FAMILY>` | Override the saved explicit fallback list for this launch. Repeat for an ordered list; fontconfig's automatic fallback chain follows it. |
+| `--font-size <PT>` | Override the saved terminal size for this launch (8–48 pt). |
 | `--config <PATH>` | Use a separate workspace preferences file. |
 | `--window-size <WxH>` | Requested startup size (default `1440x900`); tiling compositors may override it. |
 
@@ -119,8 +121,8 @@ REX_INSTALL_FONT = "Iosevka Term"
 ```
 
 The variable is optional. When set, `mise run install` adds the corresponding
-`--font` argument to the desktop entry; when unset, the application uses its
-default family.
+`--font` override to the desktop entry; when unset, the application uses its
+saved family.
 
 The install task copies `rex-linux` to `$XDG_BIN_HOME` (normally
 `~/.local/bin`), installs `dev.shuv.rex-linux.desktop` under
@@ -132,9 +134,11 @@ desktop step needs `desktop-file-install`, `desktop-file-validate` and
 
 ## Configuration
 
-Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-linux/workspace.json` (default `~/.config/rex-linux/workspace.json`): saved hosts (label, endpoint, collapsed state, optional default shell), the last host and session per host, whether the sidebar is open and its width, the default tab layout (`tab_layout`) and per-host/session/tab choices (`tab_layouts`), terminal font size, the terminal theme by name (`terminal_theme`, absent for the chrome's built-in theme), interface zoom (`ui_scale`), the corner notices appear in (`notice_position`), the activity and notification choices (`notifications`) and whether agents may name sessions (`agent_session_naming`). Use `--config <path>` to keep a separate workspace.
+Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-linux/workspace.json` (default `~/.config/rex-linux/workspace.json`): saved hosts (label, endpoint, collapsed state, optional default shell), the last host and session per host, whether the sidebar is open and its width, the default tab layout (`tab_layout`) and per-host/session/tab choices (`tab_layouts`), terminal font family (`font_family`), ordered explicit fallbacks (`font_fallbacks`), font size, the terminal theme by name (`terminal_theme`, absent for the chrome's built-in theme), interface zoom (`ui_scale`), the corner notices appear in (`notice_position`), the activity and notification choices (`notifications`) and whether agents may name sessions (`agent_session_naming`). Use `--config <path>` to keep a separate workspace.
 
-Settings (`Ctrl ,`, or Settings… in Commands) has Interface (zoom, sidebar, default tab layout, notice corner), Terminal (font size, theme, each host's default shell), Notifications (activity in tabs, desktop notifications and which changes send one), Integrations (Rex's skill and hooks for coding agents on this machine), Remote Hosts (add, edit or remove saved hosts) and Shortcuts sections. A tab's right-click menu or Commands can change that tab alone between **Tiled** and **Scrolling**. Removing a host only stops this client connecting to it; its sessions keep running on the server. A changed endpoint connects to that server as a new host.
+Settings (`Ctrl ,`, or Settings… in Commands) has Interface (zoom, sidebar, default tab layout, notice corner), Terminal (font family, explicit fallbacks, size, theme and each host's default shell), Notifications (activity in tabs, desktop notifications and which changes send one), Integrations (Rex's skill and hooks for coding agents on this machine), Remote Hosts (add, edit or remove saved hosts) and Shortcuts sections. Font-family changes apply after reopening the client; they never restart the server or its sessions. Explicit fallbacks are tried in order before fontconfig's automatic fallback chain. `--font` and `--font-fallback` override saved choices for one launch without replacing them. A launcher installed with `REX_INSTALL_FONT` therefore continues to override the family selected in Settings.
+
+A tab's right-click menu or Commands can change that tab alone between **Tiled** and **Scrolling**. Removing a host only stops this client connecting to it; its sessions keep running on the server. A changed endpoint connects to that server as a new host.
 
 A host's default shell (empty means the server user's login shell) is used for every new session, tab and split this client creates on that host. Host endpoints must be `unix://` with an absolute path, or `https://`, `http://`, `wss://` or `ws://` URLs.
 
