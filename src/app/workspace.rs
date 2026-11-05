@@ -47,14 +47,16 @@ pub struct DividerDrag {
     pub ratio: f64,
 }
 
+/// A boundary drag in a scrolling tab: it resizes only the column before the boundary; the
+/// columns after it keep their widths and move with it.
 pub struct ColumnDrag {
     pub host: usize,
     pub session: String,
     pub window: String,
     pub before: String,
     pub after: String,
-    pub start: [f64; 2],
-    pub widths: [f64; 2],
+    pub start: f64,
+    pub width: f64,
 }
 
 struct ActiveColumn {
@@ -742,15 +744,8 @@ impl Workspace {
             .filter(|d| d.host == host && d.session == session && d.window == window_id);
         Strip::with_widths(window, |column| {
             preview
-                .and_then(|drag| {
-                    if column == drag.before {
-                        Some(drag.widths[0])
-                    } else if column == drag.after {
-                        Some(drag.widths[1])
-                    } else {
-                        None
-                    }
-                })
+                .filter(|drag| column == drag.before)
+                .map(|drag| drag.width)
                 .unwrap_or_else(|| self.column_width_for(host, session, window_id, column))
         })
     }
@@ -1148,7 +1143,8 @@ impl Workspace {
             return;
         }
         let strip = self.strip_for(self.active, session, window);
-        let (Some(a), Some(b)) = (strip.column_width(&before), strip.column_width(&after)) else {
+        let (Some(width), Some(_)) = (strip.column_width(&before), strip.column_width(&after))
+        else {
             return;
         };
         self.column_drag = Some(ColumnDrag {
@@ -1157,8 +1153,8 @@ impl Workspace {
             window: window_id.to_owned(),
             before,
             after,
-            start: [a, b],
-            widths: [a, b],
+            start: width,
+            width,
         });
     }
 
@@ -1166,11 +1162,7 @@ impl Workspace {
         let Some(drag) = &mut self.column_drag else {
             return;
         };
-        let sum = drag.start[0] + drag.start[1];
-        let lower = MIN_COLUMN_WIDTH.max(sum - MAX_COLUMN_WIDTH);
-        let upper = MAX_COLUMN_WIDTH.min(sum - MIN_COLUMN_WIDTH);
-        let before = (drag.start[0] + delta).clamp(lower, upper);
-        drag.widths = [before, sum - before];
+        drag.width = (drag.start + delta).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
     }
 
     pub fn finish_column_drag(&mut self, cancelled: bool) {
@@ -1185,14 +1177,7 @@ impl Workspace {
             &drag.session,
             &drag.window,
             &drag.before,
-            drag.widths[0],
-        );
-        self.remember_column_width(
-            drag.host,
-            &drag.session,
-            &drag.window,
-            &drag.after,
-            drag.widths[1],
+            drag.width,
         );
         if let Some(view) = self
             .strips
@@ -1200,7 +1185,6 @@ impl Workspace {
             .and_then(|views| views.get_mut(&drag.window))
         {
             view.restore_widths.remove(&drag.before);
-            view.restore_widths.remove(&drag.after);
         }
         self.reveal_focus();
         self.save();
