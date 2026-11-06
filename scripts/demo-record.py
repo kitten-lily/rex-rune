@@ -225,7 +225,7 @@ def main():
         snap("btop")
         # 3. Back to the left, split it down.
         beat("split-down")
-        key("alt+Left", 0.35)
+        key("ctrl+alt+Left", 0.35)
         key("ctrl+alt+d", 0.7)
         type_("bat -pp -r 54:70 $REPO/src/app/theme.rs", 32)
         key("Enter", 0.9)
