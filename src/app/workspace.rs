@@ -118,6 +118,7 @@ pub struct Workspace {
 pub struct StripView {
     offset: f64,
     revealed: Option<String>,
+    revealed_span: Option<[f64; 2]>,
 }
 
 #[derive(Default)]
@@ -586,15 +587,18 @@ impl Workspace {
         if self.tab_layout(id) == TabLayout::Tiled {
             return;
         }
+        let strip = Strip::new(window, COLUMN_WIDTH);
+        let span = strip.column_span(block);
         let view = self
             .strips
             .entry(host.id)
             .or_default()
             .entry(id.clone())
             .or_default();
-        if view.revealed.as_deref() != Some(block) {
-            view.offset = Strip::new(window, COLUMN_WIDTH).reveal(view.offset, block);
+        if view.revealed.as_deref() != Some(block) || view.revealed_span != span {
+            view.offset = strip.reveal(view.offset, block);
             view.revealed = Some(block.to_owned());
+            view.revealed_span = span;
         }
     }
 
@@ -648,6 +652,7 @@ impl Workspace {
             self.settings
                 .tab_layouts
                 .retain(|_, sessions| !sessions.is_empty());
+            self.strips.clear();
             self.reveal_focus();
             self.save();
         }
