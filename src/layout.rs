@@ -225,10 +225,13 @@ impl<'a> Strip<'a> {
         )
     }
 
-    /// Another block in `block`'s column, used to expel it horizontally.
+    /// The other block in a two-pane column. Removing either pane collapses that column to the
+    /// anchor, so moving the pane horizontally beside it creates a top-level column.
     pub fn expel_anchor(&self, block: &str) -> Option<&'a str> {
         let column = self.columns.iter().find(|c| contains(c.node, block))?;
-        another(column.node, block)
+        (block_count(column.node) == 2)
+            .then(|| another(column.node, block))
+            .flatten()
     }
 
     /// Center `block`'s column in the window, clamped at the strip's ends.
@@ -326,6 +329,14 @@ fn neighbor(index: usize, len: usize, direction: i8) -> Option<usize> {
         std::cmp::Ordering::Equal => None,
     }
 }
+fn block_count(node: &ViewLayoutNode) -> usize {
+    usize::from(node.block_id.is_some())
+        + node.split.as_ref().map_or(0, |split| {
+            split.before.as_deref().map_or(0, block_count)
+                + split.after.as_deref().map_or(0, block_count)
+        })
+}
+
 fn another<'a>(node: &'a ViewLayoutNode, block: &str) -> Option<&'a str> {
     if let Some(candidate) = node.block_id.as_deref() {
         return (candidate != block).then_some(candidate);
@@ -516,6 +527,17 @@ mod tests {
         assert_eq!(strip.consume_anchor("c", -1), Some("b"));
         assert_eq!(strip.expel_anchor("c"), Some("d"));
         assert_eq!(strip.expel_anchor("a"), None);
+        let three: Window = serde_json::from_value(json!({"layers":[{"kind":"tiled","layout":
+            {"split":{"direction":"vertical","ratio":0.5,
+                "before":{"block_id":"x"},
+                "after":{"split":{"direction":"vertical","ratio":0.5,
+                    "before":{"block_id":"y"},"after":{"block_id":"z"}}}}}}]}))
+        .unwrap();
+        assert_eq!(
+            Strip::new(&three, 0.5).expel_anchor("x"),
+            None,
+            "a pane is only expellable when removing it collapses the column"
+        );
         assert_eq!(strip.column_span("d"), Some([1., 0.5]));
         assert_eq!(strip.reveal(0., "d"), 0.5, "the right edge comes into view");
         assert_eq!(strip.reveal(0.5, "b"), 0.5, "already in view");
