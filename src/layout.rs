@@ -81,8 +81,11 @@ pub fn placements(window: &Window, drag: Option<(&str, f64)>) -> Layout {
     layout
 }
 
-/// The width of a scrolling layout's column, in window widths.
-pub const COLUMN_WIDTH: f64 = 0.5;
+/// Scrolling-column widths, in window widths.
+pub const DEFAULT_COLUMN_WIDTH: f64 = 0.5;
+pub const MIN_COLUMN_WIDTH: f64 = 0.1;
+pub const MAX_COLUMN_WIDTH: f64 = 1.0;
+pub const COLUMN_WIDTH_PRESETS: [f64; 3] = [1. / 3., 0.5, 2. / 3.];
 
 /// A scrolling layout: the tiled layer's top-level side-by-side parts are columns of a strip
 /// that scrolls sideways. This client sizes the columns, ignoring the server's ratios between
@@ -97,30 +100,50 @@ pub struct Strip<'a> {
     pub extent: f64,
 }
 struct Column<'a> {
+    id: &'a str,
     node: &'a ViewLayoutNode,
     left: f64,
     width: f64,
 }
+
+/// A draggable boundary between two scrolling columns, in the visible window's units.
+pub struct ColumnEdge<'a> {
+    pub before: &'a str,
+    pub after: &'a str,
+    pub x: f64,
+}
 impl<'a> Strip<'a> {
-    /// `window`'s strip with columns `width` wide; a lone column fills the window.
+    /// `window`'s strip with every column `width` wide; a lone column fills the window.
     pub fn new(window: &'a Window, width: f64) -> Self {
+        Self::with_widths(window, |_| width)
+    }
+
+    /// `window`'s strip with client-local widths returned by `width_for`.
+    pub fn with_widths(window: &'a Window, mut width_for: impl FnMut(&str) -> f64) -> Self {
         let tiled = window.layers.iter().find(|l| l.kind == "tiled");
         let mut nodes = Vec::new();
         if let Some(node) = tiled.and_then(|l| l.layout.as_ref()) {
             columns(node, &mut nodes);
         }
-        let width = if nodes.len() == 1 {
-            width.max(1.)
-        } else {
-            width
-        };
+        let lone = nodes.len() == 1;
         let mut extent = 0.;
         let columns = nodes
             .into_iter()
-            .map(|node| {
+            .filter_map(|node| {
+                let id = column_id(node)?;
                 let left = extent;
+                let width = if lone {
+                    1.
+                } else {
+                    width_for(id).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
+                };
                 extent += width;
-                Column { node, left, width }
+                Some(Column {
+                    id,
+                    node,
+                    left,
+                    width,
+                })
             })
             .collect();
         let rows = tiled.map_or([0., 1.], |l| {
@@ -139,16 +162,57 @@ impl<'a> Strip<'a> {
     pub fn clamp(&self, offset: f64) -> f64 {
         offset.clamp(0., (self.extent - 1.).max(0.))
     }
-    /// The column span containing `block`, in strip units.
-    pub fn column_span(&self, block: &str) -> Option<[f64; 2]> {
+    /// The ID and span of the column containing `block`, in strip units.
+    pub fn column(&self, block: &str) -> Option<(&'a str, [f64; 2])> {
         self.columns
             .iter()
             .find(|c| contains(c.node, block))
-            .map(|c| [c.left, c.width])
+            .map(|c| (c.id, [c.left, c.width]))
     }
 
-    /// The offset nearest `offset` that shows all of `block`'s column, or its left edge when
-    /// the column is wider than the window.
+    pub fn column_span(&self, block: &str) -> Option<[f64; 2]> {
+        self.column(block).map(|(_, span)| span)
+    }
+    pub fn column_width(&self, column: &str) -> Option<f64> {
+        self.columns
+            .iter()
+            .find(|c| c.id == column)
+            .map(|c| c.width)
+    }
+
+    /// The block or split the server accepts as the anchor for a new column beside `block`.
+    pub fn column_anchor(&self, block: &str) -> Option<&'a str> {
+        self.columns
+            .iter()
+            .find(|c| contains(c.node, block))
+            .map(|c| c.id)
+    }
+
+    /// Center `block`'s column in the window, clamped at the strip's ends.
+    pub fn center(&self, block: &str) -> Option<f64> {
+        let [left, width] = self.column_span(block)?;
+        Some(self.clamp(left + width / 2. - 0.5))
+    }
+
+    /// Visible boundaries between adjacent columns.
+    pub fn column_edges(&self, offset: f64) -> Vec<ColumnEdge<'a>> {
+        let offset = self.clamp(offset);
+        self.columns
+            .windows(2)
+            .filter_map(|pair| {
+                let x = pair[0].left + pair[0].width - offset;
+                (-EPSILON..=1. + EPSILON)
+                    .contains(&x)
+                    .then_some(ColumnEdge {
+                        before: pair[0].id,
+                        after: pair[1].id,
+                        x,
+                    })
+            })
+            .collect()
+    }
+
+    /// The offset nearest `offset` that shows all of `block`'s column.
     pub fn reveal(&self, offset: f64, block: &str) -> f64 {
         let Some(column) = self.columns.iter().find(|c| contains(c.node, block)) else {
             return self.clamp(offset);
@@ -196,6 +260,12 @@ fn columns<'a>(node: &'a ViewLayoutNode, out: &mut Vec<&'a ViewLayoutNode>) {
     } else if first(node).is_some() {
         out.push(node);
     }
+}
+fn column_id(node: &ViewLayoutNode) -> Option<&str> {
+    node.split
+        .as_ref()
+        .and_then(|split| split.split_id.as_deref())
+        .or_else(|| first(node))
 }
 fn contains(node: &ViewLayoutNode, block: &str) -> bool {
     node.block_id.as_deref() == Some(block)
@@ -380,12 +450,39 @@ mod tests {
         assert_eq!(strip.reveal(0.5, "b"), 0.5, "already in view");
         assert_eq!(strip.reveal(0.5, "a"), 0., "the left edge comes into view");
         assert_eq!(strip.reveal(0.25, "gone"), 0.25);
-        let wide = Strip::new(&window, 1.5);
+    }
+    #[test]
+    fn local_widths_edges_center_and_column_anchors_follow_column_ids() {
+        let window: Window = serde_json::from_value(json!({"layers":[{"kind":"tiled","layout":
+            {"split":{"direction":"horizontal","ratio":0.5,
+                "before":{"split":{"direction":"horizontal","ratio":0.5,
+                    "before":{"block_id":"a"},
+                    "after":{"split":{"split_id":"column:bc","direction":"vertical","ratio":0.5,
+                        "before":{"block_id":"b"},"after":{"block_id":"c"}}}}},
+                "after":{"block_id":"d"}}}}]}))
+        .unwrap();
+        let strip = Strip::with_widths(&window, |column| match column {
+            "a" => 0.3,
+            "column:bc" => 0.6,
+            "d" => 0.4,
+            _ => unreachable!(),
+        });
+        assert!((strip.extent - 1.3).abs() < EPSILON);
+        assert_eq!(strip.column("c"), Some(("column:bc", [0.3, 0.6])));
+        assert_eq!(strip.column_anchor("c"), Some("column:bc"));
+        assert_eq!(strip.column_width("d"), Some(0.4));
+        assert!((strip.center("b").unwrap() - 0.1).abs() < EPSILON);
+        assert!((strip.center("d").unwrap() - 0.3).abs() < EPSILON);
+        let edges = strip.column_edges(0.2);
         assert_eq!(
-            wide.reveal(0., "c"),
-            3.,
-            "a column wider than the window shows its left edge"
+            edges
+                .iter()
+                .map(|edge| (edge.before, edge.after))
+                .collect::<Vec<_>>(),
+            [("a", "column:bc"), ("column:bc", "d")]
         );
+        assert!((edges[0].x - 0.1).abs() < EPSILON);
+        assert!((edges[1].x - 0.7).abs() < EPSILON);
     }
     #[test]
     fn a_lone_column_fills_the_window_and_zoom_still_wins() {

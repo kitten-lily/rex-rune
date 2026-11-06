@@ -10,7 +10,10 @@ use super::{
 };
 use rex_linux::{
     connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
-    layout::{COLUMN_WIDTH, Divider, Placement, Strip, shell_layout},
+    layout::{
+        COLUMN_WIDTH_PRESETS, ColumnEdge, DEFAULT_COLUMN_WIDTH, Divider, MAX_COLUMN_WIDTH,
+        MIN_COLUMN_WIDTH, Placement, Strip, shell_layout,
+    },
     settings::{
         ChromeTheme, Host, NoticePosition, Settings, TabLayout, TerminalThemeChoice,
         normalize_font_preferences, validate_host,
@@ -46,6 +49,24 @@ pub struct DividerDrag {
     pub ratio: f64,
 }
 
+pub struct ColumnDrag {
+    pub host: usize,
+    pub session: String,
+    pub window: String,
+    pub before: String,
+    pub after: String,
+    pub start: [f64; 2],
+    pub widths: [f64; 2],
+}
+
+struct ActiveColumn {
+    session: String,
+    window: String,
+    block: String,
+    column: String,
+    width: f64,
+}
+
 pub struct Notice {
     pub id: u64,
     pub text: String,
@@ -68,6 +89,7 @@ pub struct Workspace {
     next_notice: u64,
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
+    pub column_drag: Option<ColumnDrag>,
     /// Physical keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<PhysicalKeyCode>,
     /// Panes this window has taken size ownership of since it last came forward.
@@ -119,6 +141,7 @@ pub struct StripView {
     offset: f64,
     revealed: Option<String>,
     revealed_span: Option<[f64; 2]>,
+    restore_widths: HashMap<String, f64>,
 }
 
 #[derive(Default)]
@@ -198,6 +221,7 @@ impl Workspace {
             next_notice: 0,
             zoom_notice: None,
             drag: None,
+            column_drag: None,
             forwarded: HashSet::new(),
             claimed: HashSet::new(),
             handle,
@@ -309,6 +333,7 @@ impl Workspace {
         // Menus and drags name hosts by position, which just shifted.
         self.panel = None;
         self.drag = None;
+        self.column_drag = None;
         if self.active == index {
             self.active = 0;
         } else if self.active > index {
@@ -343,6 +368,7 @@ impl Workspace {
             self.forget_host(old);
             if self.active == index {
                 self.drag = None;
+                self.column_drag = None;
             }
             self.update_visibility();
         }
@@ -442,6 +468,7 @@ impl Workspace {
         }
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
+            self.column_drag = None;
         }
         if changed_session && self.hosts[index].model.selected.is_some() {
             self.save();
@@ -512,57 +539,103 @@ impl Workspace {
         }
     }
 
-    /// The layout of `window` in the active host and session: its own choice, else the default.
-    pub fn tab_layout(&self, window: &str) -> TabLayout {
-        let endpoint = &self.settings.hosts[self.active].endpoint;
-        self.model()
-            .selected
-            .as_deref()
-            .and_then(|session| {
-                self.settings
-                    .tab_layouts
-                    .get(endpoint)?
-                    .get(session)?
-                    .get(window)
-            })
+    fn tab_layout_for(&self, host: usize, session: &str, window: &str) -> TabLayout {
+        let endpoint = &self.settings.hosts[host].endpoint;
+        self.settings
+            .tab_layouts
+            .get(endpoint)
+            .and_then(|sessions| sessions.get(session))
+            .and_then(|windows| windows.get(window))
             .copied()
             .unwrap_or(self.settings.tab_layout)
     }
 
-    /// `window`'s panes and dividers on the active host in window units, seen from its place
-    /// along its strip when it scrolls.
-    pub fn arrange(
+    /// The layout of `window` in the active host and session: its own choice, else the default.
+    pub fn tab_layout(&self, window: &str) -> TabLayout {
+        self.model()
+            .selected
+            .as_deref()
+            .map_or(self.settings.tab_layout, |session| {
+                self.tab_layout_for(self.active, session, window)
+            })
+    }
+
+    fn column_width_for(&self, host: usize, session: &str, window: &str, column: &str) -> f64 {
+        self.settings
+            .column_widths
+            .get(&self.settings.hosts[host].endpoint)
+            .and_then(|sessions| sessions.get(session))
+            .and_then(|windows| windows.get(window))
+            .and_then(|columns| columns.get(column))
+            .copied()
+            .unwrap_or(DEFAULT_COLUMN_WIDTH)
+    }
+
+    fn strip_for<'a>(&self, host: usize, session: &str, window: &'a Window) -> Strip<'a> {
+        let window_id = window.window_id.as_deref().unwrap_or_default();
+        let preview = self
+            .column_drag
+            .as_ref()
+            .filter(|d| d.host == host && d.session == session && d.window == window_id);
+        Strip::with_widths(window, |column| {
+            preview
+                .and_then(|drag| {
+                    if column == drag.before {
+                        Some(drag.widths[0])
+                    } else if column == drag.after {
+                        Some(drag.widths[1])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| self.column_width_for(host, session, window_id, column))
+        })
+    }
+
+    /// `window`'s panes, server dividers and local column boundaries in window units.
+    pub fn arrange<'a>(
         &self,
-        window: &Window,
+        window: &'a Window,
         drag: Option<(&str, f64)>,
-    ) -> (Vec<Placement>, Vec<Divider>) {
+    ) -> (Vec<Placement>, Vec<Divider>, Vec<ColumnEdge<'a>>) {
+        let Some(session) = self.model().selected.as_deref() else {
+            let (panes, dividers) = rex_linux::layout::placements(window, drag);
+            return (panes, dividers, Vec::new());
+        };
         let Some(id) = window
             .window_id
             .as_deref()
-            .filter(|id| self.tab_layout(id) == TabLayout::Scrolling)
+            .filter(|id| self.tab_layout_for(self.active, session, id) == TabLayout::Scrolling)
         else {
-            return rex_linux::layout::placements(window, drag);
+            let (panes, dividers) = rex_linux::layout::placements(window, drag);
+            return (panes, dividers, Vec::new());
         };
         let offset = self
             .strips
             .get(&self.hosts[self.active].id)
             .and_then(|views| views.get(id))
             .map_or(0., |v| v.offset);
-        Strip::new(window, COLUMN_WIDTH).placements(offset, drag)
+        let strip = self.strip_for(self.active, session, window);
+        let edges = strip.column_edges(offset);
+        let (panes, dividers) = strip.placements(offset, drag);
+        (panes, dividers, edges)
     }
 
     /// Scroll the active tab along its strip by `delta` window widths. False when the tab
     /// doesn't scroll or its strip fits the window.
     pub fn scroll_strip(&mut self, delta: f64) -> bool {
         let host = &self.hosts[self.active];
+        let Some(session) = host.model.selected.as_deref() else {
+            return false;
+        };
         let Some(window) = host.model.window() else {
             return false;
         };
         let Some(id) = window.window_id.as_ref() else {
             return false;
         };
-        let strip = Strip::new(window, COLUMN_WIDTH);
-        if self.tab_layout(id) == TabLayout::Tiled || strip.extent <= 1. {
+        let strip = self.strip_for(self.active, session, window);
+        if self.tab_layout_for(self.active, session, id) == TabLayout::Tiled || strip.extent <= 1. {
             return false;
         }
         let view = self
@@ -575,19 +648,22 @@ impl Workspace {
         true
     }
 
-    /// Bring the active tab's focused pane into view if focus moved since it last was.
+    /// Bring the active tab's focused pane into view if focus or its column moved.
     fn reveal_focus(&mut self) {
         let host = &self.hosts[self.active];
+        let Some(session) = host.model.selected.as_deref() else {
+            return;
+        };
         let (Some(window), Some(block)) = (host.model.window(), host.model.focused()) else {
             return;
         };
         let Some(id) = window.window_id.as_ref() else {
             return;
         };
-        if self.tab_layout(id) == TabLayout::Tiled {
+        if self.tab_layout_for(self.active, session, id) == TabLayout::Tiled {
             return;
         }
-        let strip = Strip::new(window, COLUMN_WIDTH);
+        let strip = self.strip_for(self.active, session, window);
         let span = strip.column_span(block);
         let view = self
             .strips
@@ -600,6 +676,207 @@ impl Workspace {
             view.revealed = Some(block.to_owned());
             view.revealed_span = span;
         }
+    }
+
+    fn active_column(&self) -> Option<ActiveColumn> {
+        let model = self.model();
+        let session = model.selected.as_deref()?;
+        let window = model.window()?;
+        let window_id = window.window_id.as_deref()?;
+        if self.tab_layout_for(self.active, session, window_id) != TabLayout::Scrolling {
+            return None;
+        }
+        let block = model.focused()?;
+        let strip = self.strip_for(self.active, session, window);
+        let (column, [_, width]) = strip.column(block)?;
+        Some(ActiveColumn {
+            session: session.to_owned(),
+            window: window_id.to_owned(),
+            block: block.to_owned(),
+            column: column.to_owned(),
+            width,
+        })
+    }
+
+    pub fn active_column_width(&self) -> Option<f64> {
+        self.active_column().map(|column| column.width)
+    }
+
+    fn remember_column_width(
+        &mut self,
+        host: usize,
+        session: &str,
+        window: &str,
+        column: &str,
+        width: f64,
+    ) {
+        let endpoint = self.settings.hosts[host].endpoint.clone();
+        self.settings
+            .column_widths
+            .entry(endpoint)
+            .or_default()
+            .entry(session.to_owned())
+            .or_default()
+            .entry(window.to_owned())
+            .or_default()
+            .insert(
+                column.to_owned(),
+                width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH),
+            );
+    }
+
+    /// Ctrl Shift S: 1/3 → 1/2 → 2/3 for the focused scrolling column.
+    pub fn cycle_column_width(&mut self) {
+        let Some(column) = self.active_column() else {
+            return;
+        };
+        let current = COLUMN_WIDTH_PRESETS
+            .iter()
+            .position(|preset| (column.width - preset).abs() < 0.02);
+        let width = COLUMN_WIDTH_PRESETS[current.map_or(0, |i| (i + 1) % 3)];
+        if let Some(view) = self
+            .strips
+            .get_mut(&self.hosts[self.active].id)
+            .and_then(|views| views.get_mut(&column.window))
+        {
+            view.restore_widths.remove(&column.column);
+        }
+        self.remember_column_width(
+            self.active,
+            &column.session,
+            &column.window,
+            &column.column,
+            width,
+        );
+        self.reveal_focus();
+        self.save();
+    }
+
+    /// Ctrl Shift M: maximize the focused scrolling column, or restore its previous width.
+    pub fn maximize_column(&mut self) {
+        let Some(column) = self.active_column() else {
+            return;
+        };
+        let view = self
+            .strips
+            .entry(self.hosts[self.active].id)
+            .or_default()
+            .entry(column.window.clone())
+            .or_default();
+        let width = if column.width >= MAX_COLUMN_WIDTH - 0.01 {
+            view.restore_widths
+                .remove(&column.column)
+                .unwrap_or(DEFAULT_COLUMN_WIDTH)
+        } else {
+            view.restore_widths
+                .insert(column.column.clone(), column.width);
+            MAX_COLUMN_WIDTH
+        };
+        self.remember_column_width(
+            self.active,
+            &column.session,
+            &column.window,
+            &column.column,
+            width,
+        );
+        self.reveal_focus();
+        self.save();
+    }
+
+    /// Center the focused scrolling column in the viewport.
+    pub fn center_column(&mut self) {
+        let Some(column) = self.active_column() else {
+            return;
+        };
+        let Some(window) = self.model().window() else {
+            return;
+        };
+        let strip = self.strip_for(self.active, &column.session, window);
+        let Some(offset) = strip.center(&column.block) else {
+            return;
+        };
+        let span = strip.column_span(&column.block);
+        let view = self
+            .strips
+            .entry(self.hosts[self.active].id)
+            .or_default()
+            .entry(column.window)
+            .or_default();
+        view.offset = offset;
+        view.revealed = Some(column.block);
+        view.revealed_span = span;
+    }
+
+    pub fn begin_column_drag(&mut self, before: String, after: String) {
+        let Some(session) = self.model().selected.as_deref() else {
+            return;
+        };
+        let Some(window) = self.model().window() else {
+            return;
+        };
+        let Some(window_id) = window.window_id.as_deref() else {
+            return;
+        };
+        if self.tab_layout_for(self.active, session, window_id) != TabLayout::Scrolling {
+            return;
+        }
+        let strip = self.strip_for(self.active, session, window);
+        let (Some(a), Some(b)) = (strip.column_width(&before), strip.column_width(&after)) else {
+            return;
+        };
+        self.column_drag = Some(ColumnDrag {
+            host: self.active,
+            session: session.to_owned(),
+            window: window_id.to_owned(),
+            before,
+            after,
+            start: [a, b],
+            widths: [a, b],
+        });
+    }
+
+    pub fn update_column_drag(&mut self, delta: f64) {
+        let Some(drag) = &mut self.column_drag else {
+            return;
+        };
+        let sum = drag.start[0] + drag.start[1];
+        let lower = MIN_COLUMN_WIDTH.max(sum - MAX_COLUMN_WIDTH);
+        let upper = MAX_COLUMN_WIDTH.min(sum - MIN_COLUMN_WIDTH);
+        let before = (drag.start[0] + delta).clamp(lower, upper);
+        drag.widths = [before, sum - before];
+    }
+
+    pub fn finish_column_drag(&mut self, cancelled: bool) {
+        let Some(drag) = self.column_drag.take() else {
+            return;
+        };
+        if cancelled {
+            return;
+        }
+        self.remember_column_width(
+            drag.host,
+            &drag.session,
+            &drag.window,
+            &drag.before,
+            drag.widths[0],
+        );
+        self.remember_column_width(
+            drag.host,
+            &drag.session,
+            &drag.window,
+            &drag.after,
+            drag.widths[1],
+        );
+        if let Some(view) = self
+            .strips
+            .get_mut(&self.hosts[drag.host].id)
+            .and_then(|views| views.get_mut(&drag.window))
+        {
+            view.restore_widths.remove(&drag.before);
+            view.restore_widths.remove(&drag.after);
+        }
+        self.reveal_focus();
+        self.save();
     }
 
     /// Switch a tab on the active host between tiled and scrolling, for that tab only.
@@ -996,6 +1273,7 @@ impl Workspace {
     pub fn select(&mut self, host: usize, id: String, tx: &mut Tx) {
         self.active = host;
         self.drag = None;
+        self.column_drag = None;
         self.update_visibility();
         self.settings.hosts[host].collapsed = false;
         self.send(host, HostCommand::Select(id));
@@ -1007,6 +1285,7 @@ impl Workspace {
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
+        self.column_drag = None;
         self.update_visibility();
         self.save();
         self.update_title(tx);
@@ -1024,6 +1303,7 @@ impl Workspace {
     pub fn select_window(&mut self, host: usize, session: String, window: String, tx: &mut Tx) {
         self.active = host;
         self.drag = None;
+        self.column_drag = None;
         self.settings.hosts[host].collapsed = false;
         self.update_visibility();
         if self.hosts[host].model.selected.as_ref() != Some(&session) {
@@ -1154,9 +1434,16 @@ impl Workspace {
                 self.request("session.new_window", json!({"window_label":DEFAULT_TAB_LABEL,"layout":layout,"focus":true}));
             }
             Intent::Split(direction) => {
-                if let Some(block) = self.focused_block() {
+                let model = self.model();
+                if let (Some(block), Some(session), Some(window)) = (
+                    model.focused(),
+                    model.selected.as_deref(),
+                    model.window().and_then(|w| w.window_id.as_deref()),
+                ) {
+                    let anchor =
+                        self.split_anchor(self.active, session, window, block, direction);
                     let layout = self.new_terminal(self.active);
-                    self.request("session.new_split", split_payload(&block, direction, layout));
+                    self.request("session.new_split", split_payload(&anchor, direction, layout));
                 }
             }
             Intent::RenameSession => {
@@ -1179,6 +1466,9 @@ impl Workspace {
                 "Ends every program in this tab on the server. Closing the app itself leaves programs running.",
             ),
             Intent::TabLayout(id) => self.toggle_tab_layout(id),
+            Intent::CycleColumnWidth => self.cycle_column_width(),
+            Intent::MaximizeColumn => self.maximize_column(),
+            Intent::CenterColumn => self.center_column(),
             Intent::Zoom => {
                 if let Some(block) = self.focused_block() {
                     self.request("session.zoom_block", json!({"block_id":block}));
@@ -1222,6 +1512,7 @@ impl Workspace {
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
+        self.column_drag = None;
         self.update_visibility();
         self.save();
         self.update_title(tx);
@@ -1284,6 +1575,7 @@ impl Workspace {
             host: self.active,
             session: model.selected.clone()?,
             block: block.into(),
+            window: model.window()?.window_id.clone()?,
             label: self.block_label(block),
             tab: model
                 .window()?
@@ -1420,6 +1712,33 @@ impl Workspace {
         }
     }
 
+    fn split_anchor(
+        &self,
+        host: usize,
+        session: &str,
+        window: &str,
+        block: &str,
+        direction: &str,
+    ) -> String {
+        if direction != "horizontal"
+            || self.tab_layout_for(host, session, window) != TabLayout::Scrolling
+        {
+            return block.to_owned();
+        }
+        self.hosts[host]
+            .model
+            .views
+            .get(session)
+            .and_then(|view| {
+                view.windows
+                    .iter()
+                    .find(|candidate| candidate.window_id.as_deref() == Some(window))
+            })
+            .and_then(|window| self.strip_for(host, session, window).column_anchor(block))
+            .unwrap_or(block)
+            .to_owned()
+    }
+
     fn pane_action(&mut self, target: PaneTarget, action: PaneAction, tx: &mut Tx) {
         if !self.target_exists(&target) {
             self.close_panel(tx);
@@ -1438,12 +1757,19 @@ impl Workspace {
         };
         match action {
             PaneAction::Split(direction) => {
+                let anchor = self.split_anchor(
+                    target.host,
+                    &target.session,
+                    &target.window,
+                    &target.block,
+                    direction,
+                );
                 let layout = self.new_terminal(target.host);
                 request(
                     self,
                     "session.new_split",
-                    split_payload(&target.block, direction, layout),
-                )
+                    split_payload(&anchor, direction, layout),
+                );
             }
             PaneAction::Zoom => {
                 request(

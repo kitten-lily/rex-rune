@@ -639,7 +639,8 @@ pub fn area(s: &Workspace, px: f32) -> El {
     let focused = s.focused_block();
     let target = target_block(s);
     let preview = s.drag.as_ref().map(|d| (d.divider.key(), d.ratio));
-    let (panes, dividers) = s.arrange(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
+    let (panes, dividers, column_edges) =
+        s.arrange(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
     let bleed = full_bleed(current);
     let scrolls = current
         .window_id
@@ -686,6 +687,44 @@ pub fn area(s: &Workspace, px: f32) -> El {
         ));
     }
     let [ix, iy, iw, ih] = inner(s);
+    for edge in column_edges {
+        let before = edge.before.to_owned();
+        let after = edge.after.to_owned();
+        let dragging = s
+            .column_drag
+            .as_ref()
+            .is_some_and(|drag| drag.before == before && drag.after == after);
+        let key = format!("column-divider:{before}:{after}");
+        let drag_before = before.clone();
+        let drag_after = after.clone();
+        area = area.child(
+            divider_handle(
+                el().key(key)
+                    .absolute(ix + edge.x as f32 * iw - 5., iy)
+                    .w(10.)
+                    .h(ih),
+                true,
+                dragging,
+            )
+            .on_drag(move |s: &mut Workspace, g, tx| {
+                let same = s
+                    .column_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.before == drag_before && drag.after == drag_after);
+                if g.phase == Phase::Down || !same {
+                    s.begin_column_drag(drag_before.clone(), drag_after.clone());
+                }
+                let width = inner(s)[2] * s.ui_scale();
+                if width > 0. {
+                    s.update_column_drag(f64::from(g.dx / width));
+                }
+                tx.instant();
+                if g.phase == Phase::Up {
+                    s.finish_column_drag(g.cancelled());
+                }
+            }),
+        );
+    }
     for divider in dividers {
         let [x, y, w, h] = divider.rect;
         let horizontal = divider.horizontal;
