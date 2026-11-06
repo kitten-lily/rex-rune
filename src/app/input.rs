@@ -151,6 +151,11 @@ fn shortcut(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
         s.perform(Intent::Settings, tx);
     } else if ctrl(ev) && m.alt && !m.shift && letter(ev, tx, 'd') {
         s.perform(Intent::Split("vertical"), tx);
+    } else if ctrl(ev) && m.alt && m.shift && matches!(ev.key, Key::Left | Key::Right) {
+        s.perform(
+            Intent::MoveColumn(if ev.key == Key::Left { -1 } else { 1 }),
+            tx,
+        );
     } else if m.alt
         && ctrl(ev)
         && !m.shift

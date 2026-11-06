@@ -703,6 +703,157 @@ fn server_topology_changes_prune_only_stale_column_state() {
 }
 
 #[test]
+fn moving_single_pane_columns_uses_swap_and_keeps_block_widths() {
+    let (mut ws, rx) = tabbed_workspace("split");
+    ws.toggle_tab_layout("split".into());
+    let columns = ws
+        .settings
+        .column_widths
+        .entry("unix:///nonexistent/rex-test.sock".into())
+        .or_default()
+        .entry("s".into())
+        .or_default()
+        .entry("split".into())
+        .or_default();
+    columns.insert("block:b".into(), 0.3);
+    columns.insert("block:c".into(), 0.7);
+    let path = ws.settings_path.clone();
+    let mut rt = runtime(ws);
+    rt.key(KeyEvent {
+        key: Key::Right,
+        mods: Mods {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    for _ in 0..3 {
+        rt.frame(1. / 60.);
+    }
+    let sent = requests(&rx);
+    assert_eq!(sent[0].0, "session.swap_blocks");
+    assert_eq!(sent[0].2["block_id"], "block:b");
+    assert_eq!(sent[0].2["other_block_id"], "block:c");
+    assert_eq!(sent[1].0, "session.focus_block");
+    assert_eq!(sent[1].2["block_id"], "block:b");
+    let widths =
+        &rt.state.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["split"];
+    assert_eq!((widths["block:b"], widths["block:c"]), (0.3, 0.7));
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
+    let endpoint = "unix:///nonexistent/rex-test.sock";
+
+    let (mut ws, rx) = tabbed_workspace("strip");
+    ws.toggle_tab_layout("strip".into());
+    let widths = ws
+        .settings
+        .column_widths
+        .entry(endpoint.into())
+        .or_default()
+        .entry("s".into())
+        .or_default()
+        .entry("strip".into())
+        .or_default();
+    widths.insert("column:eg".into(), 0.3);
+    widths.insert("block:f".into(), 0.7);
+    ws.consume_pane(-1);
+    let sent = requests(&rx);
+    assert_eq!(sent[0].0, "session.move_block");
+    assert_eq!(sent[0].2["block_id"], "block:f");
+    assert_eq!(sent[0].2["anchor_block_id"], "block:e");
+    assert_eq!(sent[0].2["direction"], "vertical");
+    let window = ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .windows
+        .iter_mut()
+        .find(|window| window.window_id.as_deref() == Some("strip"))
+        .unwrap();
+    window.layers[0].layout = Some(
+        serde_json::from_value(serde_json::json!({"split":{
+            "split_id":"strip:root","direction":"horizontal","ratio":0.5,
+            "before":{"block_id":"block:d"},
+            "after":{"split":{"split_id":"column:eg","direction":"vertical","ratio":0.5,
+                "before":{"split":{"split_id":"column:ef","direction":"vertical","ratio":0.5,
+                    "before":{"block_id":"block:e"},"after":{"block_id":"block:f"}}},
+                "after":{"block_id":"block:g"}}}
+        }}))
+        .unwrap(),
+    );
+    window.focused_block_id = Some("block:f".into());
+    assert!(ws.apply_pending_column_change(0));
+    ws.reconcile_column_state(0);
+    let widths = &ws.settings.column_widths[endpoint]["s"]["strip"];
+    assert_eq!(widths["column:eg"], 0.3);
+    assert!(!widths.contains_key("block:f"));
+    assert_eq!(ws.active_column_width(), Some(0.3));
+    std::fs::remove_file(&ws.settings_path).ok();
+
+    let (mut ws, rx) = tabbed_workspace("strip");
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .windows
+        .iter_mut()
+        .find(|window| window.window_id.as_deref() == Some("strip"))
+        .unwrap()
+        .focused_block_id = Some("block:e".into());
+    ws.toggle_tab_layout("strip".into());
+    ws.settings
+        .column_widths
+        .entry(endpoint.into())
+        .or_default()
+        .entry("s".into())
+        .or_default()
+        .entry("strip".into())
+        .or_default()
+        .insert("column:eg".into(), 0.6);
+    ws.expel_pane(1);
+    let sent = requests(&rx);
+    assert_eq!(sent[0].0, "session.move_block");
+    assert_eq!(sent[0].2["block_id"], "block:e");
+    assert_eq!(sent[0].2["anchor_block_id"], "block:g");
+    assert_eq!(sent[0].2["direction"], "horizontal");
+    assert_eq!(sent[0].2["side"], "after");
+    let window = ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .windows
+        .iter_mut()
+        .find(|window| window.window_id.as_deref() == Some("strip"))
+        .unwrap();
+    window.layers[0].layout = Some(
+        serde_json::from_value(serde_json::json!({"split":{
+            "split_id":"strip:root","direction":"horizontal","ratio":0.5,
+            "before":{"block_id":"block:d"},
+            "after":{"split":{"split_id":"strip:rest","direction":"horizontal","ratio":0.5,
+                "before":{"block_id":"block:g"},
+                "after":{"split":{"split_id":"strip:right","direction":"horizontal","ratio":0.5,
+                    "before":{"block_id":"block:e"},"after":{"block_id":"block:f"}}}}
+        }}}))
+        .unwrap(),
+    );
+    window.focused_block_id = Some("block:e".into());
+    assert!(ws.apply_pending_column_change(0));
+    ws.reconcile_column_state(0);
+    let widths = &ws.settings.column_widths[endpoint]["s"]["strip"];
+    assert_eq!((widths["block:g"], widths["block:e"]), (0.6, 0.6));
+    assert!(!widths.contains_key("column:eg"));
+    assert_eq!(ws.active_column_width(), Some(0.6));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
     let (mut ws, rx) = tabbed_workspace("strip");
     ws.toggle_tab_layout("strip".into());
@@ -776,15 +927,33 @@ fn scrolling_column_shortcuts_and_controls_act_on_the_focused_column() {
         1.
     );
     rt.update(|s, _| s.picker(false));
-    let labels: Vec<String> = rt
-        .state
-        .entries()
-        .into_iter()
-        .map(|entry| entry.label)
-        .collect();
+    let entries = rt.state.entries();
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.label == "Consume pane into left column")
+            .is_some_and(|entry| entry.enabled)
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.label == "Move column left")
+            .is_some_and(|entry| !entry.enabled),
+        "a multi-pane neighbour cannot be swapped as one column"
+    );
+    assert!(
+        entries
+            .iter()
+            .find(|entry| entry.label == "Expel pane to new column right")
+            .is_some_and(|entry| !entry.enabled)
+    );
+    let labels: Vec<String> = entries.into_iter().map(|entry| entry.label).collect();
     assert!(labels.contains(&"Cycle column width".into()));
     assert!(labels.contains(&"Restore column width".into()));
     assert!(labels.contains(&"Center column".into()));
+    assert!(labels.contains(&"Move column left".into()));
+    assert!(labels.contains(&"Consume pane into left column".into()));
+    assert!(labels.contains(&"Expel pane to new column right".into()));
     press(&mut rt, Key::Escape);
     secondary_click(&mut rt, "tab:strip");
     let labels: Vec<String> = rt

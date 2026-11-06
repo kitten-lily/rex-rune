@@ -45,6 +45,8 @@ const SHORTCUTS: &[(&str, &[Shortcut])] = &[
             (&["Ctrl", "Shift", "R"], "Resume terminal"),
             (&["Ctrl", "Shift", "S"], "Cycle column width"),
             (&["Ctrl", "Shift", "M"], "Maximize or restore column"),
+            (&["Ctrl", "Alt", "Shift", "Left"], "Move column left"),
+            (&["Ctrl", "Alt", "Shift", "Right"], "Move column right"),
         ],
     ),
     (
