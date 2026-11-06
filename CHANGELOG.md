@@ -13,7 +13,12 @@ Changes since the 0.2.0 public release on 2026-11-01. Many of them come from two
 - Full-screen programs no longer flicker while they redraw (synchronized output). (@kitten-lily)
 - Tabs with a server-generated name show their program's title, as tabs called "Shell" already did. (@joegoldin)
 - Terminal themes: Settings → Terminal → Theme sends a theme to the server with Rex's `set_theme`, so programs that ask for colours get the ones on screen. Other clients viewing a terminal see the theme while this client owns it, as they see its size. Choose Rex's default colours, Midnight, any Ghostty theme you have installed, or follow the chrome palette. The default, Follow server, changes nothing. (@kitten-lily)
-- The terminal font family and fallback families are saved in Settings → Terminal; only the families you name are loaded. (@joegoldin, @kitten-lily)
+- The terminal font family and named fallback families are saved in Settings → Terminal. After those, Rex follows fontconfig's sorted fallback chain, so installed script, symbol, Powerline and Nerd Font glyphs work without copying the system list into Settings. (@joegoldin, @kitten-lily)
+- Ctrl+Shift+F searches the focused terminal's screen and scrollback without blocking live output; matches are highlighted and Enter/Shift+Enter step through them. (@kitten-lily)
+- Cursor shapes, underline styles and colours, overlines, box-drawing characters and block elements follow terminal programs and stay aligned on whole device pixels. (@kitten-lily)
+- OSC 9;4 progress and terminal bells appear on tabs; an unseen bell remains marked until its tab is viewed. (@kitten-lily)
+- A newly attached, reconnected or newly owned pane waits for its first frame at the local grid size instead of flashing the server's stale size. Non-owners and offline panes keep their retained output visible. (@kitten-lily)
+- Idle TCP connections use keepalive and a user timeout, so a server that silently dropped a sleeping laptop reconnects instead of leaving frozen panes indefinitely. (@kitten-lily)
 
 ### Keyboard
 
@@ -27,6 +32,7 @@ Changes since the 0.2.0 public release on 2026-11-01. Many of them come from two
 
 - Chrome palettes, switchable live in Settings → Interface → Theme: Midnight (the default, unchanged), Rosé Pine, Rosé Pine Moon and Gruvbox Dark. (@joegoldin, @kitten-lily)
 - Program activity on tabs (OSC 7501: "Needs approval", "Error", "Done" and so on), program icons, and desktop notifications for tabs you aren't looking at.
+- Tabs can use a local horizontally scrolling column layout while preserving server-owned split order and ratios inside each column. Column widths persist; controls resize, maximize, center, reorder, consume and expel panes, with horizontal gesture snapping and focus reveal. (@kitten-lily)
 - Settings in sections (Interface, Terminal, Notifications, Integrations, Remote Hosts, Shortcuts), including adding, editing and removing hosts.
 - A single pane draws edge to edge; tabs and toolbar restyled.
 - Tabs in the sidebar: Settings → Interface → Tab position → Sidebar lists each session's tabs under it while the sidebar is open. (@joegoldin)
