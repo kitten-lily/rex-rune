@@ -8,10 +8,10 @@ use super::{
 use clap::Parser;
 use rex_linux::{
     connection::{HostCommand, HostConnection, Options},
-    settings::{Host, Settings, TabLayout, TerminalThemeChoice},
+    settings::{FocusCentering, Host, Settings, TabLayout, TerminalThemeChoice},
     terminal_theme::ThemeDirs,
 };
-use rune::{AppSpec, Env, Key, KeyEvent, Mods, Runtime};
+use rune::{AppSpec, Env, GesturePhase, Key, KeyEvent, Mods, Runtime, WheelEvent};
 
 fn workspace() -> Workspace {
     workspace_hosts(1)
@@ -568,6 +568,138 @@ fn a_scrolling_tab_uses_local_half_width_columns_and_pans_its_strip() {
         "the strip pans left: {before} → {after}"
     );
     std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn a_precise_scroll_snaps_to_the_nearest_column_edge_when_it_ends() {
+    let (mut ws, _rx) = tabbed_workspace("strip");
+    ws.toggle_tab_layout("strip".into());
+    let path = ws.settings_path.clone();
+    let mut rt = runtime(ws);
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    let pane_x = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("pane:block:d"))
+            .unwrap()
+            .rect[0]
+    };
+    rt.wheel_event(
+        WheelEvent::new(260., 0.)
+            .at(500., 400.)
+            .phase(GesturePhase::Began)
+            .precise(true),
+    );
+    rt.frame(1. / 60.);
+    let between = pane_x(&rt);
+    assert!(
+        (-350. ..=-100.).contains(&between),
+        "gesture remains between columns: {between}"
+    );
+    rt.wheel_event(
+        WheelEvent::new(0., 0.)
+            .at(500., 400.)
+            .phase(GesturePhase::Ended)
+            .precise(true),
+    );
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    assert!(pane_x(&rt) > 0., "gesture end snapped to the first edge");
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn focus_centering_policies_match_niri_overflow_rules() {
+    let focused_x = |policy, wide: bool| {
+        let (mut ws, _rx) = tabbed_workspace("strip");
+        if wide {
+            let columns = ws
+                .settings
+                .column_widths
+                .entry("unix:///nonexistent/rex-test.sock".into())
+                .or_default()
+                .entry("s".into())
+                .or_default()
+                .entry("strip".into())
+                .or_default();
+            columns.insert("column:eg".into(), 2. / 3.);
+            columns.insert("block:f".into(), 2. / 3.);
+        }
+        ws.toggle_tab_layout("strip".into());
+        ws.scroll_strip(-9.);
+        ws.hosts[0]
+            .model
+            .views
+            .get_mut("s")
+            .unwrap()
+            .windows
+            .iter_mut()
+            .find(|window| window.window_id.as_deref() == Some("strip"))
+            .unwrap()
+            .focused_block_id = Some("block:e".into());
+        ws.settings.focus_centering = policy;
+        ws.reveal_focus();
+        let current = ws.model().window().unwrap();
+        let x = ws
+            .arrange(current, None)
+            .0
+            .into_iter()
+            .find(|placement| placement.block == "block:e")
+            .unwrap()
+            .rect[0];
+        std::fs::remove_file(&ws.settings_path).ok();
+        x
+    };
+    assert!((focused_x(FocusCentering::Never, false) - 0.5).abs() < 1e-9);
+    assert!((focused_x(FocusCentering::OnOverflow, false) - 0.5).abs() < 1e-9);
+    assert!((focused_x(FocusCentering::Always, false) - 0.25).abs() < 1e-9);
+    assert!(
+        (focused_x(FocusCentering::OnOverflow, true) - 1. / 6.).abs() < 1e-9,
+        "columns that cannot fit together center the new focus"
+    );
+}
+
+#[test]
+fn server_topology_changes_prune_only_stale_column_state() {
+    let (mut ws, _rx) = tabbed_workspace("strip");
+    let endpoint = "unix:///nonexistent/rex-test.sock";
+    ws.settings.column_widths = serde_json::from_value(serde_json::json!({
+        (endpoint): {
+            "s": {
+                "strip": {"block:d": 0.4, "column:eg": 0.6, "gone": 0.8},
+                "gone-window": {"gone": 0.3}
+            },
+            "gone-session": {"gone-window": {"gone": 0.7}}
+        }
+    }))
+    .unwrap();
+    assert!(ws.reconcile_column_state(0));
+    let widths = &ws.settings.column_widths[endpoint]["s"]["strip"];
+    assert_eq!(widths.len(), 2);
+    assert_eq!(widths["block:d"], 0.4);
+    assert_eq!(widths["column:eg"], 0.6);
+    assert!(!ws.settings.column_widths[endpoint]["s"].contains_key("gone-window"));
+    assert!(!ws.settings.column_widths[endpoint].contains_key("gone-session"));
+
+    ws.settings
+        .column_widths
+        .get_mut(endpoint)
+        .unwrap()
+        .get_mut("s")
+        .unwrap()
+        .get_mut("strip")
+        .unwrap()
+        .insert("offline".into(), 0.9);
+    ws.hosts[0].model.connected = false;
+    assert!(!ws.reconcile_column_state(0));
+    assert!(
+        ws.settings.column_widths[endpoint]["s"]["strip"].contains_key("offline"),
+        "a disconnected host is not authoritative"
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
 }
 
 #[test]

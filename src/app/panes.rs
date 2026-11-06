@@ -19,8 +19,8 @@ use rex_linux::{
 };
 use rexrs::api::session::Window;
 use rune::{
-    Cursor, El, KeyEvent, Phase, PointerButton, PointerEvent, TextEdit, Tx, WheelEvent, col, el,
-    row, text,
+    Cursor, El, GesturePhase, KeyEvent, Phase, PointerButton, PointerEvent, TextEdit, Tx,
+    WheelEvent, col, el, row, text,
 };
 use rune_kit::TextInput;
 
@@ -424,8 +424,15 @@ fn pane_card(
                     s.pane_menu(menu_block.clone(), Some((w.x, w.y)));
                 })
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
-                    // Sideways scrolling is the pane area's, for a scrolling tab's strip.
-                    if e.dx.abs() > e.dy.abs() {
+                    // Sideways scrolling and a precise gesture's zero-delta end belong to the
+                    // pane area, so it can pan and snap the scrolling strip.
+                    let strip_end = e.precise
+                        && e.phase == GesturePhase::Ended
+                        && s.model()
+                            .window()
+                            .and_then(|window| window.window_id.as_deref())
+                            .is_some_and(|id| s.tab_layout(id) == TabLayout::Scrolling);
+                    if e.dx.abs() > e.dy.abs() || strip_end {
                         return false;
                     }
                     let scale = if e.precise { s.ui_scale() } else { 1. };
@@ -655,10 +662,15 @@ pub fn area(s: &Workspace, px: f32) -> El {
                 let delta = if e.dx.abs() >= e.dy.abs() { e.dx } else { e.dy };
                 let scale = if e.precise { s.ui_scale() } else { 1. };
                 let width = inner(s)[2] * scale;
-                if width <= 0. || !s.scroll_strip(-f64::from(delta / width)) {
+                let moved = width > 0. && s.scroll_strip(-f64::from(delta / width));
+                let ended = e.precise && e.phase == GesturePhase::Ended;
+                let snapped = ended && s.snap_strip();
+                if !moved && !snapped && !ended {
                     return false;
                 }
-                tx.instant();
+                if !ended {
+                    tx.instant();
+                }
                 true
             });
     }

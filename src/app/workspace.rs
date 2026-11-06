@@ -15,8 +15,8 @@ use rex_linux::{
         MIN_COLUMN_WIDTH, Placement, Strip, shell_layout,
     },
     settings::{
-        ChromeTheme, Host, NoticePosition, Settings, TabLayout, TerminalThemeChoice,
-        normalize_font_preferences, validate_host,
+        ChromeTheme, FocusCentering, Host, NoticePosition, Settings, TabLayout,
+        TerminalThemeChoice, normalize_font_preferences, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
@@ -442,6 +442,7 @@ impl Workspace {
             self.note_theme_declared();
         }
         self.hosts[index].model = model;
+        let columns_changed = self.reconcile_column_state(index);
         if let Some(copy) = clipboard
             && self.window_focused
             && self.panel.is_none()
@@ -470,7 +471,7 @@ impl Workspace {
             self.drag = None;
             self.column_drag = None;
         }
-        if changed_session && self.hosts[index].model.selected.is_some() {
+        if (changed_session || columns_changed) && self.hosts[index].model.selected.is_some() {
             self.save();
         }
         if index == self.active {
@@ -485,6 +486,86 @@ impl Workspace {
         }
         self.sync_prefetch();
         self.update_title(tx);
+    }
+
+    /// Drop local widths and ephemeral state whose server-owned columns no longer exist.
+    pub(crate) fn reconcile_column_state(&mut self, host: usize) -> bool {
+        let endpoint = self.settings.hosts[host].endpoint.clone();
+        let host_id = self.hosts[host].id;
+        let model = &self.hosts[host].model;
+        if !model.connected {
+            return false;
+        }
+        let sessions: HashSet<String> = model
+            .sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect();
+        let mut known: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
+        let mut known_windows: HashMap<String, HashSet<String>> = HashMap::new();
+        for (session, view) in &model.views {
+            let windows = known.entry(session.clone()).or_default();
+            for window in &view.windows {
+                let Some(window_id) = window.window_id.as_ref() else {
+                    continue;
+                };
+                let columns: HashSet<String> = Strip::new(window, DEFAULT_COLUMN_WIDTH)
+                    .column_ids()
+                    .map(str::to_owned)
+                    .collect();
+                if model.selected.as_deref() == Some(session) {
+                    known_windows.insert(window_id.clone(), columns.clone());
+                }
+                windows.insert(window_id.clone(), columns);
+            }
+        }
+
+        let mut changed = false;
+        if let Some(widths) = self.settings.column_widths.get_mut(&endpoint) {
+            let before = widths.len();
+            widths.retain(|session, windows| {
+                if !sessions.contains(session) {
+                    return false;
+                }
+                if let Some(known) = known.get(session) {
+                    let before = windows.len();
+                    windows.retain(|window, columns| {
+                        let Some(valid) = known.get(window) else {
+                            return false;
+                        };
+                        let before = columns.len();
+                        columns.retain(|column, _| valid.contains(column));
+                        changed |= before != columns.len();
+                        !columns.is_empty()
+                    });
+                    changed |= before != windows.len();
+                }
+                !windows.is_empty()
+            });
+            changed |= before != widths.len();
+        }
+        if self
+            .settings
+            .column_widths
+            .get(&endpoint)
+            .is_some_and(HashMap::is_empty)
+        {
+            self.settings.column_widths.remove(&endpoint);
+        }
+
+        if let Some(views) = self.strips.get_mut(&host_id) {
+            let before = views.len();
+            views.retain(|window, view| {
+                let Some(valid) = known_windows.get(window) else {
+                    return false;
+                };
+                view.restore_widths
+                    .retain(|column, _| valid.contains(column));
+                true
+            });
+            changed |= before != views.len();
+        }
+        changed
     }
 
     /// Take size ownership of the panes on screen, as the native Rex apps and multiplexers
@@ -644,12 +725,42 @@ impl Workspace {
             .or_default()
             .entry(id.clone())
             .or_default();
-        view.offset = strip.clamp(strip.clamp(view.offset) + delta);
-        true
+        let next = strip.clamp(strip.clamp(view.offset) + delta);
+        let changed = (next - view.offset).abs() > 1e-9;
+        view.offset = next;
+        changed
+    }
+
+    /// Snap the active tab to the nearest column edge after a precise scroll gesture.
+    pub fn snap_strip(&mut self) -> bool {
+        let host = &self.hosts[self.active];
+        let Some(session) = host.model.selected.as_deref() else {
+            return false;
+        };
+        let Some(window) = host.model.window() else {
+            return false;
+        };
+        let Some(id) = window.window_id.as_ref() else {
+            return false;
+        };
+        let strip = self.strip_for(self.active, session, window);
+        if self.tab_layout_for(self.active, session, id) == TabLayout::Tiled || strip.extent <= 1. {
+            return false;
+        }
+        let view = self
+            .strips
+            .entry(host.id)
+            .or_default()
+            .entry(id.clone())
+            .or_default();
+        let snapped = strip.snap(view.offset);
+        let changed = (snapped - view.offset).abs() > 1e-9;
+        view.offset = snapped;
+        changed
     }
 
     /// Bring the active tab's focused pane into view if focus or its column moved.
-    fn reveal_focus(&mut self) {
+    pub(crate) fn reveal_focus(&mut self) {
         let host = &self.hosts[self.active];
         let Some(session) = host.model.selected.as_deref() else {
             return;
@@ -665,6 +776,7 @@ impl Workspace {
         }
         let strip = self.strip_for(self.active, session, window);
         let span = strip.column_span(block);
+        let policy = self.settings.focus_centering;
         let view = self
             .strips
             .entry(host.id)
@@ -672,7 +784,22 @@ impl Workspace {
             .entry(id.clone())
             .or_default();
         if view.revealed.as_deref() != Some(block) || view.revealed_span != span {
-            view.offset = strip.reveal(view.offset, block);
+            let center = match (policy, view.revealed_span, span) {
+                (FocusCentering::Always, _, _) => true,
+                (FocusCentering::OnOverflow, Some(previous), Some(next)) => {
+                    let left = previous[0].min(next[0]);
+                    let right = (previous[0] + previous[1]).max(next[0] + next[1]);
+                    right - left > 1. + 1e-9
+                }
+                _ => false,
+            };
+            view.offset = if center {
+                strip
+                    .center(block)
+                    .unwrap_or_else(|| strip.reveal(view.offset, block))
+            } else {
+                strip.reveal(view.offset, block)
+            };
             view.revealed = Some(block.to_owned());
             view.revealed_span = span;
         }
@@ -930,6 +1057,19 @@ impl Workspace {
                 .tab_layouts
                 .retain(|_, sessions| !sessions.is_empty());
             self.strips.clear();
+            self.reveal_focus();
+            self.save();
+        }
+    }
+
+    pub fn set_focus_centering(&mut self, policy: FocusCentering) {
+        if self.settings.focus_centering != policy {
+            self.settings.focus_centering = policy;
+            for views in self.strips.values_mut() {
+                for view in views.values_mut() {
+                    view.revealed = None;
+                }
+            }
             self.reveal_focus();
             self.save();
         }
