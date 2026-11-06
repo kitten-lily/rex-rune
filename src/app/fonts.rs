@@ -1,4 +1,5 @@
-//! Bundled chrome fonts, a fontconfig-resolved terminal family and the user's ordered fallbacks.
+//! Bundled chrome fonts, a fontconfig-resolved terminal family, the user's ordered fallbacks and
+//! fontconfig's own fallback chain for the terminal family.
 use std::{collections::HashSet, path::PathBuf, process::Command};
 
 pub struct Fonts {
@@ -80,7 +81,58 @@ fn resolve_family(family: &str) -> Option<(String, Vec<PathBuf>)> {
     Some((name?, files))
 }
 
+/// fontconfig's sorted fallback chain for `family` (`fc-match -s`), one `family\tfile` line per
+/// font. fontconfig prunes the chain to fonts that add coverage, so it stays short.
+fn sorted_fallbacks(family: &str) -> String {
+    Command::new("fc-match")
+        .args([
+            "-s",
+            "-f",
+            "%{family[0]}\t%{file}\n",
+            "--",
+            &pattern(family),
+        ])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// Appends a sorted chain's families in order, registering each file by path once. Bundled
+/// families keep their embedded faces, so IBM Plex Mono stays after the system's fonts.
+fn add_sorted(
+    chain: &str,
+    names: &mut Vec<String>,
+    paths: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    for line in chain.lines() {
+        let Some((family, file)) = line.split_once('\t') else {
+            continue;
+        };
+        let file = PathBuf::from(file.trim());
+        if family.is_empty() || bundled(family).is_some() || !file.is_file() {
+            continue;
+        }
+        if seen.insert(file.clone()) {
+            paths.push(file);
+        }
+        add_name(names, family);
+    }
+}
+
 pub fn load(terminal_family: &str, fallbacks: &[String]) -> Fonts {
+    load_with(terminal_family, fallbacks, sorted_fallbacks)
+}
+
+/// The terminal stack: the primary, the named fallbacks, the `sorted` chain for the primary,
+/// then bundled IBM Plex Mono.
+fn load_with(
+    terminal_family: &str,
+    fallbacks: &[String],
+    sorted: impl FnOnce(&str) -> String,
+) -> Fonts {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
     let mut names = Vec::new();
@@ -120,6 +172,7 @@ pub fn load(terminal_family: &str, fallbacks: &[String]) -> Fonts {
             }
         }
     }
+    add_sorted(&sorted(terminal_family), &mut names, &mut paths, &mut seen);
     add_name(&mut names, "IBM Plex Mono");
     let mono = names
         .iter()
@@ -140,12 +193,54 @@ mod tests {
 
     #[test]
     fn font_stack_keeps_chrome_separate_and_preserves_fallback_order() {
-        let fonts = load("IBM Plex Mono", &["Inter".into(), "ibm plex mono".into()]);
+        let fonts = load_with(
+            "IBM Plex Mono",
+            &["Inter".into(), "ibm plex mono".into()],
+            |_| String::new(),
+        );
         assert_eq!(fonts.families.0, rune_theme_opencode::FAMILIES.0);
         assert_eq!(fonts.families.1, "'IBM Plex Mono', 'Inter'");
         assert_eq!(fonts.terminal, Some("IBM Plex Mono"));
         assert_eq!(fonts.files, rune_theme_opencode::FONTS);
         assert!(fonts.paths.is_empty(), "bundled faces are not re-read");
+    }
+
+    #[test]
+    fn fontconfig_chain_follows_the_named_families_once_per_file_before_plex() {
+        let dir = std::env::temp_dir().join(format!(
+            "rex-font-chain-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let (symbols, emoji) = (dir.join("symbols.ttf"), dir.join("emoji.ttf"));
+        std::fs::write(&symbols, b"").unwrap();
+        std::fs::write(&emoji, b"").unwrap();
+        let chain = [
+            format!("IBM Plex Mono\t{}", symbols.display()),
+            format!("Symbols Nerd Font\t{}", symbols.display()),
+            format!("Noto Sans Tamil\t{}", dir.join("missing.ttf").display()),
+            "no file".into(),
+            format!("symbols nerd font\t{}", symbols.display()),
+            format!("Noto Color Emoji\t{}", emoji.display()),
+        ]
+        .join("\n");
+        let mut asked = None;
+        let fonts = load_with("Inter", &[], |family| {
+            asked = Some(family.to_owned());
+            chain
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(asked.as_deref(), Some("Inter"));
+        assert_eq!(
+            fonts.families.1,
+            "'Inter', 'Symbols Nerd Font', 'Noto Color Emoji', 'IBM Plex Mono'"
+        );
+        assert_eq!(fonts.paths, [symbols, emoji]);
+        assert_eq!(fonts.terminal, Some("Inter"));
     }
 
     #[test]
