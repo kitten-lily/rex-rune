@@ -8,7 +8,7 @@ use super::{
 use clap::Parser;
 use rex_linux::{
     connection::{HostCommand, HostConnection, Options},
-    settings::{Host, Settings, TerminalThemeChoice},
+    settings::{Host, Settings, TabLayout, TerminalThemeChoice},
     terminal_theme::ThemeDirs,
 };
 use rune::{AppSpec, Env, Key, KeyEvent, Mods, Runtime};
@@ -444,7 +444,8 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
-/// Host 0 connected on session "s" with a one-pane tab "single" and a split tab "split".
+/// Host 0 connected on session "s" with a one-pane tab "single", a split tab "split" and a
+/// three-column tab "strip".
 fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     let mut ws = workspace();
     let rx = capture_host(&mut ws, 0);
@@ -465,7 +466,13 @@ fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
                 {"window_id": "split", "label": "dev", "focused_block_id": "block:b",
                  "layers": [{"kind": "tiled", "layout": {"split": {"direction": "horizontal", "ratio": 0.5,
                     "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}},
-                    "blocks": [{"block_id": "block:b"}, {"block_id": "block:c"}]}]}
+                    "blocks": [{"block_id": "block:b"}, {"block_id": "block:c"}]}]},
+                {"window_id": "strip", "label": "wide", "focused_block_id": "block:f",
+                 "layers": [{"kind": "tiled", "layout": {"split": {"direction": "horizontal", "ratio": 0.7,
+                    "before": {"split": {"direction": "horizontal", "ratio": 0.3,
+                        "before": {"block_id": "block:d"}, "after": {"block_id": "block:e"}}},
+                    "after": {"block_id": "block:f"}}},
+                    "blocks": [{"block_id": "block:d"}, {"block_id": "block:e"}, {"block_id": "block:f"}]}]}
             ]
         }))
         .expect("a view"),
@@ -513,6 +520,69 @@ fn a_single_pane_is_full_bleed_and_a_split_keeps_its_cards() {
 }
 
 #[test]
+fn a_scrolling_tab_uses_local_half_width_columns_and_pans_its_strip() {
+    let (mut ws, _rx) = tabbed_workspace("strip");
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::TabLayout("strip".into()), &mut tx);
+    assert_eq!(ws.tab_layout("strip"), TabLayout::Scrolling);
+    let saved = relaunch(&ws);
+    assert_eq!(
+        saved.settings.tab_layouts["unix:///nonexistent/rex-test.sock"]["s"].get("strip"),
+        Some(&TabLayout::Scrolling),
+        "the tab's choice is local and persistent"
+    );
+    let path = ws.settings_path.clone();
+    let mut rt = runtime(ws);
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    let pane_x = |rt: &Runtime<Workspace>, block: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(block))
+            .unwrap()
+            .rect[0]
+    };
+    let before = pane_x(&rt, "pane:block:d");
+    assert!(before < 0., "focus on the last column reveals it: {before}");
+    let e = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("pane:block:e"))
+        .unwrap()
+        .rect;
+    assert!((490. ..=514.).contains(&e[2]), "half-width column: {e:?}");
+    rt.update(|s, tx| {
+        assert!(s.scroll_strip(-1.), "an overflowing strip scrolls");
+        tx.instant();
+    });
+    rt.frame(1. / 60.);
+    let after = pane_x(&rt, "pane:block:d");
+    assert!(
+        after > before + 400.,
+        "the strip pans left: {before} → {after}"
+    );
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn changing_the_default_layout_keeps_only_real_tab_overrides() {
+    let (mut ws, _rx) = tabbed_workspace("strip");
+    ws.toggle_tab_layout("strip".into());
+    assert_eq!(
+        ws.settings.tab_layouts["unix:///nonexistent/rex-test.sock"]["s"].get("strip"),
+        Some(&TabLayout::Scrolling)
+    );
+    ws.set_tab_layout(TabLayout::Scrolling);
+    assert!(
+        ws.settings.tab_layouts.is_empty(),
+        "an override equal to the new default is redundant"
+    );
+    assert_eq!(relaunch(&ws).settings.tab_layout, TabLayout::Scrolling);
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     let (ws, rx) = tabbed_workspace("single");
     let mut rt = runtime(ws);
@@ -521,7 +591,15 @@ fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     assert!(matches!(&panel.kind, PanelKind::Window(id) if id == "split"));
     assert_eq!(panel.title, "dev");
     let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
-    assert_eq!(labels, ["Rename tab…", "Close tab…", "New tab"]);
+    assert_eq!(
+        labels,
+        [
+            "Rename tab…",
+            "Use scrolling layout",
+            "Close tab…",
+            "New tab"
+        ]
+    );
     assert!(has(&rt, "menu-surface"));
     press(&mut rt, Key::Escape);
     assert!(rt.state.panel.is_none());
