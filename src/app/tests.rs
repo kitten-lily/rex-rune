@@ -612,6 +612,53 @@ fn a_precise_scroll_snaps_to_the_nearest_column_edge_when_it_ends() {
 }
 
 #[test]
+fn a_vertical_precise_gesture_never_snaps_a_scrolling_strip() {
+    let (mut ws, _rx) = tabbed_workspace("strip");
+    ws.toggle_tab_layout("strip".into());
+    let path = ws.settings_path.clone();
+    let mut rt = runtime(ws);
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    let pane_x = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("pane:block:d"))
+            .unwrap()
+            .rect[0]
+    };
+    rt.wheel_event(WheelEvent::new(180., 0.).at(500., 400.));
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
+    rt.wheel_event(
+        WheelEvent::new(0., 40.)
+            .at(500., 400.)
+            .phase(GesturePhase::Began)
+            .precise(true),
+    );
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
+    let before_end = pane_x(&rt);
+    rt.wheel_event(
+        WheelEvent::new(0., 0.)
+            .at(500., 400.)
+            .phase(GesturePhase::Ended)
+            .precise(true),
+    );
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
+    let after = pane_x(&rt);
+    assert!(
+        (after - before_end).abs() < 1.,
+        "vertical scroll end does not snap the strip: {before_end} → {after}"
+    );
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
 fn focus_centering_policies_match_niri_overflow_rules() {
     let focused_x = |policy, wide: bool| {
         let (mut ws, _rx) = tabbed_workspace("strip");
@@ -854,6 +901,91 @@ fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
 }
 
 #[test]
+fn a_failed_column_move_discards_its_width_migration() {
+    let (mut ws, rx) = tabbed_workspace("strip");
+    ws.toggle_tab_layout("strip".into());
+    ws.consume_pane(-1);
+    let reply = match rx.recv().unwrap() {
+        HostCommand::RequestTracked { reply, .. } => reply,
+        _ => panic!("expected tracked column move"),
+    };
+    let path = ws.settings_path.clone();
+    let mut rt = runtime(ws);
+    reply.send(Err("rejected".into())).unwrap();
+    rt.update(|s, _| {
+        let window = s.hosts[0]
+            .model
+            .views
+            .get_mut("s")
+            .unwrap()
+            .windows
+            .iter_mut()
+            .find(|window| window.window_id.as_deref() == Some("strip"))
+            .unwrap();
+        window.layers[0].layout = Some(
+            serde_json::from_value(serde_json::json!({"split":{
+                "split_id":"strip:root","direction":"horizontal","ratio":0.5,
+                "before":{"block_id":"block:d"},
+                "after":{"split":{"split_id":"column:eg","direction":"vertical","ratio":0.5,
+                    "before":{"split":{"split_id":"column:ef","direction":"vertical","ratio":0.5,
+                        "before":{"block_id":"block:e"},"after":{"block_id":"block:f"}}},
+                    "after":{"block_id":"block:g"}}}
+            }}))
+            .unwrap(),
+        );
+        assert!(
+            !s.apply_pending_column_change(0),
+            "a rejected request cannot migrate widths after a later topology change"
+        );
+    });
+    std::fs::remove_file(path).ok();
+}
+
+#[test]
+fn a_lone_scrolling_column_keeps_its_saved_width_and_has_no_size_controls() {
+    let endpoint = "unix:///nonexistent/rex-test.sock";
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.toggle_tab_layout("single".into());
+    ws.settings
+        .column_widths
+        .entry(endpoint.into())
+        .or_default()
+        .entry("s".into())
+        .or_default()
+        .entry("single".into())
+        .or_default()
+        .insert("block:a".into(), 1. / 3.);
+    assert_eq!(ws.active_column_width(), None);
+    ws.cycle_column_width();
+    ws.maximize_column();
+    assert_eq!(
+        ws.settings.column_widths[endpoint]["s"]["single"]["block:a"],
+        1. / 3.
+    );
+    let window = ws.model().window().unwrap().clone();
+    assert!(
+        ws.arrange(&window, None).2.is_empty(),
+        "a lone column has no boundaries"
+    );
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .windows
+        .iter_mut()
+        .find(|window| window.window_id.as_deref() == Some("single"))
+        .unwrap()
+        .zoomed_block_id = Some("block:a".into());
+    let window = ws.model().window().unwrap().clone();
+    assert!(
+        ws.arrange(&window, None).2.is_empty(),
+        "zoom never exposes underlying column boundaries"
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
     let (mut ws, rx) = tabbed_workspace("strip");
     ws.toggle_tab_layout("strip".into());
@@ -1090,6 +1222,14 @@ fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_jso
     rx.try_iter()
         .filter_map(|c| match c {
             HostCommand::Request { method, payload } => {
+                Some((method, payload["session_id"].as_str()?.to_owned(), payload))
+            }
+            HostCommand::RequestTracked {
+                method,
+                payload,
+                reply,
+            } => {
+                let _ = reply.send(Ok(()));
                 Some((method, payload["session_id"].as_str()?.to_owned(), payload))
             }
             _ => None,

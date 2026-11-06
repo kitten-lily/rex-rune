@@ -424,15 +424,14 @@ fn pane_card(
                     s.pane_menu(menu_block.clone(), Some((w.x, w.y)));
                 })
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
-                    // Sideways scrolling and a precise gesture's zero-delta end belong to the
-                    // pane area, so it can pan and snap the scrolling strip.
-                    let strip_end = e.precise
-                        && e.phase == GesturePhase::Ended
-                        && s.model()
-                            .window()
-                            .and_then(|window| window.window_id.as_deref())
-                            .is_some_and(|id| s.tab_layout(id) == TabLayout::Scrolling);
-                    if e.dx.abs() > e.dy.abs() || strip_end {
+                    // Sideways scrolling and only the end of the precise gesture that panned
+                    // the strip belong to the pane area, so it can pan and snap that strip.
+                    let horizontal = e.dx.abs() > e.dy.abs();
+                    let ended = e.precise && e.phase == GesturePhase::Ended;
+                    if e.precise && !ended && !horizontal {
+                        s.strip_gesture = false;
+                    }
+                    if horizontal || (ended && s.strip_gesture) {
                         return false;
                     }
                     let scale = if e.precise { s.ui_scale() } else { 1. };
@@ -659,12 +658,20 @@ pub fn area(s: &Workspace, px: f32) -> El {
         area = area
             .clip_rounded(0.)
             .on_wheel(|s: &mut Workspace, e: WheelEvent, tx: &mut Tx| {
-                let delta = if e.dx.abs() >= e.dy.abs() { e.dx } else { e.dy };
+                let ended = e.precise && e.phase == GesturePhase::Ended;
+                let horizontal = e.dx.abs() >= e.dy.abs() && (e.dx != 0. || e.dy != 0.);
+                if e.precise && !ended && horizontal {
+                    s.strip_gesture = true;
+                }
+                let strip_gesture = ended && std::mem::take(&mut s.strip_gesture);
+                if ended && !strip_gesture {
+                    return false;
+                }
+                let delta = if horizontal { e.dx } else { e.dy };
                 let scale = if e.precise { s.ui_scale() } else { 1. };
                 let width = inner(s)[2] * scale;
                 let moved = width > 0. && s.scroll_strip(-f64::from(delta / width));
-                let ended = e.precise && e.phase == GesturePhase::Ended;
-                let snapped = ended && s.snap_strip();
+                let snapped = strip_gesture && s.snap_strip();
                 if !moved && !snapped && !ended {
                     return false;
                 }

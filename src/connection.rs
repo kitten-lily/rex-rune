@@ -345,6 +345,12 @@ pub enum HostCommand {
         method: String,
         payload: Value,
     },
+    /// A mutating request whose caller needs to discard optimistic local state on failure.
+    RequestTracked {
+        method: String,
+        payload: Value,
+        reply: flume::Sender<std::result::Result<(), String>>,
+    },
     Terminal {
         session: String,
         block: String,
@@ -1327,10 +1333,38 @@ async fn run_host(
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
+                HostCommand::RequestTracked { reply, .. } => {
+                    let _ = reply.send(Err("Host is reconnecting".into()));
+                }
                 _ => {}
             }
         }
     }
+}
+
+async fn refresh_after_request(
+    control: &mut Client,
+    shared: &Shared,
+    workers: &mut HashMap<String, PaneWorker>,
+    state: &mut ControlState,
+    session_id: Option<String>,
+) -> Result<()> {
+    shared.update(|m| m.notice = None);
+    if let Some(id) = session_id {
+        // Destroying a session, or closing its last tab, ends it: nothing to re-read.
+        match refresh(control, shared, state, &id).await {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<rexrs::Error>(),
+                    Some(rexrs::Error::Api(rexrs::ApiError::SessionNotFound { .. }))
+                ) =>
+            {
+                remove_session(shared, workers, &id)
+            }
+            result => result?,
+        }
+    }
+    Ok(())
 }
 
 async fn handle_command(
@@ -1395,21 +1429,23 @@ async fn handle_command(
         HostCommand::Request { method, payload } => {
             let session_id = payload["session_id"].as_str().map(str::to_owned);
             request(control, &method, payload).await?;
-            shared.update(|m| m.notice = None);
-            if let Some(id) = session_id {
-                // Destroying a session, or closing its last tab, ends it: nothing to re-read.
-                match refresh(control, shared, state, &id).await {
-                    Err(error)
-                        if matches!(
-                            error.downcast_ref::<rexrs::Error>(),
-                            Some(rexrs::Error::Api(rexrs::ApiError::SessionNotFound { .. }))
-                        ) =>
-                    {
-                        remove_session(shared, workers, &id)
-                    }
-                    result => result?,
-                }
-            }
+            refresh_after_request(control, shared, workers, state, session_id).await?;
+        }
+        HostCommand::RequestTracked {
+            method,
+            payload,
+            reply,
+        } => {
+            let session_id = payload["session_id"].as_str().map(str::to_owned);
+            let result = request(control, &method, payload).await;
+            let _ = reply.send(
+                result
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|error| format!("{error:#}")),
+            );
+            result?;
+            refresh_after_request(control, shared, workers, state, session_id).await?;
         }
         HostCommand::Ticket {
             session,

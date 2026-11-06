@@ -67,6 +67,7 @@ struct ActiveColumn {
     block: String,
     column: String,
     width: f64,
+    resizable: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -85,7 +86,7 @@ enum ColumnChangeKind {
 }
 
 struct PendingColumnChange {
-    host: usize,
+    host: HostId,
     session: String,
     window: String,
     moved: String,
@@ -96,6 +97,8 @@ struct PendingColumnChange {
     source_width: f64,
     target_width: Option<f64>,
     kind: ColumnChangeKind,
+    outcome: Option<flume::Receiver<std::result::Result<(), String>>>,
+    confirmed: bool,
 }
 
 pub struct Notice {
@@ -120,6 +123,8 @@ pub struct Workspace {
     next_notice: u64,
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
+    /// Whether the current precise horizontal wheel gesture panned a scrolling strip.
+    pub strip_gesture: bool,
     pub column_drag: Option<ColumnDrag>,
     pending_column_change: Option<PendingColumnChange>,
     /// Physical keys whose press went to a terminal; only their releases follow.
@@ -253,6 +258,7 @@ impl Workspace {
             next_notice: 0,
             zoom_notice: None,
             drag: None,
+            strip_gesture: false,
             column_drag: None,
             pending_column_change: None,
             forwarded: HashSet::new(),
@@ -351,6 +357,13 @@ impl Workspace {
         self.unseen_bells.retain(|(host, _)| *host != id);
         self.activity_epochs.remove(&id);
         self.strips.remove(&id);
+        if self
+            .pending_column_change
+            .as_ref()
+            .is_some_and(|pending| pending.host == id)
+        {
+            self.pending_column_change = None;
+        }
     }
 
     /// Stop connecting to saved host `index` and drop it from the workspace. Its server, its
@@ -525,12 +538,27 @@ impl Workspace {
 
     /// Carry local widths across a server-confirmed consume or expel operation.
     pub(crate) fn apply_pending_column_change(&mut self, host: usize) -> bool {
-        let Some(pending) = self.pending_column_change.take() else {
+        let Some(mut pending) = self.pending_column_change.take() else {
             return false;
         };
-        if pending.host != host {
+        if pending.host != self.hosts[host].id {
             self.pending_column_change = Some(pending);
             return false;
+        }
+        if !pending.confirmed {
+            match pending
+                .outcome
+                .as_ref()
+                .expect("column change outcome")
+                .try_recv()
+            {
+                Ok(Ok(())) => pending.confirmed = true,
+                Ok(Err(_)) | Err(flume::TryRecvError::Disconnected) => return false,
+                Err(flume::TryRecvError::Empty) => {
+                    self.pending_column_change = Some(pending);
+                    return false;
+                }
+            }
         }
         let found = self.hosts[host]
             .model
@@ -796,7 +824,11 @@ impl Workspace {
             .and_then(|views| views.get(id))
             .map_or(0., |v| v.offset);
         let strip = self.strip_for(self.active, session, window);
-        let edges = strip.column_edges(offset);
+        let edges = if window.zoomed_block_id.is_some() {
+            Vec::new()
+        } else {
+            strip.column_edges(offset)
+        };
         let (panes, dividers) = strip.placements(offset, drag);
         (panes, dividers, edges)
     }
@@ -914,6 +946,7 @@ impl Workspace {
         }
         let block = model.focused()?;
         let strip = self.strip_for(self.active, session, window);
+        let resizable = strip.column_ids().nth(1).is_some();
         let (column, [_, width]) = strip.column(block)?;
         Some(ActiveColumn {
             session: session.to_owned(),
@@ -921,11 +954,14 @@ impl Workspace {
             block: block.to_owned(),
             column: column.to_owned(),
             width,
+            resizable,
         })
     }
 
     pub fn active_column_width(&self) -> Option<f64> {
-        self.active_column().map(|column| column.width)
+        self.active_column()
+            .filter(|column| column.resizable)
+            .map(|column| column.width)
     }
 
     pub fn column_actions(&self) -> ColumnActions {
@@ -966,6 +1002,21 @@ impl Workspace {
         self.request("session.focus_block", json!({"block_id":column.block}));
     }
 
+    fn request_column_change(&mut self, mut pending: PendingColumnChange, mut payload: Value) {
+        payload["session_id"] = json!(pending.session);
+        let (reply, outcome) = flume::bounded(1);
+        pending.outcome = Some(outcome);
+        self.pending_column_change = Some(pending);
+        self.send(
+            self.active,
+            HostCommand::RequestTracked {
+                method: "session.move_block".into(),
+                payload,
+                reply,
+            },
+        );
+    }
+
     pub fn consume_pane(&mut self, direction: i8) {
         let Some(column) = self.active_column() else {
             return;
@@ -984,21 +1035,22 @@ impl Workspace {
             return;
         };
         let survivor = strip.expel_anchor(&column.block).map(str::to_owned);
-        self.pending_column_change = Some(PendingColumnChange {
-            host: self.active,
-            session: column.session,
-            window: column.window,
-            moved: column.block.clone(),
-            anchor: anchor.clone(),
-            survivor,
-            source: column.column,
-            target: Some(target.to_owned()),
-            source_width: column.width,
-            target_width: Some(target_width),
-            kind: ColumnChangeKind::Consume,
-        });
-        self.request(
-            "session.move_block",
+        self.request_column_change(
+            PendingColumnChange {
+                host: self.hosts[self.active].id,
+                session: column.session,
+                window: column.window,
+                moved: column.block.clone(),
+                anchor: anchor.clone(),
+                survivor,
+                source: column.column,
+                target: Some(target.to_owned()),
+                source_width: column.width,
+                target_width: Some(target_width),
+                kind: ColumnChangeKind::Consume,
+                outcome: None,
+                confirmed: false,
+            },
             json!({
                 "block_id":column.block,
                 "anchor_block_id":anchor,
@@ -1022,21 +1074,22 @@ impl Workspace {
         else {
             return;
         };
-        self.pending_column_change = Some(PendingColumnChange {
-            host: self.active,
-            session: column.session,
-            window: column.window,
-            moved: column.block.clone(),
-            anchor: anchor.clone(),
-            survivor: Some(anchor.clone()),
-            source: column.column,
-            target: None,
-            source_width: column.width,
-            target_width: None,
-            kind: ColumnChangeKind::Expel,
-        });
-        self.request(
-            "session.move_block",
+        self.request_column_change(
+            PendingColumnChange {
+                host: self.hosts[self.active].id,
+                session: column.session,
+                window: column.window,
+                moved: column.block.clone(),
+                anchor: anchor.clone(),
+                survivor: Some(anchor.clone()),
+                source: column.column,
+                target: None,
+                source_width: column.width,
+                target_width: None,
+                kind: ColumnChangeKind::Expel,
+                outcome: None,
+                confirmed: false,
+            },
             json!({
                 "block_id":column.block,
                 "anchor_block_id":anchor,
@@ -1074,6 +1127,9 @@ impl Workspace {
         let Some(column) = self.active_column() else {
             return;
         };
+        if !column.resizable {
+            return;
+        }
         let current = COLUMN_WIDTH_PRESETS
             .iter()
             .position(|preset| (column.width - preset).abs() < 0.02);
@@ -1101,6 +1157,9 @@ impl Workspace {
         let Some(column) = self.active_column() else {
             return;
         };
+        if !column.resizable {
+            return;
+        }
         let view = self
             .strips
             .entry(self.hosts[self.active].id)
