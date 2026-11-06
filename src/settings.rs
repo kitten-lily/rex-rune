@@ -35,6 +35,16 @@ pub enum TabLayout {
     Scrolling,
 }
 
+/// When focus movement centers a column in a scrolling tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusCentering {
+    #[default]
+    Never,
+    OnOverflow,
+    Always,
+}
+
 /// Client-local column widths, keyed by host endpoint, session, window and column.
 pub type ColumnWidths = HashMap<String, HashMap<String, HashMap<String, HashMap<String, f64>>>>;
 
@@ -163,6 +173,7 @@ pub struct Settings {
     pub terminal_theme_declared: bool,
     /// The layout of tabs without their own choice.
     pub tab_layout: TabLayout,
+    pub focus_centering: FocusCentering,
     /// Tabs given their own layout, by host endpoint, session ID and Rex window ID.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tab_layouts: HashMap<String, HashMap<String, HashMap<String, TabLayout>>>,
@@ -199,6 +210,7 @@ impl Default for Settings {
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
             tab_layout: TabLayout::default(),
+            focus_centering: FocusCentering::default(),
             tab_layouts: HashMap::new(),
             column_widths: HashMap::new(),
         }
@@ -367,6 +379,7 @@ mod tests {
         assert_eq!(old.notice_position, NoticePosition::TopRight);
         assert_eq!(old.notifications, NotificationsConfig::default());
         assert_eq!(old.tab_layout, TabLayout::Tiled);
+        assert_eq!(old.focus_centering, FocusCentering::Never);
         assert!(old.tab_layouts.is_empty());
         assert!(old.column_widths.is_empty());
         let partial: Settings =
@@ -375,6 +388,7 @@ mod tests {
         let mut s = old;
         s.notice_position = NoticePosition::BottomRight;
         s.tab_layout = TabLayout::Scrolling;
+        s.focus_centering = FocusCentering::OnOverflow;
         s.tab_layouts
             .entry("unix:///run/rex.sock".into())
             .or_default()
@@ -392,8 +406,10 @@ mod tests {
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["notice_position"], "bottom_right");
         assert_eq!(json["tab_layout"], "scrolling");
+        assert_eq!(json["focus_centering"], "on_overflow");
         let back: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(back.notice_position, NoticePosition::BottomRight);
+        assert_eq!(back.focus_centering, FocusCentering::OnOverflow);
         assert_eq!(
             back.tab_layouts["unix:///run/rex.sock"]["session:a"]["window:a"],
             TabLayout::Tiled
