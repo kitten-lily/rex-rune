@@ -893,13 +893,25 @@ fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
         .unwrap();
     assert!((e.rect[0] - 0.25).abs() < 1e-9, "centered: {:?}", e.rect);
 
+    let widths = &ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"];
+    let right = widths.get("column:eg").copied();
     ws.begin_column_drag("block:d".into(), "column:eg".into());
     ws.update_column_drag(0.2);
     ws.finish_column_drag(false);
     let widths = &ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"];
     assert!((widths["block:d"] - 0.7).abs() < 1e-9);
-    assert!((widths["column:eg"] - 0.3).abs() < 1e-9);
-    assert!((widths["block:d"] + widths["column:eg"] - 1.).abs() < 1e-9);
+    assert_eq!(
+        widths.get("column:eg").copied(),
+        right,
+        "only the column left of the boundary resizes"
+    );
+    ws.begin_column_drag("block:d".into(), "column:eg".into());
+    ws.update_column_drag(5.);
+    ws.finish_column_drag(false);
+    assert_eq!(
+        ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:d"], 1.,
+        "a drag stops at one window"
+    );
 
     let mut tx = rune::Tx::default();
     ws.perform(Intent::Split("horizontal"), &mut tx);
