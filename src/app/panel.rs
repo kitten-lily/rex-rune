@@ -2,7 +2,7 @@
 use super::theme::{MONITOR, SERVER};
 use super::workspace::Workspace;
 use rex_linux::{
-    settings::{ChromeTheme, TerminalThemeChoice},
+    settings::{ChromeTheme, TabLayout, TerminalThemeChoice},
     terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
 };
 use rune::TextEdit;
@@ -27,6 +27,8 @@ pub enum Intent {
     RenameSession,
     RenameWindow(String),
     CloseWindow(String),
+    /// Switch the tab with this Rex window ID between tiled and scrolling.
+    TabLayout(String),
     Zoom,
     Sidebar,
     Settings,
@@ -429,6 +431,15 @@ impl Workspace {
         entries
     }
 
+    /// The entry that switches tab `window` to the other layout.
+    fn layout_entry(&self, window: &str, group: &str) -> Entry {
+        let label = match self.tab_layout(window) {
+            TabLayout::Tiled => "Use scrolling layout",
+            TabLayout::Scrolling => "Use tiled layout",
+        };
+        Entry::new(label, "", group, Intent::TabLayout(window.to_owned()))
+    }
+
     pub fn entries(&self) -> Vec<Entry> {
         let Some(panel) = &self.panel else {
             return vec![];
@@ -479,6 +490,7 @@ impl Workspace {
             let connected = self.model().connected;
             let mut entries = vec![
                 Entry::new("Rename tab…", "", "", Intent::RenameWindow(id.clone())),
+                self.layout_entry(id, ""),
                 Entry::new("Close tab…", "", "", Intent::CloseWindow(id.clone())),
                 Entry::new("New tab", "Ctrl Shift T", "", Intent::NewWindow),
             ];
@@ -540,6 +552,7 @@ impl Workspace {
                     "Workspace",
                     Intent::RenameWindow(id.clone()),
                 ));
+                entries.push(self.layout_entry(&id, "Workspace"));
                 entries.push(Entry::new(
                     "Close tab…",
                     "",

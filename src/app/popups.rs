@@ -53,7 +53,8 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     }
     let target = panel.target.as_ref()?;
     let current = s.model().window()?;
-    let placement = rex_linux::layout::placements(current, None)
+    let placement = s
+        .arrange(current, None)
         .0
         .into_iter()
         .find(|p| p.block == target.block)?;
@@ -62,7 +63,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     let ([x, y, w, h], radius) = if bleed {
         ([0., 0., aw, ah], 0.)
     } else {
-        (super::panes::card_rect(s, placement.rect), CARD_RADIUS)
+        (super::panes::card_rect(s, &placement), CARD_RADIUS)
     };
     Some(
         el().key("target-outline")
