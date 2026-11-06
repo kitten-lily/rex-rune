@@ -91,6 +91,10 @@ pub enum Command {
     Wheel(Value),
     Resize(u16, u16, u16, u16),
     Scroll(isize),
+    /// Search the terminal's screen and scrollback for this text; empty stops searching.
+    Search(String),
+    /// Select the next older search match (`true`) or the next newer one.
+    SearchStep(bool),
     TakeControl,
     Reconnect,
 }
@@ -545,6 +549,8 @@ enum DataCommand {
     Selection(crate::terminal::selection::Input),
     Visible(bool),
     Scroll(isize),
+    Search(String),
+    SearchStep(bool),
     Bottom,
     Reconnect,
     Stop,
@@ -1431,6 +1437,12 @@ async fn handle_command(
                 Command::Scroll(delta) => {
                     let _ = worker.commands.send(DataCommand::Scroll(delta));
                 }
+                Command::Search(needle) => {
+                    let _ = worker.commands.send(DataCommand::Search(needle));
+                }
+                Command::SearchStep(older) => {
+                    let _ = worker.commands.send(DataCommand::SearchStep(older));
+                }
                 Command::Reconnect => {
                     let _ = worker.commands.send(DataCommand::Reconnect);
                 }
@@ -1559,6 +1571,7 @@ async fn run_data(
     let mut welcome: Option<wire::Welcome> = None;
     let mut stream: Option<TerminalStream> = None;
     let mut selection = None;
+    let mut search = crate::terminal::search::Controller::default();
     let mut visible = true;
     let mut renderer = match Renderer::new() {
         Ok(r) => r,
@@ -1581,6 +1594,7 @@ async fn run_data(
             if socket.is_none() {
                 let (next, fresh) = open_data(&endpoint, &session, &block, &host).await?;
                 selection = Some(crate::terminal::selection::Controller::new()?);
+                search.forget_terminal();
                 stream = Some(TerminalStream::new(fresh.nonce)); welcome = Some(fresh);
                 shared.update(|m|m.restore_generation+=1);
                 renderer = Renderer::new()?; socket = Some(next);
@@ -1603,6 +1617,9 @@ async fn run_data(
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
                         Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; dirty = true; },
                         Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); dirty = true; },
+                        Ok(DataCommand::Search(needle)) => { search.set_needle(stream.terminal.as_ref(), needle)?; dirty = true; },
+                        // Ghostty scrolls the selected match into view.
+                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &stream.terminal { search.step(terminal, older)?; selection.after_scroll(terminal)?; dirty = true; },
                         Ok(DataCommand::Reconnect) => { shared.status("Reconnecting terminal…", false); return Ok(false); }
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
@@ -1611,8 +1628,10 @@ async fn run_data(
                         if stream.render_held(Instant::now())? { continue; }
                         if let Some(terminal) = &mut stream.terminal {
                             selection.tick(terminal)?;
+                            search.update(terminal)?;
                             let mut frame = renderer.frame(terminal)?;
                             frame.selection_revision = selection.revision;
+                            frame.search = search.results(terminal)?;
                             let frame = Arc::new(frame);
                             let mut transitioned = false;
                             shared.update(|m| {
