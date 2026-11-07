@@ -420,6 +420,7 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
         block: "block:1".into(),
         window: "w".into(),
         label: "shell".into(),
+        name: "shell".into(),
         tab: "Shell".into(),
     };
     ws.hosts[1].model.views.insert(
@@ -521,6 +522,63 @@ fn a_single_pane_is_full_bleed_and_a_split_keeps_its_cards() {
     let (ws, _rx) = tabbed_workspace("split");
     let rt = runtime(ws);
     assert!(has(&rt, "pane-header:block:b") && has(&rt, "pane-header:block:c"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn an_unrenamed_split_pane_header_shows_its_programs_title() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let model = &mut ws.hosts[0].model;
+    let window = &mut model.views.get_mut("s").unwrap().windows[1];
+    for (block, label) in window.layers[0].blocks.iter_mut().zip(["shell", "build"]) {
+        block.label = Some(label.into());
+        block.creator_name = Some("com.superlogical.terminal".into());
+        block.flavor = Some("com.superlogical.terminal.shell".into());
+    }
+    for block in ["block:b", "block:c"] {
+        model
+            .titles
+            .insert(block.into(), ("Claude Code".into(), None));
+    }
+    let rt = runtime(ws);
+    let texts: Vec<_> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    let count = |t: &str| texts.iter().filter(|x| *x == t).count();
+    assert_eq!(
+        count("Claude Code"),
+        1,
+        "only the unrenamed pane: {texts:?}"
+    );
+    assert_eq!(count("build"), 1, "the renamed pane keeps its name");
+    assert_eq!(count("shell"), 0);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn split_pane_headers_show_their_own_status_word() {
+    use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let mut blocked = record(Blocked, true);
+    blocked.kind = Some(BlockedKind::Question);
+    ws.hosts[0]
+        .model
+        .activity
+        .insert("block:c".into(), [("".into(), blocked)].into());
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "pane-word:block:c"));
+    assert!(
+        !has(&rt, "pane-word:block:b"),
+        "only the pane that reported"
+    );
+    // A direct field write doesn't invalidate the view; go through update.
+    rt.update(|s, _| s.settings.notifications.show_in_tabs = false);
+    // Let the word's exit transition finish.
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        !has(&rt, "pane-word:block:c"),
+        "the activity switch hides it"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -2157,6 +2215,94 @@ fn a_tabs_progress_report_shows_below_trouble_and_above_done() {
         [("".into(), record(Blocked, true))].into(),
     );
     assert_eq!(word(model, 0, false).as_deref(), Some("Needs input"));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_titled_pane_shows_its_title_but_renames_from_its_label() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let model = &mut ws.hosts[0].model;
+    let block = &mut model.views.get_mut("s").unwrap().windows[1].layers[0].blocks[0];
+    block.label = Some("shell".into());
+    block.creator_name = Some("com.superlogical.terminal".into());
+    block.flavor = Some("com.superlogical.terminal.shell".into());
+    model
+        .titles
+        .insert("block:b".into(), ("Claude Code".into(), None));
+    let target = ws.target("block:b").unwrap();
+    assert_eq!(target.label, "shell", "Rename prefills the server label");
+    assert_eq!(target.name, "Claude Code");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
+    use super::activity::{pane_activity, program_icon, tab_activity, tab_word};
+    use rex_linux::connection::activity::{BlockedKind, ProgramState::*, TerminalProgress::Set};
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let model = &mut ws.hosts[0].model;
+    let mut blocked = record(Blocked, true);
+    blocked.kind = Some(BlockedKind::Permission);
+    blocked.progress = Some(50);
+    let mut working = record(Working, true);
+    working.progress = Some(40);
+    model
+        .activity
+        .insert("block:b".into(), [("".into(), blocked)].into());
+    model
+        .activity
+        .insert("block:c".into(), [("".into(), working)].into());
+    let word = |a| tab_word(&a, false, false).map(|(w, _)| w.into_owned());
+    assert_eq!(
+        word(pane_activity(model, "block:b")).as_deref(),
+        Some("Needs approval")
+    );
+    assert_eq!(
+        word(pane_activity(model, "block:c")).as_deref(),
+        Some("40%")
+    );
+    let view = model.view().unwrap().clone();
+    assert_eq!(
+        word(tab_activity(model, &view.windows[1])).as_deref(),
+        Some("Needs approval")
+    );
+    // An OSC 9;4 report beats the record's own progress.
+    model.progress.insert("block:c".into(), Set(Some(10)));
+    assert_eq!(
+        word(pane_activity(model, "block:c")).as_deref(),
+        Some("10%")
+    );
+    // A pane with nothing to report says nothing.
+    assert_eq!(word(pane_activity(model, "block:a")), None);
+    // Equal Working records: the one with progress decides, whatever its id order.
+    model.progress.clear();
+    for ids in [("a", "z"), ("z", "a")] {
+        let mut with = record(Working, true);
+        with.progress = Some(25);
+        model.activity.insert(
+            "block:c".into(),
+            [(ids.0.into(), with), (ids.1.into(), record(Working, true))].into(),
+        );
+        assert_eq!(
+            word(pane_activity(model, "block:c")).as_deref(),
+            Some("25%")
+        );
+    }
+    // Across panes too: block:b Working without progress, block:c Working with 25%.
+    model.activity.insert(
+        "block:b".into(),
+        [("".into(), record(Working, true))].into(),
+    );
+    let view = model.view().unwrap().clone();
+    assert_eq!(
+        word(tab_activity(model, &view.windows[1])).as_deref(),
+        Some("25%")
+    );
+    assert!(std::ptr::eq(
+        program_icon(Some("claude-code")),
+        &super::theme::CLAUDE
+    ));
+    assert!(std::ptr::eq(program_icon(Some("omp")), &super::theme::PI));
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
