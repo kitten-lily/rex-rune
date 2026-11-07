@@ -141,6 +141,8 @@ pub enum BlockEvent {
     },
     /// An OSC 9;4 report; none when the program removed its progress.
     Progress(Option<TerminalProgress>),
+    /// The terminal's working directory as a path; none when the report leaves it out.
+    Pwd(Option<String>),
     /// The program rang the terminal's bell (BEL).
     Bell,
 }
@@ -169,6 +171,7 @@ pub fn parse_block_event(payload: &Value) -> Option<(String, BlockEvent)> {
         },
         "process_changed" => parse_process(body),
         "title_changed" => parse_title(body),
+        "pwd_changed" => parse_pwd(body),
         "desktop_notification" => BlockEvent::Notification {
             title: body["title"].as_str().unwrap_or_default().to_owned(),
             body: body["body"].as_str().unwrap_or_default().to_owned(),
@@ -212,6 +215,41 @@ pub fn parse_title(body: &Value) -> BlockEvent {
         text: body["title"].as_str().unwrap_or_default().trim().to_owned(),
         owner: body["owner"]["pid"].as_u64(),
     }
+}
+
+/// A `pwd_changed` payload or a `pwd` reply.
+pub fn parse_pwd(body: &Value) -> BlockEvent {
+    BlockEvent::Pwd(body["pwd"].as_str().filter(|s| !s.is_empty()).map(cwd_path))
+}
+
+/// The path in a reported working directory: a `file://host/path` URL's path with its `%XX`
+/// escapes decoded (an invalid escape stays as written), or a plain path unchanged.
+pub fn cwd_path(reported: &str) -> String {
+    let Some(rest) = reported.strip_prefix("file://") else {
+        return reported.to_owned();
+    };
+    let path = rest.find('/').map_or("", |at| &rest[at..]);
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A `program_status` reply's records by id; the root record's id is empty.

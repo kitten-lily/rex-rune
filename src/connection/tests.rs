@@ -1557,3 +1557,33 @@ async fn a_server_without_set_theme_is_told_once_and_never_again() {
     );
     drop(host);
 }
+
+#[test]
+fn working_directories_follow_pwd_reports() {
+    let mut model = HostModel::default();
+    let (block, event) = activity::parse_block_event(&json!({
+        "creator_name": activity::TERMINAL, "block_id": "b", "name": "pwd_changed",
+        "payload": {"pwd":"file://box/home/me/my%20repo","owner":{"pid":3,"name":"zsh"}}
+    }))
+    .expect("a pwd report");
+    model.apply_block_event("s", block, event);
+    assert_eq!(model.cwds["b"], "/home/me/my repo");
+
+    model.apply_block_event("s", "b".into(), activity::parse_pwd(&json!({})));
+    assert!(
+        model.cwds.is_empty(),
+        "a report without a directory clears it"
+    );
+
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::BlockEvent::Pwd(Some("file:///x".into())),
+    );
+    model.forget_block("b");
+    assert!(model.cwds.is_empty(), "a closed block's directory goes");
+
+    assert_eq!(activity::cwd_path("/plain"), "/plain");
+    assert_eq!(activity::cwd_path("file:///x"), "/x");
+    assert_eq!(activity::cwd_path("file://h/bad%zz"), "/bad%zz");
+}

@@ -183,6 +183,8 @@ pub struct HostModel {
     pub foreground: HashMap<String, Vec<u64>>,
     /// Each terminal block's title, as a program last set it, and the pid that set it.
     pub titles: HashMap<String, (String, Option<u64>)>,
+    /// Each terminal block's working directory, as a path.
+    pub cwds: HashMap<String, String>,
     /// Each terminal block's OSC 9;4 progress, until its program removes it.
     pub progress: HashMap<String, TerminalProgress>,
     /// Program notifications not yet taken by the UI.
@@ -264,6 +266,12 @@ impl HostModel {
                     self.titles.insert(block, (text, owner));
                 }
             }
+            BlockEvent::Pwd(Some(path)) => {
+                self.cwds.insert(block, path);
+            }
+            BlockEvent::Pwd(None) => {
+                self.cwds.remove(&block);
+            }
             BlockEvent::Notification { title, body } => {
                 // A program spamming notifications can't grow this without bound.
                 if self.notices.len() < 32 {
@@ -294,6 +302,7 @@ impl HostModel {
         self.programs.remove(block);
         self.foreground.remove(block);
         self.titles.remove(block);
+        self.cwds.remove(block);
         self.progress.remove(block);
     }
 
@@ -1177,6 +1186,7 @@ async fn run_host(
                 m.programs.clear();
                 m.foreground.clear();
                 m.titles.clear();
+                m.cwds.clear();
                 m.progress.clear();
                 m.activity_epoch += 1;
             });
