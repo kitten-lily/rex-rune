@@ -37,6 +37,8 @@ pub enum Intent {
     ExpelPane(i8),
     Zoom,
     Sidebar,
+    /// Open the sidebar on the Activity list.
+    Activity,
     Settings,
     Fonts,
     AddHost,
@@ -611,6 +613,7 @@ impl Workspace {
                     "Ctrl Shift B",
                     Intent::Sidebar,
                 ),
+                ("Activity", "", Intent::Activity),
                 ("Default shell…", "", Intent::HostShell(self.active)),
                 ("Settings…", "Ctrl ,", Intent::Settings),
                 ("Add host…", "", Intent::AddHost),

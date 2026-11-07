@@ -95,7 +95,7 @@ pub fn tab_activity(model: &HostModel, window: &session::Window) -> TabActivity 
 }
 
 /// A session's activity: the fold over every pane of every tab in its view.
-#[allow(dead_code)] // used by `activity_list::session_activity` once rendered
+#[cfg_attr(not(test), allow(dead_code))] // Until session rows show it (Task 6)
 pub fn view_activity(model: &HostModel, view: &session::ViewResponse) -> TabActivity {
     let blocks = view.windows.iter().flat_map(blocks);
     let focused = view
@@ -205,7 +205,6 @@ fn progress_word(progress: TerminalProgress) -> (Cow<'static, str>, u32) {
 
 /// The word a pane's activity row shows: trouble, then a program's progress report, then its
 /// state. Unlike a tab's pill, Working, Done and Idle always have a word.
-#[allow(dead_code)] // used by the Activity view once rendered
 pub fn activity_word(activity: &TabActivity) -> (Cow<'static, str>, u32) {
     match activity.state {
         ProgramState::Blocked => (blocked_word(activity.kind).into(), warning()),
@@ -458,8 +457,6 @@ impl Workspace {
     /// An Activity row was pressed: show its session and focus the exact pane. The window is
     /// found again from the block id, so a pane that has closed is never swapped for
     /// whatever now sits at its old position.
-    // Until the Activity sidebar calls it (Task 5).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open_pane(&mut self, target: &PaneRef, tx: &mut Tx) {
         let live = self.host_index(target.host).filter(|&index| {
             let model = &self.hosts[index].model;

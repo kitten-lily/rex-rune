@@ -15,7 +15,7 @@ use rex_linux::{
         MIN_COLUMN_WIDTH, Placement, Strip, shell_layout,
     },
     settings::{
-        ChromeTheme, FocusCentering, Host, NoticePosition, Settings, TabLayout,
+        ChromeTheme, FocusCentering, Host, NoticePosition, Settings, SidebarMode, TabLayout,
         TerminalThemeChoice, normalize_font_preferences, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
@@ -1480,12 +1480,20 @@ impl Workspace {
         self.sync_prefetch();
     }
 
-    /// Ask each host for the views of the sessions whose tabs the sidebar lists: those of
-    /// expanded hosts, while the sidebar is open with Sidebar tab position.
+    /// Ask each host for the views of the sessions the sidebar reads: in Activity mode every
+    /// connected host's, since panes report from any session; otherwise those of expanded
+    /// hosts, while the sidebar is open with Sidebar tab position.
     pub fn sync_prefetch(&mut self) {
         let listing = self.sidebar_tabs();
+        let activity =
+            self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity;
         for index in 0..self.hosts.len() {
-            let wanted: HashSet<String> = if listing && !self.settings.hosts[index].collapsed {
+            let eligible = if activity {
+                self.hosts[index].model.connected
+            } else {
+                listing && !self.settings.hosts[index].collapsed
+            };
+            let wanted: HashSet<String> = if eligible {
                 let sessions = &self.hosts[index].model.sessions;
                 sessions.iter().map(|s| s.session_id.clone()).collect()
             } else {
@@ -1730,8 +1738,23 @@ impl Workspace {
 
     /// Tabs are listed in the sidebar instead of the toolbar: Sidebar tab position, and
     /// only while the sidebar is open.
+    /// The sidebar lists tabs, so the toolbar doesn't: Sidebar tab position, open, and
+    /// showing sessions.
     pub fn sidebar_tabs(&self) -> bool {
-        self.settings.vertical_tabs && self.sidebar.is_open()
+        self.settings.vertical_tabs
+            && self.sidebar.is_open()
+            && self.settings.sidebar_mode == SidebarMode::Sessions
+    }
+
+    pub fn set_sidebar_mode(&mut self, mode: SidebarMode) {
+        self.settings.sidebar_mode = mode;
+        self.save();
+    }
+
+    /// Opens the sidebar on the Activity list; an open sidebar stays open.
+    pub fn show_activity(&mut self) {
+        self.sidebar.set_open(true);
+        self.set_sidebar_mode(SidebarMode::Activity);
     }
 
     pub fn set_vertical_tabs(&mut self, vertical: bool) {
@@ -1886,6 +1909,7 @@ impl Workspace {
                 }
             }
             Intent::Sidebar => self.toggle_sidebar(),
+            Intent::Activity => self.show_activity(),
             Intent::Settings => {
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));

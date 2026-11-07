@@ -3798,3 +3798,184 @@ fn a_removed_host_is_not_targeted() {
     );
     std::fs::remove_file(&ws.settings_path).ok();
 }
+
+/// Make every block of every view a terminal, as the server reports them; `tabbed_workspace`
+/// leaves the creator and flavor out.
+fn terminal_blocks(ws: &mut Workspace) {
+    for host in &mut ws.hosts {
+        for view in host.model.views.values_mut() {
+            for block in view
+                .windows
+                .iter_mut()
+                .flat_map(|w| &mut w.layers)
+                .flat_map(|l| &mut l.blocks)
+            {
+                block.creator_name = Some("com.superlogical.terminal".into());
+                block.flavor = Some("com.superlogical.terminal.shell".into());
+            }
+        }
+    }
+}
+
+fn settle(rt: &mut Runtime<Workspace>) {
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+}
+
+#[test]
+fn activity_mode_lists_reporting_panes() {
+    use rex_linux::{connection::activity::ProgramState::Blocked, settings::SidebarMode};
+    let (mut ws, rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    ws.hosts[0].model.activity.insert(
+        "block:c".into(),
+        [("".into(), record(Blocked, true))].into(),
+    );
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(!has(&rt, "activity-row:0:block:c"), "Sessions mode first");
+    click(&mut rt, "sidebar-mode:activity");
+    settle(&mut rt);
+    assert!(has(&rt, "activity-row:0:block:c"));
+    assert!(
+        !has(&rt, "activity-row:0:block:b"),
+        "a plain shell has no row"
+    );
+    assert_eq!(rt.state.settings.sidebar_mode, SidebarMode::Activity);
+    assert_eq!(
+        Settings::load(&rt.state.settings_path)
+            .unwrap()
+            .sidebar_mode,
+        SidebarMode::Activity,
+        "saved"
+    );
+    rx.try_iter().count();
+    click(&mut rt, "activity-row:0:block:c");
+    assert!(
+        requests(&rx)
+            .iter()
+            .any(|(method, session, payload)| method == "session.focus_block"
+                && session == "s"
+                && payload["block_id"] == "block:c"),
+        "a row focuses its pane"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn activity_mode_shows_an_empty_state() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    ws.toggle_sidebar();
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(has(&rt, "activity-empty"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn activity_grouping_and_idle_switches_apply() {
+    use rex_linux::{connection::activity::ProgramState::Working, settings::ActivityGrouping};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    ws.hosts[0].model.activity.insert(
+        "block:c".into(),
+        [("".into(), record(Working, true))].into(),
+    );
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let header = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("activity-group:0"))
+            .and_then(|e| e.text)
+    };
+    assert_eq!(header(&rt).as_deref(), Some("Working"));
+    click(&mut rt, "activity-grouping:session");
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.settings.activity_grouping,
+        ActivityGrouping::Session
+    );
+    assert_eq!(header(&rt).as_deref(), Some("s-label · test-0"));
+    click(&mut rt, "activity-grouping:priority");
+    assert_eq!(
+        rt.state.settings.activity_grouping,
+        ActivityGrouping::Priority
+    );
+    assert!(!rt.state.settings.activity_show_idle);
+    click(&mut rt, "activity-idle");
+    assert!(rt.state.settings.activity_show_idle);
+    click(&mut rt, "activity-idle");
+    assert!(!rt.state.settings.activity_show_idle);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn activity_mode_returns_the_toolbar_tabs() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.set_vertical_tabs(true);
+    assert!(
+        ws.sidebar.is_open() && ws.sidebar_tabs(),
+        "Sessions mode lists tabs"
+    );
+    ws.show_activity();
+    assert!(
+        !ws.sidebar_tabs(),
+        "Activity mode gives them back to the toolbar"
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn activity_mode_prefetches_every_session() {
+    fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                HostCommand::PrefetchViews(ids) => {
+                    let mut ids: Vec<_> = ids.into_iter().collect();
+                    ids.sort();
+                    Some(ids)
+                }
+                _ => None,
+            })
+            .last()
+    }
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.hosts[0].model.sessions.push(session("other"));
+    ws.settings.hosts[0].collapsed = true;
+    ws.show_activity();
+    assert_eq!(
+        latest(&rx),
+        Some(vec!["other".to_owned(), "s".to_owned()]),
+        "every session of a collapsed host"
+    );
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    click(&mut rt, "sidebar-mode:sessions");
+    assert_eq!(latest(&rx), Some(vec![]), "the Sessions rule again");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn commands_offer_activity() {
+    use rex_linux::settings::SidebarMode;
+    let mut ws = workspace();
+    ws.picker(false);
+    assert!(
+        ws.entries()
+            .iter()
+            .any(|e| e.label == "Activity" && matches!(e.action, Intent::Activity))
+    );
+    assert!(!ws.sidebar.is_open());
+    ws.perform(Intent::Activity, &mut rune::Tx::default());
+    assert!(ws.sidebar.is_open());
+    assert_eq!(ws.settings.sidebar_mode, SidebarMode::Activity);
+    ws.perform(Intent::Activity, &mut rune::Tx::default());
+    assert!(ws.sidebar.is_open(), "never toggles it closed");
+    std::fs::remove_file(&ws.settings_path).ok();
+}

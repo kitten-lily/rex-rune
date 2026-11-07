@@ -1,7 +1,5 @@
 //! The Activity view's model: one row per pane that has something to say, across hosts,
 //! ranked by how much it needs the user, with the subtasks its program reports.
-// Nothing renders these rows yet; the sidebar and session list take them next.
-#![allow(dead_code)]
 use super::{
     activity::{self, TabActivity},
     workspace::HostId,
@@ -263,6 +261,7 @@ fn join<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
 
 /// A session's activity across all its tabs, and how many panes need the user (Blocked or
 /// Error). None until its view is known.
+#[cfg_attr(not(test), allow(dead_code))] // Until session rows show it (Task 6)
 pub fn session_activity(model: &HostModel, session: &str) -> Option<(TabActivity, usize)> {
     let view = model.views.get(session)?;
     let needing = view

@@ -1,20 +1,31 @@
 //! The optional host → session sidebar. It slides in and out; rows activate on click only
 //! (keyboard session navigation is the Ctrl K switcher, so arrows never switch sessions).
 use super::{
-    activity::{program_icon, tab_activity, tab_name, tab_word},
+    activity::{TabActivity, activity_word, program_icon, tab_activity, tab_name, tab_word},
+    activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
     panel::Intent,
     panes::divider_handle,
     theme::*,
     widgets::{chrome_button, glyph},
     workspace::Workspace,
 };
-use rex_linux::connection::HostCommand;
+use rex_linux::{
+    connection::{
+        HostCommand,
+        activity::{ProgramState, TerminalProgress},
+    },
+    settings::{ActivityGrouping, SidebarMode},
+};
 use rune::{Cursor, Cx, Edge, El, ScrollSpec, SpringPair, Transition, Tx, col, el, row, text};
 
 const HOST_ROW: f32 = 28.;
 const SESSION_ROW: f32 = 32.;
 const NOTE_ROW: f32 = 28.;
 const GROUP_GAP: f32 = 12.;
+const GROUP_LABEL_ROW: f32 = 26.;
+const ACTIVITY_ROW: f32 = 44.;
+const TASK_ROW: f32 = 24.;
+const SEGMENT: f32 = 26.;
 
 fn host_header(s: &Workspace, index: usize) -> El {
     let config = &s.settings.hosts[index];
@@ -321,7 +332,291 @@ fn new_session(s: &Workspace, index: usize) -> El {
         )
 }
 
-pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
+/// One segment of a two-way switch: the active one on the tab pill's fill and hairline.
+fn segment(
+    key: &str,
+    label: &'static str,
+    active: bool,
+    f: impl Fn(&mut Workspace) + 'static,
+) -> El {
+    let e = row()
+        .key(key.to_owned())
+        .role("tab")
+        .label(label)
+        .h(SEGMENT)
+        .px(10.)
+        .center()
+        .radius(8.)
+        .continuous_corners()
+        .cursor(Cursor::Pointer)
+        .preserve_focus_on_press(true)
+        .tab_index(-1)
+        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+            f(s);
+            tx.blur();
+        })
+        .child(
+            text(label)
+                .font(if active { medium(12.) } else { ui(12.) })
+                .color(rgb(if active { ink() } else { muted() })),
+        );
+    if active {
+        e.fill(white(0.11))
+            .border_gradient(1., white(0.15), white(0.04))
+    } else {
+        e.hover(white(0.05))
+    }
+}
+
+fn mode_switch(s: &Workspace) -> El {
+    let mode = s.settings.sidebar_mode;
+    row()
+        .role("tablist")
+        .gap(2.)
+        .center_y()
+        .child(segment(
+            "sidebar-mode:sessions",
+            "Sessions",
+            mode == SidebarMode::Sessions,
+            |s| s.set_sidebar_mode(SidebarMode::Sessions),
+        ))
+        .child(segment(
+            "sidebar-mode:activity",
+            "Activity",
+            mode == SidebarMode::Activity,
+            |s| s.set_sidebar_mode(SidebarMode::Activity),
+        ))
+}
+
+/// The word a subtask shows: `activity_word` for its own record alone.
+fn task_word(task: &TaskLine) -> (std::borrow::Cow<'static, str>, u32) {
+    let r = &task.record;
+    activity_word(&TabActivity {
+        state: r.state,
+        kind: r.kind,
+        msg: r.msg.clone(),
+        progress: r
+            .progress
+            .filter(|_| r.state == ProgramState::Working)
+            .map(|n| TerminalProgress::Set(Some(n))),
+        ..TabActivity::default()
+    })
+}
+
+fn task_line(index: usize, block: &str, task: &TaskLine) -> El {
+    let (word, tone) = task_word(task);
+    row()
+        .key(format!("activity-task:{index}:{block}:{}", task.id))
+        .h(TASK_ROW)
+        .ml(12. + 12. * task.depth as f32)
+        .pl(10.)
+        .pr(8.)
+        .gap(8.)
+        .center_y()
+        .child(
+            text(task.title.clone())
+                .font(ui(11.5))
+                .color(rgb(muted()))
+                .truncate()
+                .help_when_truncated(task.title.clone())
+                .grow(1.)
+                .min_w(0.),
+        )
+        .child(text(word).font(medium(10.5)).color(rgb(tone)))
+}
+
+fn activity_row(index: usize, row_: &ActivityRow) -> El {
+    let program = row_.program.as_deref().or(row_.activity.program.as_deref());
+    let (word, tone) = activity_word(&row_.activity);
+    let target = row_.target.clone();
+    let mut line = row()
+        .gap(8.)
+        .center_y()
+        .child(
+            text(row_.name.clone())
+                .font(medium(12.5))
+                .color(rgb(ink()))
+                .truncate()
+                .help_when_truncated(row_.name.clone())
+                .grow(1.)
+                .min_w(0.),
+        )
+        .child(text(word.clone()).font(medium(10.5)).color(rgb(tone)));
+    if let Some(msg) = &row_.activity.msg {
+        line = line.help(msg.clone());
+    }
+    let mut body = col().grow(1.).min_w(0.).gap(2.).child(line);
+    if !row_.detail.is_empty() {
+        body = body.child(
+            text(row_.detail.clone())
+                .font(ui(11.))
+                .color(rgb(muted()))
+                .truncate()
+                .help_when_truncated(row_.detail.clone()),
+        );
+    }
+    row()
+        .key(format!("activity-row:{index}:{}", row_.target.block))
+        .role("button")
+        .label(format!("{} · {word}", row_.name))
+        .h(ACTIVITY_ROW)
+        .px(10.)
+        .gap(10.)
+        .center_y()
+        .radius(9.)
+        .continuous_corners()
+        .hover(white(0.05))
+        .press(white(0.09))
+        .cursor(Cursor::Pointer)
+        .preserve_focus_on_press(true)
+        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+            s.open_pane(&target, tx);
+            tx.blur();
+        })
+        .child(glyph(program_icon(program), 15., rgb(muted())))
+        .child(body)
+}
+
+fn activity_group(s: &Workspace, n: usize, group: &ActivityGroup) -> (El, f32) {
+    let mut height = GROUP_LABEL_ROW;
+    let mut e = col().gap(2.).child(
+        row().h(GROUP_LABEL_ROW).px(10.).center_y().child(
+            text(group.title.clone())
+                .key(format!("activity-group:{n}"))
+                .font(label_caps())
+                .text_case(rune::TextCase::Uppercase)
+                .color(rgb(muted()))
+                .truncate()
+                .help_when_truncated(group.title.clone())
+                .grow(1.)
+                .min_w(0.),
+        ),
+    );
+    for row_ in &group.rows {
+        let Some(index) = s.host_index(row_.target.host) else {
+            continue;
+        };
+        e = e.child(activity_row(index, row_));
+        height += ACTIVITY_ROW + 2.;
+        for task in &row_.tasks {
+            e = e.child(task_line(index, &row_.target.block, task));
+            height += TASK_ROW + 2.;
+        }
+    }
+    (e.pb(GROUP_GAP), height + GROUP_GAP)
+}
+
+/// The panes reporting activity on every connected host, grouped as the user chose.
+fn activity_list(s: &Workspace) -> (El, f32) {
+    let hosts: Vec<_> = s
+        .hosts
+        .iter()
+        .zip(&s.settings.hosts)
+        .map(|(h, config)| (h.id, config.label.as_str(), &h.model))
+        .collect();
+    let groups = activity_groups(
+        &hosts,
+        &s.unseen_done,
+        s.settings.activity_grouping,
+        s.settings.activity_show_idle,
+    );
+    let mut list = col().key("sidebar-content").px(8.);
+    if groups.is_empty() {
+        let empty = row().key("activity-empty").px(10.).py(6.).child(
+            text("No programs are reporting activity.")
+                .font(ui(12.))
+                .color(rgb(muted()))
+                .wrap()
+                .grow(1.)
+                .min_w(0.),
+        );
+        return (list.child(empty), NOTE_ROW);
+    }
+    let mut height = 0.;
+    for (n, group) in groups.iter().enumerate() {
+        let (e, h) = activity_group(s, n, group);
+        list = list.child(e);
+        height += h;
+    }
+    (list, height)
+}
+
+/// The Activity list's bottom bar: grouping and whether idle agents are listed.
+fn activity_bar(s: &Workspace) -> El {
+    let grouping = s.settings.activity_grouping;
+    let idle = s.settings.activity_show_idle;
+    let set = |g: ActivityGrouping| {
+        move |s: &mut Workspace| {
+            s.settings.activity_grouping = g;
+            s.save();
+        }
+    };
+    let mut toggle = row()
+        .key("activity-idle")
+        .role("button")
+        .label(if idle {
+            "Hide idle agents"
+        } else {
+            "Show idle agents"
+        })
+        .help(if idle {
+            "Hide idle agents"
+        } else {
+            "Show idle agents"
+        })
+        .h(SEGMENT)
+        .px(10.)
+        .center()
+        .radius(8.)
+        .continuous_corners()
+        .cursor(Cursor::Pointer)
+        .preserve_focus_on_press(true)
+        .tab_index(-1)
+        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+            s.settings.activity_show_idle = !s.settings.activity_show_idle;
+            s.save();
+            tx.blur();
+        })
+        .child(
+            text("Idle")
+                .font(if idle { medium(12.) } else { ui(12.) })
+                .color(rgb(if idle { ink() } else { muted() })),
+        );
+    toggle = if idle {
+        toggle
+            .fill(white(0.11))
+            .border_gradient(1., white(0.15), white(0.04))
+    } else {
+        toggle.hover(white(0.05))
+    };
+    row()
+        .h(40.)
+        .px(8.)
+        .center_y()
+        .justify_between()
+        .child(
+            row()
+                .role("tablist")
+                .gap(2.)
+                .center_y()
+                .child(segment(
+                    "activity-grouping:priority",
+                    "Priority",
+                    grouping == ActivityGrouping::Priority,
+                    set(ActivityGrouping::Priority),
+                ))
+                .child(segment(
+                    "activity-grouping:session",
+                    "Session",
+                    grouping == ActivityGrouping::Session,
+                    set(ActivityGrouping::Session),
+                )),
+        )
+        .child(toggle)
+}
+
+/// Hosts and their sessions (and with Sidebar tab position, their tabs).
+fn session_list(s: &Workspace) -> (El, f32) {
     let mut list = col().key("sidebar-content").px(8.);
     let mut height = 0.;
     for (index, host) in s.hosts.iter().enumerate() {
@@ -381,6 +676,16 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         list = list.child(group.pb(GROUP_GAP));
         height += GROUP_GAP;
     }
+    (list, height)
+}
+
+pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
+    let activity = s.settings.sidebar_mode == SidebarMode::Activity;
+    let (list, height) = if activity {
+        activity_list(s)
+    } else {
+        session_list(s)
+    };
     let viewport = cx.layout_size("sidebar-list").map_or(0., |[_, h]| h);
     let overflow = viewport > 0. && height > viewport + 1.;
     let width = s.sidebar.width();
@@ -395,13 +700,15 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .scroll_edge_fade(12.)
         .child(list);
     if overflow {
-        scroller = scroller.on_scroll_offset(fx.watch(width, viewport, |offset, max| {
-            if offset < max - 1. {
-                "More sessions and hosts below".into()
-            } else {
-                "Earlier sessions and hosts above".into()
-            }
-        }));
+        scroller =
+            scroller.on_scroll_offset(fx.watch(width, viewport, move |offset, max| {
+                match (activity, offset < max - 1.) {
+                    (false, true) => "More sessions and hosts below".into(),
+                    (false, false) => "Earlier sessions and hosts above".into(),
+                    (true, true) => "More activity below".into(),
+                    (true, false) => "Earlier activity above".into(),
+                }
+            }));
     }
     let total: usize = s.hosts.iter().map(|h| h.model.sessions.len()).sum();
     let mut area = col().grow(1.).min_h(0.).child(scroller);
@@ -447,29 +754,31 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .child(
             row()
                 .h(30.)
-                .pl(14.)
+                .pl(8.)
                 .pr(6.)
                 .center_y()
-                .child(
-                    text("Sessions")
-                        .font(strong(13.))
-                        .color(rgb(ink()))
-                        .grow(1.),
-                )
-                .child(chrome_button(
-                    "new-session",
-                    &PLUS,
-                    "New session… · choose a host",
-                    28.,
-                    |s, tx| s.perform(Intent::ChooseHost(String::new()), tx),
-                )),
+                .justify_between()
+                .child(mode_switch(s))
+                .child(if activity {
+                    el()
+                } else {
+                    chrome_button(
+                        "new-session",
+                        &PLUS,
+                        "New session… · choose a host",
+                        28.,
+                        |s, tx| s.perform(Intent::ChooseHost(String::new()), tx),
+                    )
+                }),
         )
         .child(find)
         .child(area);
     if overflow {
         panel = panel.child(fx.hint_el());
     }
-    panel = panel.child(
+    panel = panel.child(if activity {
+        activity_bar(s)
+    } else {
         row()
             .h(40.)
             .px(8.)
@@ -497,8 +806,8 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                     .font(ui(11.))
                     .color(rgb(muted()))
                     .pr(6.),
-            ),
-    );
+            )
+    });
     col()
         .key("sidebar")
         .w(width)
