@@ -45,6 +45,15 @@ pub enum FocusCentering {
     Always,
 }
 
+/// How the Activity view groups its rows: by urgency, or by session.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityGrouping {
+    #[default]
+    Priority,
+    Session,
+}
+
 /// Client-local column widths, keyed by host endpoint, session, window and column.
 pub type ColumnWidths = HashMap<String, HashMap<String, HashMap<String, HashMap<String, f64>>>>;
 
@@ -174,6 +183,9 @@ pub struct Settings {
     /// The layout of tabs without their own choice.
     pub tab_layout: TabLayout,
     pub focus_centering: FocusCentering,
+    pub activity_grouping: ActivityGrouping,
+    /// The Activity view lists agents that have records but are all idle.
+    pub activity_show_idle: bool,
     /// Tabs given their own layout, by host endpoint, session ID and Rex window ID.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub tab_layouts: HashMap<String, HashMap<String, HashMap<String, TabLayout>>>,
@@ -211,6 +223,8 @@ impl Default for Settings {
             terminal_theme_declared: false,
             tab_layout: TabLayout::default(),
             focus_centering: FocusCentering::default(),
+            activity_grouping: ActivityGrouping::default(),
+            activity_show_idle: false,
             tab_layouts: HashMap::new(),
             column_widths: HashMap::new(),
         }
@@ -439,6 +453,19 @@ mod tests {
         assert_eq!(widths["narrow"], crate::layout::MIN_COLUMN_WIDTH);
         assert_eq!(widths["wide"], crate::layout::MAX_COLUMN_WIDTH);
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn activity_view_settings_default_and_round_trip() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.activity_grouping, ActivityGrouping::Priority);
+        assert!(!old.activity_show_idle);
+        let saved: Settings = serde_json::from_value(
+            serde_json::json!({ "activity_grouping": "session", "activity_show_idle": true }),
+        )
+        .unwrap();
+        assert_eq!(saved.activity_grouping, ActivityGrouping::Session);
+        assert!(saved.activity_show_idle);
     }
 
     #[test]
