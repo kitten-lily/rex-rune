@@ -1,10 +1,35 @@
 //! What programs in a terminal report about themselves: OSC 7501 status records, OSC 9;4
 //! progress, the bell, the foreground process, the terminal title, and OSC 9 / OSC 777 desktop
 //! notifications. All of it arrives as the terminal creator's `block_event`s, or from its
-//! `program_status`, `process` and `title` methods.
+//! `program_status`, `process`, `title` and `pwd` methods.
 use serde_json::Value;
 
 pub const TERMINAL: &str = "com.superlogical.terminal";
+
+/// What the client reads back from a terminal, outside its live events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Probe {
+    Status,
+    Title,
+    Process,
+    Pwd,
+}
+
+impl Probe {
+    /// The order a terminal's probes run in.
+    pub const ALL: [Self; 4] = [Self::Status, Self::Title, Self::Process, Self::Pwd];
+
+    /// The terminal method that answers this probe.
+    pub fn method(self) -> String {
+        let name = match self {
+            Self::Status => "program_status",
+            Self::Title => "title",
+            Self::Process => "process",
+            Self::Pwd => "pwd",
+        };
+        format!("{TERMINAL}.{name}")
+    }
+}
 
 /// A record's state, in priority order: a tab shows the highest state among its records.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
