@@ -1,8 +1,8 @@
 //! What each known terminal last reported before this client was listening: its program
 //! status, title, foreground process and working directory. Every session whose view is known
 //! is read, the selected one first, one request in flight at a time and each (block, probe)
-//! once per connection, alongside control traffic rather than in its way. Live events keep the
-//! answers current afterwards.
+//! once per connection (again only when a live event outdated its answer), alongside control
+//! traffic rather than in its way. Live events keep the answers current afterwards.
 use crate::{
     connection::{
         HostModel,
@@ -26,7 +26,7 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 #[derive(Default)]
 pub struct Probes {
     /// Every (block, probe) asked on this connection, answered or not: a failed read isn't
-    /// retried until the next connection.
+    /// retried until the next connection, only an outdated one.
     started: HashSet<(String, Probe)>,
     in_flight: Option<InFlight>,
 }
@@ -50,6 +50,16 @@ pub struct Finished {
     pub stamp: u64,
     /// The response's payload; none on an error or a timeout.
     pub reply: Option<Value>,
+}
+
+/// What became of a finished probe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Applied,
+    /// Outdated by a live event; it will be asked again.
+    Stale,
+    /// Failed, or its session or block is gone; it won't be asked again on this connection.
+    Dropped,
 }
 
 #[derive(Deserialize)]
@@ -151,21 +161,25 @@ impl Probes {
         }
     }
 
-    /// Apply a finished probe to the model; whether it changed anything. It is dropped when it
-    /// failed, its session or block is gone, or a live event of its kind arrived after it was
-    /// sent, which is newer than the answer.
-    pub fn apply(model: &mut HostModel, done: &Finished) -> bool {
+    /// Apply a finished probe to the model. It is dropped for good when it failed or its
+    /// session or block is gone. When a live event of its kind arrived after it was sent, the
+    /// event is newer than the answer, so the answer is dropped and asked again: one record's
+    /// event doesn't stand in for a snapshot of all of them.
+    pub fn apply(&mut self, model: &mut HostModel, done: &Finished) -> Outcome {
         let Some(reply) = &done.reply else {
-            return false;
+            return Outcome::Dropped;
         };
-        let current = model.stamp(&done.block, done.probe) == done.stamp
-            && model.sessions.iter().any(|s| s.session_id == done.session)
+        let present = model.sessions.iter().any(|s| s.session_id == done.session)
             && model
                 .views
                 .get(&done.session)
                 .is_some_and(|view| view_blocks(view).any(|b| b == done.block));
-        if !current {
-            return false;
+        if !present {
+            return Outcome::Dropped;
+        }
+        if model.stamp(&done.block, done.probe) != done.stamp {
+            self.started.remove(&(done.block.clone(), done.probe));
+            return Outcome::Stale;
         }
         let block = done.block.clone();
         let event = match done.probe {
@@ -176,14 +190,14 @@ impl Probes {
                 } else {
                     model.activity.insert(block, records.into_iter().collect());
                 }
-                return true;
+                return Outcome::Applied;
             }
             Probe::Title => activity::parse_title(reply),
             Probe::Process => activity::parse_process(reply),
             Probe::Pwd => activity::parse_pwd(reply),
         };
         model.record_block_event(&done.session, block, event);
-        true
+        Outcome::Applied
     }
 }
 
@@ -304,38 +318,48 @@ mod tests {
     #[test]
     fn a_reply_applies_without_counting_as_a_live_event() {
         let mut model = model("s1", &[("s1", &["b1"])]);
-        assert!(Probes::apply(&mut model, &status(0, "blocked")));
+        assert_eq!(
+            Probes::default().apply(&mut model, &status(0, "blocked")),
+            Outcome::Applied
+        );
         assert_eq!(model.activity["b1"][""].state, ProgramState::Blocked);
         let title = Finished {
             probe: Probe::Title,
             reply: Some(json!({"title":"build"})),
             ..status(0, "")
         };
-        assert!(Probes::apply(&mut model, &title));
+        assert_eq!(
+            Probes::default().apply(&mut model, &title),
+            Outcome::Applied
+        );
         assert_eq!(model.title("b1"), Some("build"));
         let pwd = Finished {
             probe: Probe::Pwd,
             reply: Some(json!({"pwd":"file://h/srv"})),
             ..status(0, "")
         };
-        assert!(Probes::apply(&mut model, &pwd));
+        assert_eq!(Probes::default().apply(&mut model, &pwd), Outcome::Applied);
         assert_eq!(model.cwds["b1"], "/srv");
         for probe in Probe::ALL {
             assert_eq!(model.stamp("b1", probe), 0, "{probe:?}");
         }
-        assert!(Probes::apply(
-            &mut model,
-            &Finished {
-                reply: Some(json!({"records":[]})),
-                ..status(0, "")
-            }
-        ));
+        let empty = Finished {
+            reply: Some(json!({"records":[]})),
+            ..status(0, "")
+        };
+        assert_eq!(
+            Probes::default().apply(&mut model, &empty),
+            Outcome::Applied
+        );
         assert!(!model.activity.contains_key("b1"), "no records, no entry");
         let failed = Finished {
             reply: None,
             ..status(0, "")
         };
-        assert!(!Probes::apply(&mut model, &failed));
+        assert_eq!(
+            Probes::default().apply(&mut model, &failed),
+            Outcome::Dropped
+        );
     }
 
     #[test]
@@ -357,8 +381,49 @@ mod tests {
             },
         );
         assert_eq!(model.stamp("b1", Probe::Status), 1);
-        assert!(!Probes::apply(&mut model, &status(stamp, "blocked")));
+        assert_eq!(
+            Probes::default().apply(&mut model, &status(stamp, "blocked")),
+            Outcome::Stale
+        );
         assert_eq!(model.activity["b1"][""], record);
+    }
+
+    #[test]
+    fn a_snapshot_outdated_by_one_record_is_asked_again() {
+        let mut model = model("s1", &[("s1", &["b1"])]);
+        let mut probes = Probes::default();
+        let none = HashSet::new();
+        assert_eq!(
+            take(&mut probes, &model, &none),
+            ("b1".into(), Probe::Status)
+        );
+        let stamp = model.stamp("b1", Probe::Status);
+        model.apply_block_event(
+            "s1",
+            "b1".into(),
+            BlockEvent::StatusChanged {
+                id: "build".into(),
+                record: StatusRecord {
+                    state: ProgramState::Working,
+                    live: true,
+                    ..Default::default()
+                },
+            },
+        );
+        let both = |stamp| Finished {
+            reply: Some(json!({"records":[{"id":"","state":"blocked"},
+                {"id":"build","state":"working"}]})),
+            ..status(stamp, "")
+        };
+        assert_eq!(probes.apply(&mut model, &both(stamp)), Outcome::Stale);
+        assert!(!model.activity["b1"].contains_key(""), "not applied yet");
+        let again = probes.next(&model, &none);
+        assert_eq!(again, Some(("s1".into(), "b1".into(), Probe::Status)));
+        take(&mut probes, &model, &none);
+        let stamp = model.stamp("b1", Probe::Status);
+        assert_eq!(probes.apply(&mut model, &both(stamp)), Outcome::Applied);
+        assert_eq!(model.activity["b1"][""].state, ProgramState::Blocked);
+        assert_eq!(model.activity["b1"]["build"].state, ProgramState::Working);
     }
 
     #[test]
@@ -372,7 +437,10 @@ mod tests {
                 ids: vec![String::new()],
             },
         );
-        assert!(!Probes::apply(&mut model, &status(stamp, "blocked")));
+        assert_eq!(
+            Probes::default().apply(&mut model, &status(stamp, "blocked")),
+            Outcome::Stale
+        );
         assert!(!model.activity.contains_key("b1"));
     }
 
@@ -380,12 +448,16 @@ mod tests {
     fn a_snapshot_for_a_closed_block_is_dropped() {
         let mut model = model("s1", &[("s1", &["b1"])]);
         model.views.insert("s1".into(), view(&[]));
-        assert!(!Probes::apply(&mut model, &status(0, "blocked")));
+        assert_eq!(
+            Probes::default().apply(&mut model, &status(0, "blocked")),
+            Outcome::Dropped
+        );
         assert!(!model.activity.contains_key("b1"));
         model.views.insert("s1".into(), view(&["b1"]));
         model.sessions.clear();
-        assert!(
-            !Probes::apply(&mut model, &status(0, "blocked")),
+        assert_eq!(
+            Probes::default().apply(&mut model, &status(0, "blocked")),
+            Outcome::Dropped,
             "the session is gone"
         );
         assert!(!model.activity.contains_key("b1"));

@@ -963,10 +963,13 @@ fn a_failed_column_move_discards_its_width_migration() {
     let (mut ws, rx) = tabbed_workspace("strip");
     ws.toggle_tab_layout("strip".into());
     ws.consume_pane(-1);
-    let reply = match rx.recv().unwrap() {
-        HostCommand::RequestTracked { reply, .. } => reply,
-        _ => panic!("expected tracked column move"),
-    };
+    let reply = rx
+        .try_iter()
+        .find_map(|c| match c {
+            HostCommand::RequestTracked { reply, .. } => Some(reply),
+            _ => None,
+        })
+        .expect("a tracked column move");
     let path = ws.settings_path.clone();
     let mut rt = runtime(ws);
     reply.send(Err("rejected".into())).unwrap();
@@ -3333,22 +3336,42 @@ fn a_sidebar_tab_selects_its_session_and_focuses_its_window() {
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
+/// The sessions a host was last asked to prefetch, sorted.
+fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
+    rx.try_iter()
+        .filter_map(|c| match c {
+            HostCommand::PrefetchViews(ids) => {
+                let mut ids: Vec<_> = ids.into_iter().collect();
+                ids.sort();
+                Some(ids)
+            }
+            _ => None,
+        })
+        .last()
+}
+
+#[test]
+fn tab_activity_prefetches_every_connected_session() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.hosts[0].model.sessions.push(session("other"));
+    assert!(ws.settings.notifications.show_in_tabs && !ws.sidebar_tabs());
+    ws.sync_prefetch();
+    assert_eq!(
+        latest(&rx),
+        Some(vec!["other".to_owned(), "s".to_owned()]),
+        "session rows and the switcher show every session's activity"
+    );
+    ws.settings.notifications.show_in_tabs = false;
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx), Some(vec![]), "nothing shows it");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
 #[test]
 fn views_are_prefetched_only_for_tabs_the_sidebar_lists() {
-    fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
-        rx.try_iter()
-            .filter_map(|c| match c {
-                HostCommand::PrefetchViews(ids) => {
-                    let mut ids: Vec<_> = ids.into_iter().collect();
-                    ids.sort();
-                    Some(ids)
-                }
-                _ => None,
-            })
-            .last()
-    }
     let all = Some(vec!["other".to_owned(), "s".to_owned()]);
     let (mut ws, rx) = tabbed_workspace("single");
+    ws.settings.notifications.show_in_tabs = false;
     ws.hosts[0].model.sessions.push(session("other"));
     ws.toggle_sidebar();
     let mut rt = runtime(ws);
@@ -3933,19 +3956,8 @@ fn activity_mode_returns_the_toolbar_tabs() {
 
 #[test]
 fn activity_mode_prefetches_every_session() {
-    fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
-        rx.try_iter()
-            .filter_map(|c| match c {
-                HostCommand::PrefetchViews(ids) => {
-                    let mut ids: Vec<_> = ids.into_iter().collect();
-                    ids.sort();
-                    Some(ids)
-                }
-                _ => None,
-            })
-            .last()
-    }
     let (mut ws, rx) = tabbed_workspace("single");
+    ws.settings.notifications.show_in_tabs = false;
     ws.hosts[0].model.sessions.push(session("other"));
     ws.settings.hosts[0].collapsed = true;
     ws.show_activity();

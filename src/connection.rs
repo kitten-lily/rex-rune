@@ -1251,7 +1251,7 @@ async fn run_host(
                     }
                     done = probes.finished(), if probes.in_flight() => {
                         shared.update(|m| {
-                            probes::Probes::apply(m, &done);
+                            probes.apply(m, &done);
                         });
                     }
                     _ = prefetch::wait(&mut pace, due.unwrap_or_else(Instant::now)), if due.is_some() => {

@@ -1480,19 +1480,17 @@ impl Workspace {
         self.sync_prefetch();
     }
 
-    /// Ask each host for the views of the sessions the sidebar reads: in Activity mode every
-    /// connected host's, since panes report from any session; otherwise those of expanded
-    /// hosts, while the sidebar is open with Sidebar tab position.
+    /// Ask each host for the views of the sessions the client reads activity from: every
+    /// connected host's while tabs show activity (session rows and the switcher name each
+    /// session's) or the sidebar is in Activity mode, since panes report from any session; and
+    /// those of expanded hosts while the sidebar is open with Sidebar tab position.
     pub fn sync_prefetch(&mut self) {
         let listing = self.sidebar_tabs();
-        let activity =
-            self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity;
+        let every = self.settings.notifications.show_in_tabs
+            || (self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity);
         for index in 0..self.hosts.len() {
-            let eligible = if activity {
-                self.hosts[index].model.connected
-            } else {
-                listing && !self.settings.hosts[index].collapsed
-            };
+            let eligible = (every && self.hosts[index].model.connected)
+                || (listing && !self.settings.hosts[index].collapsed);
             let wanted: HashSet<String> = if eligible {
                 let sessions = &self.hosts[index].model.sessions;
                 sessions.iter().map(|s| s.session_id.clone()).collect()
@@ -1736,8 +1734,6 @@ impl Workspace {
         self.update_title(tx);
     }
 
-    /// Tabs are listed in the sidebar instead of the toolbar: Sidebar tab position, and
-    /// only while the sidebar is open.
     /// The sidebar lists tabs, so the toolbar doesn't: Sidebar tab position, open, and
     /// showing sessions.
     pub fn sidebar_tabs(&self) -> bool {

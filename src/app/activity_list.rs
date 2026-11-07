@@ -42,6 +42,15 @@ pub struct ActivityRow {
     pub tasks: Vec<TaskLine>,
 }
 
+impl ActivityRow {
+    /// The program the row's icon shows: the one reporting, else the foreground process.
+    /// Never `program`, which beside a user's label may be the terminal title.
+    pub fn icon_program(&self) -> Option<&str> {
+        let a = &self.activity;
+        a.source.as_deref().or(a.program.as_deref())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivityGroup {
     pub title: String,
@@ -260,8 +269,11 @@ fn join<'a>(parts: impl IntoIterator<Item = Option<&'a str>>) -> String {
 }
 
 /// A session's activity across all its tabs, and how many panes need the user (Blocked or
-/// Error). None until its view is known.
+/// Error). None until its view is known, and while its host is offline, whose reports are stale.
 pub fn session_activity(model: &HostModel, session: &str) -> Option<(TabActivity, usize)> {
+    if !model.connected {
+        return None;
+    }
     let view = model.views.get(session)?;
     let needing = view
         .windows
@@ -576,6 +588,33 @@ mod tests {
     }
 
     #[test]
+    fn a_labelled_pane_without_an_app_takes_its_icon_from_its_process() {
+        let mut m = host("dev", vec![tab("t", &["named"])]);
+        m.views.get_mut("dev").unwrap().windows[0].layers[0].blocks[0].label = Some("api".into());
+        report(&mut m, "named", ProgramState::Working);
+        m.titles
+            .insert("named".into(), ("Claude Code".into(), None));
+        m.programs.insert("named".into(), "claude".into());
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        let row = &g[0].rows[0];
+        assert_eq!(row.program.as_deref(), Some("Claude Code"), "the text");
+        assert_eq!(row.icon_program(), Some("claude"));
+    }
+
+    #[test]
+    fn panes_in_same_named_directories_are_told_apart() {
+        let mut m = host("dev", vec![tab("t1", &["a"]), tab("t2", &["b"])]);
+        for (block, cwd) in [("a", "/a/app"), ("b", "/b/app")] {
+            report(&mut m, block, ProgramState::Working);
+            m.cwds.insert(block.into(), cwd.into());
+        }
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        let details: Vec<_> = g[0].rows.iter().map(|r| r.detail.as_str()).collect();
+        assert!(details[0].ends_with(" · a/app"), "{details:?}");
+        assert!(details[1].ends_with(" · b/app"), "{details:?}");
+    }
+
+    #[test]
     fn floating_panes_have_rows_and_disconnected_hosts_none() {
         let win = window(
             "t",
@@ -609,6 +648,11 @@ mod tests {
         let (a, n) = session_activity(&m, "dev").unwrap();
         assert_eq!((a.state, n), (ProgramState::Blocked, 3));
         assert!(session_activity(&m, "other").is_none());
+        m.connected = false;
+        assert!(
+            session_activity(&m, "dev").is_none(),
+            "an offline host's reports are stale"
+        );
     }
 
     #[test]

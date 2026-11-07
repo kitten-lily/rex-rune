@@ -441,7 +441,6 @@ fn task_line(index: usize, block: &str, task: &TaskLine) -> El {
 }
 
 fn activity_row(index: usize, row_: &ActivityRow) -> El {
-    let program = row_.program.as_deref().or(row_.activity.program.as_deref());
     let (word, tone) = activity_word(&row_.activity);
     let target = row_.target.clone();
     let mut line = row()
@@ -488,7 +487,7 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
             s.open_pane(&target, tx);
             tx.blur();
         })
-        .child(glyph(program_icon(program), 15., rgb(muted())))
+        .child(glyph(program_icon(row_.icon_program()), 15., rgb(muted())))
         .child(body)
 }
 
