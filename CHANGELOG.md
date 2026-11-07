@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Shift stays visible to terminal programs on keys where the keyboard layout didn't use it, so Shift+Space, Shift+Tab and Shift+Enter reach programs using the Kitty keyboard protocol (such as Claude Code) as distinct keys. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
+- Shift+Space, Shift+Tab and Shift+Enter now reach terminal programs that use the Kitty keyboard protocol, such as Claude Code, as distinct keys instead of plain Space, Tab and Enter. Shift is reported unless the keyboard layout used it to type the character. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
 
 ## 0.3.2 — 2026-11-06
 
