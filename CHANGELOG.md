@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Settings > Terminal now says when a saved font family waits for the client to be reopened, and when the saved family isn't installed. Saving a font change shows a notice to reopen the client. Applying fonts without a restart is tracked in [#6](https://github.com/kitten-lily/rex-rune/issues/6).
 - Shift+Space, Shift+Tab and Shift+Enter now reach terminal programs that use the Kitty keyboard protocol, such as Claude Code, as distinct keys instead of plain Space, Tab and Enter. Shift is reported unless the keyboard layout used it to type the character. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
 
 ## 0.3.2 — 2026-11-06
