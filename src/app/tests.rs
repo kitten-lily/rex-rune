@@ -526,6 +526,34 @@ fn a_single_pane_is_full_bleed_and_a_split_keeps_its_cards() {
 }
 
 #[test]
+fn an_unrenamed_split_pane_header_shows_its_programs_title() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let model = &mut ws.hosts[0].model;
+    let window = &mut model.views.get_mut("s").unwrap().windows[1];
+    for (block, label) in window.layers[0].blocks.iter_mut().zip(["shell", "build"]) {
+        block.label = Some(label.into());
+        block.creator_name = Some("com.superlogical.terminal".into());
+        block.flavor = Some("com.superlogical.terminal.shell".into());
+    }
+    for block in ["block:b", "block:c"] {
+        model
+            .titles
+            .insert(block.into(), ("Claude Code".into(), None));
+    }
+    let rt = runtime(ws);
+    let texts: Vec<_> = rt.elements().into_iter().filter_map(|e| e.text).collect();
+    let count = |t: &str| texts.iter().filter(|x| *x == t).count();
+    assert_eq!(
+        count("Claude Code"),
+        1,
+        "only the unrenamed pane: {texts:?}"
+    );
+    assert_eq!(count("build"), 1, "the renamed pane keeps its name");
+    assert_eq!(count("shell"), 0);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn split_pane_headers_show_their_own_status_word() {
     use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
     let (mut ws, _rx) = tabbed_workspace("split");
