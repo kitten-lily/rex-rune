@@ -3699,3 +3699,102 @@ fn files_dropped_on_a_pane_upload_there_and_focus_it() {
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
+
+/// Hosts 0 and 1 connected; host 1 has an unselected session "b" whose window "w" lists
+/// the given blocks. Returns the workspace and each host's command receiver.
+fn two_host_panes(
+    blocks: &[&str],
+) -> (
+    Workspace,
+    flume::Receiver<HostCommand>,
+    flume::Receiver<HostCommand>,
+) {
+    let mut ws = workspace_hosts(2);
+    let rx0 = capture_host(&mut ws, 0);
+    let rx1 = capture_host(&mut ws, 1);
+    let model = &mut ws.hosts[1].model;
+    model.connected = true;
+    model.sessions = vec![session("b")];
+    model.views.insert(
+        "b".into(),
+        serde_json::from_value(serde_json::json!({
+            "revision": 1,
+            "session_id": "b",
+            "active_window_id": "w",
+            "windows": [{"window_id": "w", "label": "w",
+                "layers": [{"kind": "tiled", "layout": {"block_id": blocks[0]},
+                    "blocks": blocks.iter().map(|b| serde_json::json!({"block_id": b}))
+                        .collect::<Vec<_>>()}]}]
+        }))
+        .expect("a view"),
+    );
+    (ws, rx0, rx1)
+}
+
+fn pane_ref(ws: &Workspace, host: usize, block: &str) -> super::activity_list::PaneRef {
+    super::activity_list::PaneRef {
+        host: ws.hosts[host].id,
+        session: "b".into(),
+        window: "w".into(),
+        block: block.into(),
+    }
+}
+
+#[test]
+fn activity_rows_focus_their_exact_pane_on_another_session() {
+    let (mut ws, rx0, rx1) = two_host_panes(&["block:y", "block:z"]);
+    let target = pane_ref(&ws, 1, "block:z");
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert_eq!(ws.active, 1);
+    assert!(
+        rx0.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    let sent: Vec<_> = rx1
+        .try_iter()
+        .filter_map(|c| match c {
+            HostCommand::Select(id) => Some(format!("select {id}")),
+            HostCommand::Request { method, payload } => Some(format!("{method} {payload}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "select b".to_owned(),
+            r#"session.focus_block {"block_id":"block:z","session_id":"b"}"#.to_owned()
+        ]
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_closed_pane_is_never_replaced_by_its_neighbour() {
+    // block:z closed and block:y took its place in the same window.
+    let (mut ws, _rx0, rx1) = two_host_panes(&["block:y"]);
+    let target = pane_ref(&ws, 1, "block:z");
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert!(
+        rx1.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    assert!(ws.notices.iter().any(|n| n.text.contains("closed")));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_removed_host_is_not_targeted() {
+    let (mut ws, rx0, rx1) = two_host_panes(&["block:z"]);
+    let mut target = pane_ref(&ws, 1, "block:z");
+    target.host = super::workspace::HostId(u64::MAX);
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert!(
+        rx0.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    assert!(
+        rx1.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}

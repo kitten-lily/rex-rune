@@ -2,6 +2,7 @@
 //! window, the program its pill shows, the word trouble carries, and which changes become
 //! desktop notifications.
 use super::{
+    activity_list::PaneRef,
     notify::{Note, NoteTarget, Notifier},
     theme::*,
     workspace::{HostId, Workspace},
@@ -433,11 +434,7 @@ impl Workspace {
         let Some(index) = self.host_index(target.host) else {
             return;
         };
-        if self.hosts[index].model.selected.as_deref() != Some(&target.session) {
-            self.select(index, target.session.clone(), tx);
-        } else if index != self.active {
-            self.activate_host(index, tx);
-        }
+        self.show_session(index, &target.session, tx);
         if let Some(window) = target.window {
             self.send(
                 index,
@@ -447,6 +444,50 @@ impl Workspace {
                 },
             );
         }
+    }
+
+    /// Bring `session` on host `index` to the front: select it, or just raise its host.
+    fn show_session(&mut self, index: usize, session: &str, tx: &mut Tx) {
+        if self.hosts[index].model.selected.as_deref() != Some(session) {
+            self.select(index, session.to_owned(), tx);
+        } else if index != self.active {
+            self.activate_host(index, tx);
+        }
+    }
+
+    /// An Activity row was pressed: show its session and focus the exact pane. The window is
+    /// found again from the block id, so a pane that has closed is never swapped for
+    /// whatever now sits at its old position.
+    // Until the Activity sidebar calls it (Task 5).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn open_pane(&mut self, target: &PaneRef, tx: &mut Tx) {
+        let live = self.host_index(target.host).filter(|&index| {
+            let model = &self.hosts[index].model;
+            model
+                .sessions
+                .iter()
+                .any(|s| s.session_id == target.session)
+                && model.views.get(&target.session).is_some_and(|view| {
+                    view.windows
+                        .iter()
+                        .any(|w| blocks(w).any(|b| b == target.block))
+                })
+        });
+        let Some(index) = live else {
+            self.inform("That pane has closed.");
+            return;
+        };
+        self.show_session(index, &target.session, tx);
+        self.send(
+            index,
+            rex_linux::connection::HostCommand::Request {
+                method: "session.focus_block".into(),
+                payload: serde_json::json!({
+                    "session_id": target.session,
+                    "block_id": target.block,
+                }),
+            },
+        );
     }
 
     /// Latch the bells programs rang, as (session, block), on tabs the user can't see.
