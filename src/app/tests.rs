@@ -3979,3 +3979,81 @@ fn commands_offer_activity() {
     assert!(ws.sidebar.is_open(), "never toggles it closed");
     std::fs::remove_file(&ws.settings_path).ok();
 }
+
+/// Give session `id` on host 0 a view with `blocked` Blocked terminal panes, in one tab.
+fn blocked_session(ws: &mut Workspace, id: &str, blocked: usize) {
+    use rex_linux::connection::activity::ProgramState::Blocked;
+    let blocks: Vec<_> = (0..blocked)
+        .map(|n| serde_json::json!({"block_id": format!("{id}:{n}")}))
+        .collect();
+    ws.hosts[0].model.sessions.push(session(id));
+    ws.hosts[0].model.views.insert(
+        id.into(),
+        serde_json::from_value(serde_json::json!({
+            "revision": 1, "session_id": id, "active_window_id": format!("{id}:w"),
+            "windows": [{"window_id": format!("{id}:w"), "label": "t",
+                "focused_block_id": blocks[0]["block_id"],
+                "layers": [{"kind": "tiled", "layout": {"block_id": blocks[0]["block_id"]},
+                    "blocks": blocks}]}]
+        }))
+        .expect("a view"),
+    );
+    terminal_blocks(ws);
+    for n in 0..blocked {
+        set_activity(ws, &format!("{id}:{n}"), &[("", record(Blocked, true))]);
+    }
+}
+
+#[test]
+fn sessions_show_their_activity_in_the_sidebar() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 2);
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(has(&rt, "session-word:0:other"));
+    assert!(has(&rt, "session-count:0:other"));
+    let count = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("session-count:0:other"))
+        .and_then(|e| e.text);
+    assert_eq!(count.as_deref(), Some("2"));
+    assert!(!has(&rt, "session-word:0:s"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_switcher_names_session_activity() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 2);
+    blocked_session(&mut ws, "one", 1);
+    ws.picker(true);
+    let detail = |ws: &Workspace, label: &str| {
+        ws.entries()
+            .into_iter()
+            .find(|e| e.label == label)
+            .map(|e| e.detail)
+    };
+    assert_eq!(
+        detail(&ws, "other-label").as_deref(),
+        Some("Needs input · 2")
+    );
+    assert_eq!(detail(&ws, "one-label").as_deref(), Some("Needs input"));
+    assert_eq!(detail(&ws, "s-label").as_deref(), Some(""));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn unseen_done_reaches_the_session_row() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    assert!(ws.session_word(0, "s").is_none());
+    let id = ws.hosts[0].id;
+    ws.unseen_done.insert((id, "split".into()));
+    let (word, _, needing) = ws.session_word(0, "s").expect("a word");
+    assert_eq!((word.as_ref(), needing), ("Done", 0));
+    ws.settings.notifications.show_in_tabs = false;
+    assert!(ws.session_word(0, "s").is_none());
+    std::fs::remove_file(&ws.settings_path).ok();
+}

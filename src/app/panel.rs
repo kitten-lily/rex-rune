@@ -717,10 +717,19 @@ impl Workspace {
                     format!("{label} · Offline")
                 };
                 for session in &host.model.sessions {
-                    let detail = if sessions_only {
-                        String::new()
-                    } else {
-                        format!("{label} · Session")
+                    let word =
+                        self.session_word(index, &session.session_id)
+                            .map(|(word, _, needing)| {
+                                if needing >= 2 {
+                                    format!("{word} · {needing}")
+                                } else {
+                                    word.into_owned()
+                                }
+                            });
+                    let detail = match (sessions_only, word) {
+                        (true, word) => word.unwrap_or_default(),
+                        (false, Some(word)) => format!("{label} · {word}"),
+                        (false, None) => format!("{label} · Session"),
                     };
                     let mut e = Entry::new(
                         &session.label,

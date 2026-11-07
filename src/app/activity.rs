@@ -95,7 +95,6 @@ pub fn tab_activity(model: &HostModel, window: &session::Window) -> TabActivity 
 }
 
 /// A session's activity: the fold over every pane of every tab in its view.
-#[cfg_attr(not(test), allow(dead_code))] // Until session rows show it (Task 6)
 pub fn view_activity(model: &HostModel, view: &session::ViewResponse) -> TabActivity {
     let blocks = view.windows.iter().flat_map(blocks);
     let focused = view
@@ -508,6 +507,32 @@ impl Workspace {
     /// Whether `window` on the active host shows "Done" until seen.
     pub fn unseen(&self, window: &str) -> bool {
         self.unseen_on(self.active, window)
+    }
+
+    /// The word, tone and needing-you count a session shows, or None when it has nothing to
+    /// say or tab activity is hidden. Unseen Done and Bell count from any of its tabs.
+    pub fn session_word(
+        &self,
+        host: usize,
+        session: &str,
+    ) -> Option<(Cow<'static, str>, u32, usize)> {
+        if !self.settings.notifications.show_in_tabs {
+            return None;
+        }
+        let model = &self.hosts[host].model;
+        let (fold, needing) = super::activity_list::session_activity(model, session)?;
+        let windows = || {
+            model
+                .views
+                .get(session)
+                .into_iter()
+                .flat_map(|v| &v.windows)
+                .filter_map(|w| w.window_id.as_deref())
+        };
+        let done = windows().any(|w| self.unseen_on(host, w));
+        let bell = windows().any(|w| self.bell_on(host, w));
+        let (word, tone) = tab_word(&fold, done, bell)?;
+        Some((word, tone, needing))
     }
 
     pub fn unseen_on(&self, host: usize, window: &str) -> bool {

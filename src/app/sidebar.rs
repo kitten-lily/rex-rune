@@ -209,7 +209,22 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 .grow(1.)
                 .shrink(),
         );
-    if let Some(count) = count {
+    if let Some((word, tone, needing)) = s.session_word(index, id) {
+        e = e.child(
+            text(word)
+                .key(format!("session-word:{index}:{id}"))
+                .font(medium(10.5))
+                .color(rgb(tone)),
+        );
+        if needing >= 2 {
+            e = e.child(
+                text(needing.to_string())
+                    .key(format!("session-count:{index}:{id}"))
+                    .font(medium(10.5))
+                    .color(rgb(warning())),
+            );
+        }
+    } else if let Some(count) = count {
         e = e.child(
             text(count.to_string())
                 .font(medium(10.5))
