@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Shift stays visible to terminal programs on keys where the keyboard layout didn't use it, so Shift+Space, Shift+Tab and Shift+Enter reach programs using the Kitty keyboard protocol (such as Claude Code) as distinct keys. Press, repeat and release now carry the same modifiers. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
+- Shift stays visible to terminal programs on keys where the keyboard layout didn't use it, so Shift+Space, Shift+Tab and Shift+Enter reach programs using the Kitty keyboard protocol (such as Claude Code) as distinct keys. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
 
 ## 0.3.2 — 2026-11-06
 
