@@ -573,7 +573,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
             "layers":[{"kind":"tiled","layout":{"block_id":"block:a"},
                 "blocks":[{"block_id":"block:a","creator_name":activity::TERMINAL}]}]}]);
         reply(&mut ws, &request, 1, boot).await;
-        // Hidden hosts stream nothing, so both questions are asked.
+        // Hidden hosts stream nothing, so every probe is sent, one at a time.
         let status = recv(&mut ws).await;
         assert_eq!(status["method"], "com.superlogical.terminal.program_status");
         assert_eq!(status["payload"]["block_id"], "block:a");
@@ -602,6 +602,10 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
             json!({"foreground":{"name":"node","argv0":"codex"}}),
         )
         .await;
+        let pwd = recv(&mut ws).await;
+        assert_eq!(pwd["method"], "com.superlogical.terminal.pwd");
+        assert_eq!(pwd["payload"]["block_id"], "block:a");
+        reply(&mut ws, &pwd, 5, json!({"pwd":"file://h/srv/app"})).await;
         // attach_all replaces the scope, so after session_created it must still ask for all.
         send(&mut ws, json!({"type":"event","seq":5,"payload":{"type":"session_created","payload":{"session_id":OTHER}}})).await;
         let list = recv(&mut ws).await;
@@ -636,7 +640,10 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
         loop {
             {
                 let m = host.model.lock().unwrap();
-                if m.activity.contains_key("block:z") && m.programs.contains_key("block:a") {
+                if m.activity.contains_key("block:z")
+                    && m.programs.contains_key("block:a")
+                    && m.cwds.contains_key("block:a")
+                {
                     break;
                 }
             }
@@ -652,6 +659,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
         assert_eq!(m.title("block:a"), Some("Codex · fix tests"));
         assert_eq!(a.app.as_deref(), Some("codex"));
         assert_eq!(m.programs["block:a"], "codex");
+        assert_eq!(m.cwds["block:a"], "/srv/app");
         assert_eq!(m.sessions.len(), 2);
     }
     // Let the second report land before closing.
@@ -1082,6 +1090,150 @@ async fn a_failed_prefetch_is_retried_after_a_backoff() {
     connected(&host).await;
     prefetch(&host, &[OTHER, THIRD]);
     until(&host, |m| m.views.contains_key(OTHER)).await;
+    drop(host);
+    server.await.unwrap();
+}
+
+/// A view of `id` whose one tab holds the terminal `block`.
+fn terminal_view_of(id: &str, block: &str) -> Value {
+    json!({"session_id":id,"revision":1,"windows":[{"window_id":format!("{id}/tab"),
+        "layers":[{"kind":"tiled","layout":{"block_id":block},
+            "blocks":[{"block_id":block,"label":"shell","creator_name":activity::TERMINAL}]}]}]})
+}
+
+/// The next message, which must be a detached `probe` of `block`.
+async fn probed(
+    ws: &mut WebSocketStream<TcpStream>,
+    session: &str,
+    block: &str,
+    probe: &str,
+) -> Value {
+    let request = next(ws).await;
+    assert_eq!(request["method"], format!("{}.{probe}", activity::TERMINAL));
+    assert_eq!(
+        request["payload"],
+        json!({"session_id":session,"block_id":block,"args":{}})
+    );
+    assert!(request["id"].as_str().unwrap().starts_with("detached:"));
+    request
+}
+
+#[tokio::test]
+async fn unselected_sessions_are_probed_without_blocking_commands() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (sent, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 11).await;
+        let boot = recv(&mut ws).await;
+        reply(&mut ws, &boot, 1, boot_with(&[OTHER])).await;
+        let view = prefetched(&mut ws, OTHER).await;
+        reply(&mut ws, &view, 2, terminal_view_of(OTHER, "block:z")).await;
+        let status = probed(&mut ws, OTHER, "block:z", "program_status").await;
+        sent.send(()).unwrap();
+        // Unanswered, it holds back the next probe but not the request.
+        answer_request(&mut ws).await;
+        reply(
+            &mut ws,
+            &status,
+            4,
+            json!({"records":[{"state":"blocked","kind":"question","updated_at":"2026-11-07T00:00:00Z"}]}),
+        )
+        .await;
+        for probe in ["title", "process", "pwd"] {
+            let request = probed(&mut ws, OTHER, "block:z", probe).await;
+            reply(&mut ws, &request, 5, json!({})).await;
+        }
+        sent.send(()).unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    prefetch(&host, &[OTHER]);
+    started.recv().await.unwrap();
+    focus_window(&host);
+    until(&host, |m| m.activity.contains_key("block:z")).await;
+    {
+        let m = host.model.lock().unwrap();
+        assert_eq!(
+            m.activity["block:z"][""].state,
+            activity::ProgramState::Blocked
+        );
+        assert_eq!(m.views[SESSION].revision, 2);
+    }
+    started.recv().await.unwrap();
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn probes_rerun_after_reconnect() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (sent, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let (go, mut proceed) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let server = tokio::spawn(async move {
+        let mut boot = boot_with(&[]);
+        boot["selected_session"]["view"] = terminal_view_of(SESSION, "block:a");
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 11).await;
+        let request = recv(&mut ws).await;
+        reply(&mut ws, &request, 1, boot.clone()).await;
+        for (probe, answer) in [
+            ("program_status", json!({})),
+            ("title", json!({})),
+            ("process", json!({})),
+            ("pwd", json!({"pwd":"/srv/app"})),
+        ] {
+            let request = probed(&mut ws, SESSION, "block:a", probe).await;
+            reply(&mut ws, &request, 2, answer).await;
+        }
+        // The client drops this connection; the new one probes the block again.
+        assert!(!matches!(ws.next().await, Some(Ok(Message::Text(_)))));
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 11).await;
+        let request = recv(&mut ws).await;
+        reply(&mut ws, &request, 1, boot).await;
+        let status = probed(&mut ws, SESSION, "block:a", "program_status").await;
+        sent.send(()).unwrap();
+        proceed.recv().await.unwrap();
+        reply(
+            &mut ws,
+            &status,
+            2,
+            json!({"records":[{"state":"working"}]}),
+        )
+        .await;
+        for probe in ["title", "process", "pwd"] {
+            let request = probed(&mut ws, SESSION, "block:a", probe).await;
+            reply(&mut ws, &request, 2, json!({})).await;
+        }
+        sent.send(()).unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    until(&host, |m| {
+        m.cwds.get("block:a").map(String::as_str) == Some("/srv/app")
+    })
+    .await;
+    host.commands.send(HostCommand::Reconnect).unwrap();
+    // Only a Reconnect that arrives during the delay ends it.
+    until(&host, |m| !m.connected).await;
+    host.commands.send(HostCommand::Reconnect).unwrap();
+    started.recv().await.unwrap();
+    {
+        let m = host.model.lock().unwrap();
+        assert_eq!(m.protocol.bootstrap_requests, 2);
+        assert!(
+            !m.cwds.contains_key("block:a"),
+            "a directory reported before the reconnect is dropped"
+        );
+    }
+    go.send(()).unwrap();
+    started.recv().await.unwrap();
+    until(&host, |m| m.activity.contains_key("block:a")).await;
+    assert!(!host.model.lock().unwrap().cwds.contains_key("block:a"));
     drop(host);
     server.await.unwrap();
 }
@@ -1556,4 +1708,34 @@ async fn a_server_without_set_theme_is_told_once_and_never_again() {
         "new blocks carry no theme either"
     );
     drop(host);
+}
+
+#[test]
+fn working_directories_follow_pwd_reports() {
+    let mut model = HostModel::default();
+    let (block, event) = activity::parse_block_event(&json!({
+        "creator_name": activity::TERMINAL, "block_id": "b", "name": "pwd_changed",
+        "payload": {"pwd":"file://box/home/me/my%20repo","owner":{"pid":3,"name":"zsh"}}
+    }))
+    .expect("a pwd report");
+    model.apply_block_event("s", block, event);
+    assert_eq!(model.cwds["b"], "/home/me/my repo");
+
+    model.apply_block_event("s", "b".into(), activity::parse_pwd(&json!({})));
+    assert!(
+        model.cwds.is_empty(),
+        "a report without a directory clears it"
+    );
+
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::BlockEvent::Pwd(Some("file:///x".into())),
+    );
+    model.forget_block("b");
+    assert!(model.cwds.is_empty(), "a closed block's directory goes");
+
+    assert_eq!(activity::cwd_path("/plain"), "/plain");
+    assert_eq!(activity::cwd_path("file:///x"), "/x");
+    assert_eq!(activity::cwd_path("file://h/bad%zz"), "/bad%zz");
 }

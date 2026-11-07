@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Settings > Terminal now says when a saved font family waits for the client to be reopened, and when the saved family isn't installed. Saving a font change shows a notice to reopen the client. Applying fonts without a restart is tracked in [#6](https://github.com/kitten-lily/rex-rune/issues/6).
+- Activity view: the sidebar's Sessions / Activity switch (or Activity in Commands) lists every pane that reports activity across all connected hosts, grouped by priority or by session, with its message, location, working directory and reported subtasks; idle agents can be shown. Pressing a row focuses that exact pane. Sessions in the sidebar and switcher now show their activity word and, for two or more panes needing you, a count. To do this, the client reads every connected session's layout (read-only `session.view`, paced, one at a time) while activity in tabs is shown, or while the sidebar shows Activity or lists tabs, and each known terminal's status, title, directory and process once per connection. New settings: `sidebar_mode`, `activity_grouping`, `activity_show_idle`. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - Shift+Space, Shift+Tab and Shift+Enter now reach terminal programs that use the Kitty keyboard protocol, such as Claude Code, as distinct keys instead of plain Space, Tab and Enter. Shift is reported unless the keyboard layout used it to type the character. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
 
 ## 0.3.2 — 2026-11-06

@@ -1,5 +1,6 @@
 //! The Rune front end.
 mod activity;
+mod activity_list;
 mod dialogs;
 mod fonts;
 mod input;

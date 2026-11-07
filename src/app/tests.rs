@@ -963,10 +963,13 @@ fn a_failed_column_move_discards_its_width_migration() {
     let (mut ws, rx) = tabbed_workspace("strip");
     ws.toggle_tab_layout("strip".into());
     ws.consume_pane(-1);
-    let reply = match rx.recv().unwrap() {
-        HostCommand::RequestTracked { reply, .. } => reply,
-        _ => panic!("expected tracked column move"),
-    };
+    let reply = rx
+        .try_iter()
+        .find_map(|c| match c {
+            HostCommand::RequestTracked { reply, .. } => Some(reply),
+            _ => None,
+        })
+        .expect("a tracked column move");
     let path = ws.settings_path.clone();
     let mut rt = runtime(ws);
     reply.send(Err("rejected".into())).unwrap();
@@ -3368,22 +3371,42 @@ fn a_sidebar_tab_selects_its_session_and_focuses_its_window() {
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
+/// The sessions a host was last asked to prefetch, sorted.
+fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
+    rx.try_iter()
+        .filter_map(|c| match c {
+            HostCommand::PrefetchViews(ids) => {
+                let mut ids: Vec<_> = ids.into_iter().collect();
+                ids.sort();
+                Some(ids)
+            }
+            _ => None,
+        })
+        .last()
+}
+
+#[test]
+fn tab_activity_prefetches_every_connected_session() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.hosts[0].model.sessions.push(session("other"));
+    assert!(ws.settings.notifications.show_in_tabs && !ws.sidebar_tabs());
+    ws.sync_prefetch();
+    assert_eq!(
+        latest(&rx),
+        Some(vec!["other".to_owned(), "s".to_owned()]),
+        "session rows and the switcher show every session's activity"
+    );
+    ws.settings.notifications.show_in_tabs = false;
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx), Some(vec![]), "nothing shows it");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
 #[test]
 fn views_are_prefetched_only_for_tabs_the_sidebar_lists() {
-    fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
-        rx.try_iter()
-            .filter_map(|c| match c {
-                HostCommand::PrefetchViews(ids) => {
-                    let mut ids: Vec<_> = ids.into_iter().collect();
-                    ids.sort();
-                    Some(ids)
-                }
-                _ => None,
-            })
-            .last()
-    }
     let all = Some(vec!["other".to_owned(), "s".to_owned()]);
     let (mut ws, rx) = tabbed_workspace("single");
+    ws.settings.notifications.show_in_tabs = false;
     ws.hosts[0].model.sessions.push(session("other"));
     ws.toggle_sidebar();
     let mut rt = runtime(ws);
@@ -3733,4 +3756,351 @@ fn files_dropped_on_a_pane_upload_there_and_focus_it() {
         "the pane a file is dropped on takes focus"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// Hosts 0 and 1 connected; host 1 has an unselected session "b" whose window "w" lists
+/// the given blocks. Returns the workspace and each host's command receiver.
+fn two_host_panes(
+    blocks: &[&str],
+) -> (
+    Workspace,
+    flume::Receiver<HostCommand>,
+    flume::Receiver<HostCommand>,
+) {
+    let mut ws = workspace_hosts(2);
+    let rx0 = capture_host(&mut ws, 0);
+    let rx1 = capture_host(&mut ws, 1);
+    let model = &mut ws.hosts[1].model;
+    model.connected = true;
+    model.sessions = vec![session("b")];
+    model.views.insert(
+        "b".into(),
+        serde_json::from_value(serde_json::json!({
+            "revision": 1,
+            "session_id": "b",
+            "active_window_id": "w",
+            "windows": [{"window_id": "w", "label": "w",
+                "layers": [{"kind": "tiled", "layout": {"block_id": blocks[0]},
+                    "blocks": blocks.iter().map(|b| serde_json::json!({"block_id": b}))
+                        .collect::<Vec<_>>()}]}]
+        }))
+        .expect("a view"),
+    );
+    (ws, rx0, rx1)
+}
+
+fn pane_ref(ws: &Workspace, host: usize, block: &str) -> super::activity_list::PaneRef {
+    super::activity_list::PaneRef {
+        host: ws.hosts[host].id,
+        session: "b".into(),
+        window: "w".into(),
+        block: block.into(),
+    }
+}
+
+#[test]
+fn activity_rows_focus_their_exact_pane_on_another_session() {
+    let (mut ws, rx0, rx1) = two_host_panes(&["block:y", "block:z"]);
+    let target = pane_ref(&ws, 1, "block:z");
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert_eq!(ws.active, 1);
+    assert!(
+        rx0.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    let sent: Vec<_> = rx1
+        .try_iter()
+        .filter_map(|c| match c {
+            HostCommand::Select(id) => Some(format!("select {id}")),
+            HostCommand::Request { method, payload } => Some(format!("{method} {payload}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            "select b".to_owned(),
+            r#"session.focus_block {"block_id":"block:z","session_id":"b"}"#.to_owned()
+        ]
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_closed_pane_is_never_replaced_by_its_neighbour() {
+    // block:z closed and block:y took its place in the same window.
+    let (mut ws, _rx0, rx1) = two_host_panes(&["block:y"]);
+    let target = pane_ref(&ws, 1, "block:z");
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert!(
+        rx1.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    assert!(ws.notices.iter().any(|n| n.text.contains("closed")));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_removed_host_is_not_targeted() {
+    let (mut ws, rx0, rx1) = two_host_panes(&["block:z"]);
+    let mut target = pane_ref(&ws, 1, "block:z");
+    target.host = super::workspace::HostId(u64::MAX);
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert!(
+        rx0.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    assert!(
+        rx1.try_iter()
+            .all(|c| !matches!(c, HostCommand::Request { .. }))
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+/// Make every block of every view a terminal, as the server reports them; `tabbed_workspace`
+/// leaves the creator and flavor out.
+fn terminal_blocks(ws: &mut Workspace) {
+    for host in &mut ws.hosts {
+        for view in host.model.views.values_mut() {
+            for block in view
+                .windows
+                .iter_mut()
+                .flat_map(|w| &mut w.layers)
+                .flat_map(|l| &mut l.blocks)
+            {
+                block.creator_name = Some("com.superlogical.terminal".into());
+                block.flavor = Some("com.superlogical.terminal.shell".into());
+            }
+        }
+    }
+}
+
+fn settle(rt: &mut Runtime<Workspace>) {
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+}
+
+#[test]
+fn activity_mode_lists_reporting_panes() {
+    use rex_linux::{connection::activity::ProgramState::Blocked, settings::SidebarMode};
+    let (mut ws, rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    ws.hosts[0].model.activity.insert(
+        "block:c".into(),
+        [("".into(), record(Blocked, true))].into(),
+    );
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(!has(&rt, "activity-row:0:block:c"), "Sessions mode first");
+    click(&mut rt, "sidebar-mode:activity");
+    settle(&mut rt);
+    assert!(has(&rt, "activity-row:0:block:c"));
+    assert!(
+        !has(&rt, "activity-row:0:block:b"),
+        "a plain shell has no row"
+    );
+    assert_eq!(rt.state.settings.sidebar_mode, SidebarMode::Activity);
+    assert_eq!(
+        Settings::load(&rt.state.settings_path)
+            .unwrap()
+            .sidebar_mode,
+        SidebarMode::Activity,
+        "saved"
+    );
+    rx.try_iter().count();
+    click(&mut rt, "activity-row:0:block:c");
+    assert!(
+        requests(&rx)
+            .iter()
+            .any(|(method, session, payload)| method == "session.focus_block"
+                && session == "s"
+                && payload["block_id"] == "block:c"),
+        "a row focuses its pane"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn activity_mode_shows_an_empty_state() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    ws.toggle_sidebar();
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(has(&rt, "activity-empty"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn activity_grouping_and_idle_switches_apply() {
+    use rex_linux::{connection::activity::ProgramState::Working, settings::ActivityGrouping};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    ws.hosts[0].model.activity.insert(
+        "block:c".into(),
+        [("".into(), record(Working, true))].into(),
+    );
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let header = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("activity-group:0"))
+            .and_then(|e| e.text)
+    };
+    assert_eq!(header(&rt).as_deref(), Some("Working"));
+    click(&mut rt, "activity-grouping:session");
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.settings.activity_grouping,
+        ActivityGrouping::Session
+    );
+    assert_eq!(header(&rt).as_deref(), Some("s-label · test-0"));
+    click(&mut rt, "activity-grouping:priority");
+    assert_eq!(
+        rt.state.settings.activity_grouping,
+        ActivityGrouping::Priority
+    );
+    assert!(!rt.state.settings.activity_show_idle);
+    click(&mut rt, "activity-idle");
+    assert!(rt.state.settings.activity_show_idle);
+    click(&mut rt, "activity-idle");
+    assert!(!rt.state.settings.activity_show_idle);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn activity_mode_returns_the_toolbar_tabs() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.set_vertical_tabs(true);
+    assert!(
+        ws.sidebar.is_open() && ws.sidebar_tabs(),
+        "Sessions mode lists tabs"
+    );
+    ws.show_activity();
+    assert!(
+        !ws.sidebar_tabs(),
+        "Activity mode gives them back to the toolbar"
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn activity_mode_prefetches_every_session() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.settings.notifications.show_in_tabs = false;
+    ws.hosts[0].model.sessions.push(session("other"));
+    ws.settings.hosts[0].collapsed = true;
+    ws.show_activity();
+    assert_eq!(
+        latest(&rx),
+        Some(vec!["other".to_owned(), "s".to_owned()]),
+        "every session of a collapsed host"
+    );
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    click(&mut rt, "sidebar-mode:sessions");
+    assert_eq!(latest(&rx), Some(vec![]), "the Sessions rule again");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn commands_offer_activity() {
+    use rex_linux::settings::SidebarMode;
+    let mut ws = workspace();
+    ws.picker(false);
+    assert!(
+        ws.entries()
+            .iter()
+            .any(|e| e.label == "Activity" && matches!(e.action, Intent::Activity))
+    );
+    assert!(!ws.sidebar.is_open());
+    ws.perform(Intent::Activity, &mut rune::Tx::default());
+    assert!(ws.sidebar.is_open());
+    assert_eq!(ws.settings.sidebar_mode, SidebarMode::Activity);
+    ws.perform(Intent::Activity, &mut rune::Tx::default());
+    assert!(ws.sidebar.is_open(), "never toggles it closed");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+/// Give session `id` on host 0 a view with `blocked` Blocked terminal panes, in one tab.
+fn blocked_session(ws: &mut Workspace, id: &str, blocked: usize) {
+    use rex_linux::connection::activity::ProgramState::Blocked;
+    let blocks: Vec<_> = (0..blocked)
+        .map(|n| serde_json::json!({"block_id": format!("{id}:{n}")}))
+        .collect();
+    ws.hosts[0].model.sessions.push(session(id));
+    ws.hosts[0].model.views.insert(
+        id.into(),
+        serde_json::from_value(serde_json::json!({
+            "revision": 1, "session_id": id, "active_window_id": format!("{id}:w"),
+            "windows": [{"window_id": format!("{id}:w"), "label": "t",
+                "focused_block_id": blocks[0]["block_id"],
+                "layers": [{"kind": "tiled", "layout": {"block_id": blocks[0]["block_id"]},
+                    "blocks": blocks}]}]
+        }))
+        .expect("a view"),
+    );
+    terminal_blocks(ws);
+    for n in 0..blocked {
+        set_activity(ws, &format!("{id}:{n}"), &[("", record(Blocked, true))]);
+    }
+}
+
+#[test]
+fn sessions_show_their_activity_in_the_sidebar() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 2);
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(has(&rt, "session-word:0:other"));
+    assert!(has(&rt, "session-count:0:other"));
+    let count = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("session-count:0:other"))
+        .and_then(|e| e.text);
+    assert_eq!(count.as_deref(), Some("2"));
+    assert!(!has(&rt, "session-word:0:s"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_switcher_names_session_activity() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 2);
+    blocked_session(&mut ws, "one", 1);
+    ws.picker(true);
+    let detail = |ws: &Workspace, label: &str| {
+        ws.entries()
+            .into_iter()
+            .find(|e| e.label == label)
+            .map(|e| e.detail)
+    };
+    assert_eq!(
+        detail(&ws, "other-label").as_deref(),
+        Some("Needs input · 2")
+    );
+    assert_eq!(detail(&ws, "one-label").as_deref(), Some("Needs input"));
+    assert_eq!(detail(&ws, "s-label").as_deref(), Some(""));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn unseen_done_reaches_the_session_row() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    assert!(ws.session_word(0, "s").is_none());
+    let id = ws.hosts[0].id;
+    ws.unseen_done.insert((id, "split".into()));
+    let (word, _, needing) = ws.session_word(0, "s").expect("a word");
+    assert_eq!((word.as_ref(), needing), ("Done", 0));
+    ws.settings.notifications.show_in_tabs = false;
+    assert!(ws.session_word(0, "s").is_none());
+    std::fs::remove_file(&ws.settings_path).ok();
 }

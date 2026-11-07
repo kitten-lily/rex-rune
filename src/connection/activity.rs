@@ -1,10 +1,35 @@
 //! What programs in a terminal report about themselves: OSC 7501 status records, OSC 9;4
 //! progress, the bell, the foreground process, the terminal title, and OSC 9 / OSC 777 desktop
 //! notifications. All of it arrives as the terminal creator's `block_event`s, or from its
-//! `program_status`, `process` and `title` methods.
+//! `program_status`, `process`, `title` and `pwd` methods.
 use serde_json::Value;
 
 pub const TERMINAL: &str = "com.superlogical.terminal";
+
+/// What the client reads back from a terminal, outside its live events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Probe {
+    Status,
+    Title,
+    Process,
+    Pwd,
+}
+
+impl Probe {
+    /// The order a terminal's probes run in.
+    pub const ALL: [Self; 4] = [Self::Status, Self::Title, Self::Process, Self::Pwd];
+
+    /// The terminal method that answers this probe.
+    pub fn method(self) -> String {
+        let name = match self {
+            Self::Status => "program_status",
+            Self::Title => "title",
+            Self::Process => "process",
+            Self::Pwd => "pwd",
+        };
+        format!("{TERMINAL}.{name}")
+    }
+}
 
 /// A record's state, in priority order: a tab shows the highest state among its records.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -141,6 +166,8 @@ pub enum BlockEvent {
     },
     /// An OSC 9;4 report; none when the program removed its progress.
     Progress(Option<TerminalProgress>),
+    /// The terminal's working directory as a path; none when the report leaves it out.
+    Pwd(Option<String>),
     /// The program rang the terminal's bell (BEL).
     Bell,
 }
@@ -169,6 +196,7 @@ pub fn parse_block_event(payload: &Value) -> Option<(String, BlockEvent)> {
         },
         "process_changed" => parse_process(body),
         "title_changed" => parse_title(body),
+        "pwd_changed" => parse_pwd(body),
         "desktop_notification" => BlockEvent::Notification {
             title: body["title"].as_str().unwrap_or_default().to_owned(),
             body: body["body"].as_str().unwrap_or_default().to_owned(),
@@ -212,6 +240,41 @@ pub fn parse_title(body: &Value) -> BlockEvent {
         text: body["title"].as_str().unwrap_or_default().trim().to_owned(),
         owner: body["owner"]["pid"].as_u64(),
     }
+}
+
+/// A `pwd_changed` payload or a `pwd` reply.
+pub fn parse_pwd(body: &Value) -> BlockEvent {
+    BlockEvent::Pwd(body["pwd"].as_str().filter(|s| !s.is_empty()).map(cwd_path))
+}
+
+/// The path in a reported working directory: a `file://host/path` URL's path with its `%XX`
+/// escapes decoded (an invalid escape stays as written), or a plain path unchanged.
+pub fn cwd_path(reported: &str) -> String {
+    let Some(rest) = reported.strip_prefix("file://") else {
+        return reported.to_owned();
+    };
+    let path = rest.find('/').map_or("", |at| &rest[at..]);
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'%')
+            .then(|| bytes.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A `program_status` reply's records by id; the root record's id is empty.

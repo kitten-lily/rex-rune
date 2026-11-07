@@ -2,6 +2,7 @@
 //! window, the program its pill shows, the word trouble carries, and which changes become
 //! desktop notifications.
 use super::{
+    activity_list::PaneRef,
     notify::{Note, NoteTarget, Notifier},
     theme::*,
     workspace::{HostId, Workspace},
@@ -69,15 +70,20 @@ pub fn tab_name(model: &HostModel, window: &session::Window) -> String {
     title.or(label).unwrap_or("Terminal").to_owned()
 }
 
+/// A terminal pane's label is still the server's default: missing, or its flavor's last word.
+pub fn label_is_default(block: &session::LayerBlock) -> bool {
+    let label = block.label.as_deref().filter(|l| !l.is_empty());
+    block.creator_name.as_deref() == Some(TERMINAL_CREATOR)
+        && label
+            .is_none_or(|l| block.flavor.as_deref().and_then(|f| f.rsplit('.').next()) == Some(l))
+}
+
 /// What a pane is called: its server label, or while that is still the default its terminal
 /// gets (its flavor's last word, such as `shell`), its program's terminal title. Display only:
 /// the server label is never changed.
 pub fn pane_name(model: &HostModel, block: &session::LayerBlock) -> String {
     let label = block.label.as_deref().filter(|l| !l.is_empty());
-    let default = block.creator_name.as_deref() == Some(TERMINAL_CREATOR)
-        && label
-            .is_none_or(|l| block.flavor.as_deref().and_then(|f| f.rsplit('.').next()) == Some(l));
-    let title = default
+    let title = label_is_default(block)
         .then(|| block.block_id.as_deref().and_then(|b| model.title(b)))
         .flatten();
     title.or(label).unwrap_or("Terminal").to_owned()
@@ -86,6 +92,17 @@ pub fn pane_name(model: &HostModel, block: &session::LayerBlock) -> String {
 /// Fold a tab's records with Blocked > Error > Working > Done > Idle.
 pub fn tab_activity(model: &HostModel, window: &session::Window) -> TabActivity {
     fold_activity(model, blocks(window), focused_block(window))
+}
+
+/// A session's activity: the fold over every pane of every tab in its view.
+pub fn view_activity(model: &HostModel, view: &session::ViewResponse) -> TabActivity {
+    let blocks = view.windows.iter().flat_map(blocks);
+    let focused = view
+        .windows
+        .iter()
+        .find(|w| w.window_id == view.active_window_id)
+        .and_then(focused_block);
+    fold_activity(model, blocks, focused)
 }
 
 /// One pane's activity: the same fold as its tab's, over its own records.
@@ -162,19 +179,40 @@ pub fn tab_word(
     unseen_done: bool,
     unseen_bell: bool,
 ) -> Option<(Cow<'static, str>, u32)> {
-    use TerminalProgress::{Error, Indeterminate, Paused, Set};
     match activity.state {
         ProgramState::Blocked => Some((blocked_word(activity.kind).into(), warning())),
         ProgramState::Error => Some(("Error".into(), danger())),
         _ if unseen_bell => Some(("Bell".into(), warning())),
         _ => match activity.progress {
-            Some(Error(_)) => Some(("Error".into(), danger())),
-            Some(Paused(Some(n))) => Some((format!("Paused {n}%").into(), warning())),
-            Some(Paused(None)) => Some(("Paused".into(), warning())),
-            Some(Set(Some(n))) => Some((format!("{n}%").into(), accent())),
-            Some(Set(None) | Indeterminate) => Some(("Working".into(), accent())),
+            Some(progress) => Some(progress_word(progress)),
             None if unseen_done => Some(("Done".into(), accent())),
             None => None,
+        },
+    }
+}
+
+fn progress_word(progress: TerminalProgress) -> (Cow<'static, str>, u32) {
+    use TerminalProgress::{Error, Indeterminate, Paused, Set};
+    match progress {
+        Error(_) => ("Error".into(), danger()),
+        Paused(Some(n)) => (format!("Paused {n}%").into(), warning()),
+        Paused(None) => ("Paused".into(), warning()),
+        Set(Some(n)) => (format!("{n}%").into(), accent()),
+        Set(None) | Indeterminate => ("Working".into(), accent()),
+    }
+}
+
+/// The word a pane's activity row shows: trouble, then a program's progress report, then its
+/// state. Unlike a tab's pill, Working, Done and Idle always have a word.
+pub fn activity_word(activity: &TabActivity) -> (Cow<'static, str>, u32) {
+    match activity.state {
+        ProgramState::Blocked => (blocked_word(activity.kind).into(), warning()),
+        ProgramState::Error => ("Error".into(), danger()),
+        state => match (activity.progress, state) {
+            (Some(progress), _) => progress_word(progress),
+            (None, ProgramState::Done) => ("Done".into(), accent()),
+            (None, ProgramState::Working) => ("Working".into(), accent()),
+            (None, _) => ("Idle".into(), muted()),
         },
     }
 }
@@ -394,11 +432,7 @@ impl Workspace {
         let Some(index) = self.host_index(target.host) else {
             return;
         };
-        if self.hosts[index].model.selected.as_deref() != Some(&target.session) {
-            self.select(index, target.session.clone(), tx);
-        } else if index != self.active {
-            self.activate_host(index, tx);
-        }
+        self.show_session(index, &target.session, tx);
         if let Some(window) = target.window {
             self.send(
                 index,
@@ -408,6 +442,48 @@ impl Workspace {
                 },
             );
         }
+    }
+
+    /// Bring `session` on host `index` to the front: select it, or just raise its host.
+    fn show_session(&mut self, index: usize, session: &str, tx: &mut Tx) {
+        if self.hosts[index].model.selected.as_deref() != Some(session) {
+            self.select(index, session.to_owned(), tx);
+        } else if index != self.active {
+            self.activate_host(index, tx);
+        }
+    }
+
+    /// An Activity row was pressed: show its session and focus the exact pane. The window is
+    /// found again from the block id, so a pane that has closed is never swapped for
+    /// whatever now sits at its old position.
+    pub fn open_pane(&mut self, target: &PaneRef, tx: &mut Tx) {
+        let live = self.host_index(target.host).filter(|&index| {
+            let model = &self.hosts[index].model;
+            model
+                .sessions
+                .iter()
+                .any(|s| s.session_id == target.session)
+                && model.views.get(&target.session).is_some_and(|view| {
+                    view.windows
+                        .iter()
+                        .any(|w| blocks(w).any(|b| b == target.block))
+                })
+        });
+        let Some(index) = live else {
+            self.inform("That pane has closed.");
+            return;
+        };
+        self.show_session(index, &target.session, tx);
+        self.send(
+            index,
+            rex_linux::connection::HostCommand::Request {
+                method: "session.focus_block".into(),
+                payload: serde_json::json!({
+                    "session_id": target.session,
+                    "block_id": target.block,
+                }),
+            },
+        );
     }
 
     /// Latch the bells programs rang, as (session, block), on tabs the user can't see.
@@ -431,6 +507,32 @@ impl Workspace {
     /// Whether `window` on the active host shows "Done" until seen.
     pub fn unseen(&self, window: &str) -> bool {
         self.unseen_on(self.active, window)
+    }
+
+    /// The word, tone and needing-you count a session shows, or None when it has nothing to
+    /// say or tab activity is hidden. Unseen Done and Bell count from any of its tabs.
+    pub fn session_word(
+        &self,
+        host: usize,
+        session: &str,
+    ) -> Option<(Cow<'static, str>, u32, usize)> {
+        if !self.settings.notifications.show_in_tabs {
+            return None;
+        }
+        let model = &self.hosts[host].model;
+        let (fold, needing) = super::activity_list::session_activity(model, session)?;
+        let windows = || {
+            model
+                .views
+                .get(session)
+                .into_iter()
+                .flat_map(|v| &v.windows)
+                .filter_map(|w| w.window_id.as_deref())
+        };
+        let done = windows().any(|w| self.unseen_on(host, w));
+        let bell = windows().any(|w| self.bell_on(host, w));
+        let (word, tone) = tab_word(&fold, done, bell)?;
+        Some((word, tone, needing))
     }
 
     pub fn unseen_on(&self, host: usize, window: &str) -> bool {

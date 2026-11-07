@@ -4,7 +4,7 @@ use crate::{
     transport::{self, Client},
     wire,
 };
-use activity::{BlockEvent, DesktopNotice, StatusRecord, TerminalProgress};
+use activity::{BlockEvent, DesktopNotice, Probe, StatusRecord, TerminalProgress};
 use anyhow::{Context, Result};
 use rexrs::api::{BlockMethod, session, terminal::SetTheme};
 use serde_json::{Value, json};
@@ -18,6 +18,7 @@ use std::{
 pub mod activity;
 pub mod clipboard;
 mod prefetch;
+mod probes;
 
 /// The label new tabs get. A tab that still has it shows its program's terminal title.
 pub const DEFAULT_TAB_LABEL: &str = "Shell";
@@ -183,8 +184,13 @@ pub struct HostModel {
     pub foreground: HashMap<String, Vec<u64>>,
     /// Each terminal block's title, as a program last set it, and the pid that set it.
     pub titles: HashMap<String, (String, Option<u64>)>,
+    /// Each terminal block's working directory, as a path.
+    pub cwds: HashMap<String, String>,
     /// Each terminal block's OSC 9;4 progress, until its program removes it.
     pub progress: HashMap<String, TerminalProgress>,
+    /// How many live events of each probe's kind each block has had on this connection, so a
+    /// probe's answer never replaces a newer event.
+    pub stamps: HashMap<(String, Probe), u64>,
     /// Program notifications not yet taken by the UI.
     pub notices: Vec<DesktopNotice>,
     /// Bells not yet taken by the UI, as (session, block).
@@ -231,7 +237,33 @@ impl HostModel {
         })
     }
 
+    /// How many live events of `probe`'s kind `block` has had on this connection.
+    pub fn stamp(&self, block: &str, probe: Probe) -> u64 {
+        self.stamps
+            .get(&(block.to_owned(), probe))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Apply a live event, which makes any probe of its kind already sent out of date.
     pub fn apply_block_event(&mut self, session: &str, block: String, event: BlockEvent) {
+        let probe = match event {
+            BlockEvent::StatusChanged { .. } | BlockEvent::StatusRemoved { .. } => {
+                Some(Probe::Status)
+            }
+            BlockEvent::Title { .. } => Some(Probe::Title),
+            BlockEvent::Process { .. } => Some(Probe::Process),
+            BlockEvent::Pwd(_) => Some(Probe::Pwd),
+            BlockEvent::Notification { .. } | BlockEvent::Progress(_) | BlockEvent::Bell => None,
+        };
+        if let Some(probe) = probe {
+            *self.stamps.entry((block.clone(), probe)).or_default() += 1;
+        }
+        self.record_block_event(session, block, event);
+    }
+
+    /// Apply an event, live or a probe's answer.
+    fn record_block_event(&mut self, session: &str, block: String, event: BlockEvent) {
         match event {
             BlockEvent::StatusChanged { id, record } => {
                 self.activity.entry(block).or_default().insert(id, record);
@@ -264,6 +296,12 @@ impl HostModel {
                     self.titles.insert(block, (text, owner));
                 }
             }
+            BlockEvent::Pwd(Some(path)) => {
+                self.cwds.insert(block, path);
+            }
+            BlockEvent::Pwd(None) => {
+                self.cwds.remove(&block);
+            }
             BlockEvent::Notification { title, body } => {
                 // A program spamming notifications can't grow this without bound.
                 if self.notices.len() < 32 {
@@ -294,7 +332,9 @@ impl HostModel {
         self.programs.remove(block);
         self.foreground.remove(block);
         self.titles.remove(block);
+        self.cwds.remove(block);
         self.progress.remove(block);
+        self.stamps.retain(|(b, _), _| b != block);
     }
 
     /// The block's terminal title while it's current. Shells rarely clear a title when the
@@ -390,8 +430,6 @@ struct ControlState {
     bootstrap_seq: u64,
     list_seq: u64,
     view_seq: HashMap<String, u64>,
-    /// Blocks whose program status (and process, if not streamed) were asked for.
-    queried: HashSet<String>,
     /// Unattached sessions fetched once with session.view to place their block events.
     viewed: HashSet<String>,
     /// The theme last declared to each block on this connection.
@@ -842,67 +880,13 @@ fn reconcile(
     }
 }
 
-fn view_blocks(view: &session::ViewResponse) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn view_blocks(view: &session::ViewResponse) -> impl Iterator<Item = String> + '_ {
     view.windows
         .iter()
         .flat_map(|w| &w.layers)
         .flat_map(|l| &l.blocks)
         .filter(|b| b.creator_name.as_deref() == Some(activity::TERMINAL))
         .filter_map(|b| b.block_id.clone())
-}
-
-/// Ask once per block of the selected session what its programs last reported, its title,
-/// and which program runs in the blocks that aren't streamed (streams get process_changed
-/// anyway).
-/// A failed query leaves the block without activity; it isn't retried.
-async fn query_activity(
-    control: &mut Client,
-    shared: &Shared,
-    state: &mut ControlState,
-    workers: &HashMap<String, PaneWorker>,
-) {
-    let (session, blocks) = {
-        let m = shared.model.lock().expect("host model");
-        if !m.connected {
-            return;
-        }
-        let Some(view) = m.view() else { return };
-        let Some(session) = m.selected.clone() else {
-            return;
-        };
-        let blocks: Vec<_> = view_blocks(view)
-            .filter(|b| !state.queried.contains(b))
-            .collect();
-        (session, blocks)
-    };
-    for block in blocks {
-        state.queried.insert(block.clone());
-        let target = json!({"session_id":session, "block_id":block, "args":{}});
-        let method = format!("{}.program_status", activity::TERMINAL);
-        if let Ok(reply) = request(control, &method, target.clone()).await {
-            let records = activity::parse_status(&reply);
-            shared.update(|m| {
-                m.activity.remove(&block);
-                if !records.is_empty() {
-                    m.activity
-                        .insert(block.clone(), records.into_iter().collect());
-                }
-            });
-        }
-        let method = format!("{}.title", activity::TERMINAL);
-        if let Ok(reply) = request(control, &method, target.clone()).await {
-            let title = activity::parse_title(&reply);
-            shared.update(|m| m.apply_block_event(&session, block.clone(), title));
-        }
-        if workers.contains_key(&block) {
-            continue;
-        }
-        let method = format!("{}.process", activity::TERMINAL);
-        if let Ok(reply) = request(control, &method, target).await {
-            let process = activity::parse_process(&reply);
-            shared.update(|m| m.apply_block_event(&session, block, process));
-        }
-    }
 }
 
 /// Declare `theme` to each streamed block Rex would apply it to at once: blocks this client
@@ -1162,6 +1146,7 @@ async fn run_host(
     let mut workers = HashMap::<String, PaneWorker>::new();
     let mut retry = 0;
     let mut prefetch = prefetch::Prefetch::default();
+    let mut probes = probes::Probes::default();
     loop {
         let result: Result<bool> = async {
             let mut control = transport::control(&endpoint, token.as_deref()).await?;
@@ -1177,7 +1162,9 @@ async fn run_host(
                 m.programs.clear();
                 m.foreground.clear();
                 m.titles.clear();
+                m.cwds.clear();
                 m.progress.clear();
+                m.stamps.clear();
                 m.activity_epoch += 1;
             });
             let mut state = ControlState::default();
@@ -1236,14 +1223,37 @@ async fn run_host(
             }
             reconcile(&endpoint, shared, &sender, &mut workers);
             declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
-            query_activity(&mut control, shared, &mut state, &workers).await;
             retry = 0;
             prefetch.reset();
+            probes.reset();
             let mut pace = tokio::time::interval(prefetch::PACE);
             pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut probe_pace = tokio::time::interval(probes::PACE);
+            probe_pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                let due = prefetch.due(&shared.model.lock().expect("host model"), Instant::now());
+                let streamed: HashSet<String> = workers.keys().cloned().collect();
+                let (due, probe_due) = {
+                    let m = shared.model.lock().expect("host model");
+                    (prefetch.due(&m, Instant::now()), probes.next(&m, &streamed).is_some())
+                };
                 tokio::select! {
+                    _ = probe_pace.tick(), if probe_due => {
+                        let next = {
+                            let m = shared.model.lock().expect("host model");
+                            probes.next(&m, &streamed).map(|(session, block, probe)| {
+                                let stamp = m.stamp(&block, probe);
+                                (session, block, probe, stamp)
+                            })
+                        };
+                        if let Some((session, block, probe, stamp)) = next {
+                            probes.start(&mut control, session, block, probe, stamp).await?;
+                        }
+                    }
+                    done = probes.finished(), if probes.in_flight() => {
+                        shared.update(|m| {
+                            probes.apply(m, &done);
+                        });
+                    }
                     _ = prefetch::wait(&mut pace, due.unwrap_or_else(Instant::now)), if due.is_some() => {
                         let next = prefetch.next(&shared.model.lock().expect("host model"), Instant::now());
                         if let Some(id) = next {
@@ -1267,7 +1277,6 @@ async fn run_host(
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
-                        query_activity(&mut control, shared, &mut state, &workers).await;
                     }
                     command = commands.recv_async() => {
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
@@ -1290,7 +1299,6 @@ async fn run_host(
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
-                        query_activity(&mut control, shared, &mut state, &workers).await;
                     }
                 }
             }
