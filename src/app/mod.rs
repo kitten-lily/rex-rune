@@ -16,6 +16,7 @@ mod stats;
 mod term;
 mod theme;
 mod toolbar;
+mod upload;
 mod widgets;
 mod workspace;
 

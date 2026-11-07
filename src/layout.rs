@@ -74,6 +74,10 @@ pub fn placements(window: &Window, drag: Option<(&str, f64)>) -> Layout {
     }
     let mut layout = (Vec::new(), Vec::new());
     for layer in &window.layers {
+        // Its blocks keep running, but a minimized layer isn't drawn. Unknown states draw.
+        if layer.state.as_deref() == Some("minimized") {
+            continue;
+        }
         if let Some(node) = &layer.layout {
             place(node, bounds(layer), [0., 1.], drag, &mut layout);
         }
@@ -287,6 +291,9 @@ impl<'a> Strip<'a> {
             place(c.node, rect, span, drag, &mut layout);
         }
         for layer in self.window.layers.iter().filter(|l| l.kind != "tiled") {
+            if layer.state.as_deref() == Some("minimized") {
+                continue;
+            }
             if let Some(node) = &layer.layout {
                 place(node, bounds(layer), [0., 1.], drag, &mut layout);
             }
@@ -601,5 +608,19 @@ mod tests {
             ("b", [0., 0., 1., 1.])
         );
         assert!(dividers.is_empty());
+    }
+    #[test]
+    fn minimized_layers_are_not_drawn_and_unknown_states_are() {
+        let window: Window = serde_json::from_value(json!({"layers":[
+            {"kind":"tiled","bounds":[0,0,1,1],"layout":{"block_id":"tiled"}},
+            {"kind":"floating","state":"minimized","bounds":[0.2,0.1,0.5,0.6],"layout":{"block_id":"hidden"}},
+            {"kind":"floating","state":"docked","bounds":[0.2,0.1,0.5,0.6],"layout":{"block_id":"later"}}
+        ]}))
+        .unwrap();
+        let (panes, _) = placements(&window, None);
+        assert_eq!(
+            panes.iter().map(|p| p.block.as_str()).collect::<Vec<_>>(),
+            ["tiled", "later"]
+        );
     }
 }

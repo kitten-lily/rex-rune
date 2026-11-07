@@ -1,11 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.3.2 — 2026-11-06
+
+- First prebuilt Linux releases for x86-64 and ARM64: user-installable tarballs and Debian/Ubuntu packages, with SHA-256 checksums.
+- Automated native builds and tests on Ubuntu 24.04. No application behavior changes since 0.3.1.
+
+## 0.3.1 — 2026-11-06
+
+- Only Rex API revisions 10 and 11 are supported; servers older than revision 10 are refused with a message to update Rex. The revision-7 and revision-8 compatibility paths and `scripts/revision8-check.py` are gone.
+
+## 0.3.0 — 2026-11-06
 
 Changes since the 0.2.0 public release on 2026-11-01. Many of them come from two forks; thank you to [Joe Goldin](https://github.com/joegoldin) ([joegoldin/rex-rune](https://github.com/joegoldin/rex-rune)) and [Lily](https://github.com/kitten-lily) ([kitten-lily/rex-rune](https://github.com/kitten-lily/rex-rune)), credited on each item below and as authors or co-authors of the commits.
 
 ### Terminal
 
+- Drop files on a pane, or paste copied files or a screenshot with Ctrl+Shift+V, and Rex uploads them to the machine that terminal runs on and types their paths, local or remote, with no SSH setup. Needs a Rex server with API revision 11; older servers say so. ([#2](https://github.com/shuv1337/rex-rune/issues/2), requested by @joegoldin)
+- The client speaks Rex API revisions 7 to 11, and doesn't draw floating layers another client minimized.
 - Inline images with the Kitty graphics protocol, restored when you reattach. Adds a patched copy of `ghostty-vt` under `vendor/`. (@joegoldin)
 - Copies made by terminal programs (OSC 52) reach your clipboard, accepted only from the focused pane while the window is focused. Remote programs still can't read your clipboard. (@joegoldin)
 - Double-click selects a word or shell path and triple-click a line; a selection stays attached to its text while output scrolls, and dragging past the edge autoscrolls. (@joegoldin)

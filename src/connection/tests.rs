@@ -114,8 +114,8 @@ async fn send(ws: &mut WebSocketStream<TcpStream>, value: Value) {
 
 async fn welcome(ws: &mut WebSocketStream<TcpStream>, revision: u32) -> Value {
     let hello = recv(ws).await;
-    assert_eq!(hello["api_revision"], 8);
-    assert_eq!(hello["api_min_revision"], 7);
+    assert_eq!(hello["api_revision"], 11);
+    assert_eq!(hello["api_min_revision"], 10);
     send(ws, json!({"type":"welcome", "protocol":"rex.control.v1", "api_revision":revision,
         "limits":{"max_message_bytes":65536}, "client":{"id":"client:test", "reconnect_token":"test-token"}})).await;
     hello
@@ -162,7 +162,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 10).await;
         let request = recv(&mut ws).await;
         assert_eq!(request["method"], "session.bootstrap");
         // An older destruction must not remove a session present in the snapshot.
@@ -192,7 +192,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
 
 #[tokio::test]
 async fn unsupported_negotiated_revision_is_rejected() {
-    for revision in [6, 9] {
+    for revision in [9, 12] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -233,13 +233,13 @@ async fn failed_bootstrap_closes_and_retries_without_old_identity() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut first = accept(&listener, "rex.control.v1").await;
-        welcome(&mut first, 8).await;
+        welcome(&mut first, 11).await;
         let request = recv(&mut first).await;
         assert_eq!(request["method"], "session.bootstrap");
         send(&mut first, json!({"type":"response","id":request["id"],"error":{"code":"session_not_found","message":"closed during setup","status":404}})).await;
         assert!(matches!(first.next().await, Some(Ok(Message::Close(_)))));
         let mut second = accept(&listener, "rex.control.v1").await;
-        let hello = welcome(&mut second, 8).await;
+        let hello = welcome(&mut second, 11).await;
         assert!(hello.get("reconnect_token").is_none());
         let request = recv(&mut second).await;
         assert_eq!(request["method"], "session.bootstrap");
@@ -304,6 +304,62 @@ async fn rejected_bundle_gets_fresh_ticket_and_new_socket() {
     assert_eq!(welcome.nonce, 1);
     host.await.unwrap();
     server.await.unwrap();
+}
+
+/// A data server for one upload: the HELLO, then every byte until the empty end message,
+/// closed with `code`.
+async fn upload_server(listener: TcpListener, code: u16) -> Vec<u8> {
+    use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+    let mut ws = accept(&listener, crate::upload::PROTOCOL).await;
+    let hello = ws.next().await.unwrap().unwrap().into_data();
+    assert_eq!((hello.len(), hello[0]), (17, 1));
+    let mut welcome = vec![0; 32];
+    welcome[0] = 0x81;
+    welcome[24] = 1;
+    ws.send(Message::Binary(welcome.into())).await.unwrap();
+    let mut received = Vec::new();
+    loop {
+        let bytes = ws.next().await.unwrap().unwrap().into_data();
+        if bytes.is_empty() {
+            break;
+        }
+        assert!(bytes.len() <= 64 * 1024);
+        received.extend_from_slice(&bytes);
+    }
+    let reason = if code == 1000 { "" } else { "too large" };
+    ws.close(Some(CloseFrame {
+        code: CloseCode::from(code),
+        reason: reason.into(),
+    }))
+    .await
+    .unwrap();
+    while ws.next().await.is_some() {}
+    received
+}
+
+#[tokio::test]
+async fn uploads_stream_exact_bytes_end_empty_and_succeed_only_on_a_normal_close() {
+    use crate::upload::{File, send};
+    let bytes: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+    let path = std::env::temp_dir().join(format!("rex-upload-test-{}", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+    for (file, code) in [
+        (File::path(path.clone()), 1000),
+        (File::bytes("clipboard.png", bytes.clone()), 1000),
+        (File::bytes("clipboard.png", bytes.clone()), 4009),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(upload_server(listener, code));
+        let size = file.size().unwrap();
+        let result = send(&endpoint, "AAAAAAAAAAAAAAAAAAAAAA", &file, size).await;
+        assert_eq!(server.await.unwrap(), bytes);
+        match code {
+            1000 => result.unwrap(),
+            _ => assert!(format!("{:#}", result.unwrap_err()).contains("too large")),
+        }
+    }
+    std::fs::remove_file(path).unwrap();
 }
 
 const FIXTURE: &str = include_str!("fixtures/block_events.jsonl");
@@ -485,7 +541,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let request = recv(&mut ws).await;
         assert_eq!(request["method"], "session.bootstrap");
         assert_eq!(request["payload"]["event_scope"], "all");
@@ -591,7 +647,7 @@ async fn destroying_a_session_forgets_it_without_an_error() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let request = recv(&mut ws).await;
         reply(&mut ws, &request, 1, serde_json::to_value(boot()).unwrap()).await;
         let destroy = recv(&mut ws).await;
@@ -669,7 +725,7 @@ async fn clipboard_reads_pin_ids_and_count_utf8_bytes_for_both_copy_events() {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let mut ws = accept(&listener, "rex.control.v1").await;
-            welcome(&mut ws, 8).await;
+            welcome(&mut ws, 11).await;
             let mut offset = 0;
             for (index, data) in ["世", "界🦀\n"].into_iter().enumerate() {
                 let request = recv(&mut ws).await;
@@ -718,7 +774,7 @@ async fn clipboard_reads_reject_stalled_truncated_changed_and_oversized_results(
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             let mut ws = accept(&listener, "rex.control.v1").await;
-            welcome(&mut ws, 8).await;
+            welcome(&mut ws, 11).await;
             let request = recv(&mut ws).await;
             send(
                 &mut ws,
@@ -875,7 +931,7 @@ async fn a_slow_prefetch_neither_delays_control_requests_nor_overlaps_another() 
     let (sent, mut started) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let boot = recv(&mut ws).await;
         reply(&mut ws, &boot, 1, boot_with(&[OTHER, THIRD])).await;
         let slow = prefetched(&mut ws, OTHER).await;
@@ -908,7 +964,7 @@ async fn leaving_eligibility_cancels_queued_and_in_flight_fetches() {
     let (sent, mut started) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let boot = recv(&mut ws).await;
         reply(&mut ws, &boot, 1, boot_with(&[OTHER, THIRD])).await;
         let late = prefetched(&mut ws, OTHER).await;
@@ -940,7 +996,7 @@ async fn prefetch_picks_up_new_sessions_and_restarts_after_reconnect() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let boot = recv(&mut ws).await;
         reply(&mut ws, &boot, 1, boot_with(&[OTHER])).await;
         let view = prefetched(&mut ws, OTHER).await;
@@ -955,7 +1011,7 @@ async fn prefetch_picks_up_new_sessions_and_restarts_after_reconnect() {
         // The client drops this connection; a new one fetches every view again.
         assert!(!matches!(ws.next().await, Some(Ok(Message::Text(_)))));
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let boot = recv(&mut ws).await;
         reply(&mut ws, &boot, 1, boot_with(&[OTHER, NEW])).await;
         for id in [OTHER, NEW] {
@@ -989,7 +1045,7 @@ async fn a_failed_prefetch_is_retried_after_a_backoff() {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let mut ws = accept(&listener, "rex.control.v1").await;
-        welcome(&mut ws, 8).await;
+        welcome(&mut ws, 11).await;
         let boot = recv(&mut ws).await;
         reply(&mut ws, &boot, 1, boot_with(&[OTHER, THIRD])).await;
         let view = prefetched(&mut ws, OTHER).await;
@@ -1059,7 +1115,7 @@ impl ThemeServer {
                 if path != "/api/control" {
                     continue;
                 }
-                welcome(&mut ws, 8).await;
+                welcome(&mut ws, 11).await;
                 loop {
                     let request: Value = tokio::select! {
                         message = ws.next() => match message {

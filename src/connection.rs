@@ -356,6 +356,12 @@ pub enum HostCommand {
         block: String,
         command: Command,
     },
+    /// Upload files to the block's machine; Rex types their paths into it once all arrive.
+    Upload {
+        session: String,
+        block: String,
+        files: Vec<crate::upload::File>,
+    },
     Reconnect,
     /// The terminal theme to declare from now on, also while disconnected; none declares
     /// nothing (Follow server).
@@ -848,8 +854,7 @@ fn view_blocks(view: &session::ViewResponse) -> impl Iterator<Item = String> + '
 /// Ask once per block of the selected session what its programs last reported, its title,
 /// and which program runs in the blocks that aren't streamed (streams get process_changed
 /// anyway).
-/// Revision 8 and later only. A failed query leaves the block without activity; it isn't
-/// retried.
+/// A failed query leaves the block without activity; it isn't retried.
 async fn query_activity(
     control: &mut Client,
     shared: &Shared,
@@ -858,7 +863,7 @@ async fn query_activity(
 ) {
     let (session, blocks) = {
         let m = shared.model.lock().expect("host model");
-        if m.protocol.api_revision < 8 || !m.connected {
+        if !m.connected {
             return;
         }
         let Some(view) = m.view() else { return };
@@ -1176,29 +1181,25 @@ async fn run_host(
                 m.activity_epoch += 1;
             });
             let mut state = ControlState::default();
-            if control.welcome().api_revision >= 8 {
-                let request = bootstrap_request(wanted.as_deref(), create.is_some(), workers.values().map(|w| w.session.clone()));
-                let started = Instant::now();
-                shared.update(|m| m.protocol.bootstrap_requests += 1);
-                let result = tokio::time::timeout(Duration::from_secs(8), control.call_with_seq(request)).await;
-                let reply = match result {
-                    Ok(Ok(reply)) => reply,
-                    error => {
-                        // Setup may be partially applied. A graceful close ends the identity;
-                        // never reuse its token or continue this partially initialized socket.
-                        token = None;
-                        let _ = tokio::time::timeout(Duration::from_secs(2), control.close()).await;
-                        return match error {
-                            Ok(Err(error)) => Err(error.into()),
-                            Err(error) => Err(error.into()),
-                            _ => unreachable!(),
-                        };
-                    }
-                };
-                apply_bootstrap(shared, &mut state, reply, started);
-            } else {
-                list(&mut control, shared, &mut state).await?;
-            }
+            let boot = bootstrap_request(wanted.as_deref(), create.is_some(), workers.values().map(|w| w.session.clone()));
+            let started = Instant::now();
+            shared.update(|m| m.protocol.bootstrap_requests += 1);
+            let result = tokio::time::timeout(Duration::from_secs(8), control.call_with_seq(boot)).await;
+            let reply = match result {
+                Ok(Ok(reply)) => reply,
+                error => {
+                    // Setup may be partially applied. A graceful close ends the identity;
+                    // never reuse its token or continue this partially initialized socket.
+                    token = None;
+                    let _ = tokio::time::timeout(Duration::from_secs(2), control.close()).await;
+                    return match error {
+                        Ok(Err(error)) => Err(error.into()),
+                        Err(error) => Err(error.into()),
+                        _ => unreachable!(),
+                    };
+                }
+            };
+            apply_bootstrap(shared, &mut state, reply, started);
             if let Some((label, shell)) = create.take() {
                 // Take before calling: an uncertain response must never create twice.
                 let layout = crate::layout::shell_layout(shell.as_deref(), new_block_theme(shared, theme.as_ref()));
@@ -1273,6 +1274,13 @@ async fn run_host(
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
                         if matches!(command, HostCommand::Reconnect) { return Ok(false); }
                         if let HostCommand::PrefetchViews(sessions) = command { prefetch.set_eligible(sessions); continue; }
+                        if let HostCommand::Upload { session, block, files } = command {
+                            if let Err(error) = upload(&mut control, shared, &endpoint, &session, &block, files).await {
+                                shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
+                                if !matches!(error.downcast_ref::<rexrs::Error>(), Some(rexrs::Error::Api(_)) | None) { return Err(error); }
+                            }
+                            continue;
+                        }
                         if matches!(command, HostCommand::Select(_) | HostCommand::CreateSession { .. }) { preferred = None; }
                         let outcome = handle_command(command, &mut control, shared, &mut workers, &mut state, &mut theme).await;
                         if let Err(error) = outcome {
@@ -1364,6 +1372,73 @@ async fn refresh_after_request(
             result => result?,
         }
     }
+    Ok(())
+}
+
+/// Reserves every file of one drop or paste as a batch, then streams them off the control
+/// loop. Nothing is retried: a failure leaves nothing typed and nothing on the server.
+async fn upload(
+    control: &mut Client,
+    shared: &Shared,
+    endpoint: &str,
+    session: &str,
+    block: &str,
+    files: Vec<crate::upload::File>,
+) -> Result<()> {
+    use crate::upload;
+    if files.is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        control.welcome().api_revision >= upload::MIN_API_REVISION,
+        "this host's Rex server is too old to receive files; update Rex there"
+    );
+    let sizes = files
+        .iter()
+        .map(upload::File::size)
+        .collect::<Result<Vec<_>>>()?;
+    let batch = if files.len() > 1 {
+        Some(upload::new_uuid()?)
+    } else {
+        None
+    };
+    let mut tickets = Vec::with_capacity(files.len());
+    for (index, (file, size)) in files.iter().zip(&sizes).enumerate() {
+        let mut begin = rexrs::api::terminal::UploadBegin::new(
+            format!("upload:{}", upload::new_uuid()?),
+            file.name.clone(),
+            i64::try_from(*size).context("file too large")?,
+        );
+        if let Some(batch) = &batch {
+            begin = begin
+                .batch(batch.clone())
+                .index(index as i64)
+                .count(files.len() as i64);
+        }
+        let reply = tokio::time::timeout(
+            Duration::from_secs(8),
+            control.call(begin.on(session.to_owned(), block.to_owned())),
+        )
+        .await
+        .context("Rex request timed out; upload was not retried")??;
+        tickets.push(reply.ticket);
+    }
+    let shared = shared.clone();
+    let endpoint = endpoint.to_owned();
+    tokio::task::spawn_local(async move {
+        let sends = files
+            .iter()
+            .zip(&tickets)
+            .zip(&sizes)
+            .map(|((file, ticket), size)| upload::send(&endpoint, ticket, file, *size));
+        let failed = futures_util::future::join_all(sends)
+            .await
+            .into_iter()
+            .find_map(Result::err);
+        if let Some(error) = failed {
+            shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
+        }
+    });
     Ok(())
 }
 
@@ -1586,7 +1661,10 @@ async fn handle_command(
                 }
             }
         }
-        HostCommand::Reconnect | HostCommand::Shutdown | HostCommand::PrefetchViews(_) => {
+        HostCommand::Reconnect
+        | HostCommand::Shutdown
+        | HostCommand::PrefetchViews(_)
+        | HostCommand::Upload { .. } => {
             unreachable!()
         }
     }
