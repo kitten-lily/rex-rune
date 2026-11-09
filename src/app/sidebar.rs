@@ -234,6 +234,13 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 .color(rgb(muted())),
         );
     }
+    if let Some(progress) = s.session_progress(index, id) {
+        e = e.child(progress_bar(
+            format!("session-progress:{index}:{id}"),
+            progress,
+            10.,
+        ));
+    }
     if targeted {
         // An overlay, so the outline never shifts the row; above the selected fill.
         e = e.child(

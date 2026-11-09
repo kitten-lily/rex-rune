@@ -575,6 +575,16 @@ impl Workspace {
         Some((word, tone, needing))
     }
 
+    /// The progress bar a session's row draws, as a tab's pill does ([`tab_progress`]), or
+    /// None when it has none or tab activity is hidden.
+    pub fn session_progress(&self, host: usize, session: &str) -> Option<(Option<u8>, u32)> {
+        if !self.settings.notifications.show_in_tabs {
+            return None;
+        }
+        let (fold, _) = super::activity_list::session_activity(&self.hosts[host].model, session)?;
+        tab_progress(&fold)
+    }
+
     pub fn unseen_on(&self, host: usize, window: &str) -> bool {
         self.unseen_done
             .contains(&(self.hosts[host].id, window.to_owned()))
