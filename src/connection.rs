@@ -400,6 +400,14 @@ pub enum HostCommand {
         method: String,
         payload: Value,
     },
+    /// A request that opens a terminal (`session.new_split` or `session.new_window`) with the
+    /// layout `payload["layout"]`, started in the shell directory of `cwd_from`, a block of the
+    /// payload's session, when the server can tell in time; otherwise in the server's default.
+    NewTerminal {
+        method: String,
+        payload: Value,
+        cwd_from: String,
+    },
     /// A mutating request whose caller needs to discard optimistic local state on failure.
     RequestTracked {
         method: String,
@@ -710,6 +718,15 @@ async fn request(control: &mut Client, method: &str, payload: Value) -> Result<V
             .await
             .context("Rex request timed out; action was not retried")??,
     )
+}
+
+/// The working directory of `block`'s shell, if the server can tell within a second. Any
+/// failure means none: a dead transport fails the request that follows instead.
+async fn shell_dir_of(control: &mut Client, session: &str, block: &str) -> Option<String> {
+    let method = format!("{}.process", activity::TERMINAL);
+    let args = json!({"session_id":session,"block_id":block,"args":{}});
+    let reply = tokio::time::timeout(Duration::from_secs(1), control.call_raw(&method, args));
+    activity::shell_dir(&reply.await.ok()?.ok()?)
 }
 
 async fn attach(
@@ -1561,6 +1578,20 @@ async fn handle_command(
         }
         HostCommand::Request { method, payload } => {
             let session_id = payload["session_id"].as_str().map(str::to_owned);
+            request(control, &method, payload).await?;
+            refresh_after_request(control, shared, workers, state, session_id).await?;
+        }
+        HostCommand::NewTerminal {
+            method,
+            mut payload,
+            cwd_from,
+        } => {
+            let session_id = payload["session_id"].as_str().map(str::to_owned);
+            if let Some(session) = &session_id
+                && let Some(dir) = shell_dir_of(control, session, &cwd_from).await
+            {
+                crate::layout::with_cwd(&mut payload["layout"], &dir);
+            }
             request(control, &method, payload).await?;
             refresh_after_request(control, shared, workers, state, session_id).await?;
         }

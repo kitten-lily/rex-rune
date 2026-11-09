@@ -1596,6 +1596,29 @@ impl Workspace {
 
     /// One new terminal for `host`: its default shell, with the declared theme unless the
     /// host refused themes.
+    /// Ask `host` to open a terminal in `session` with `method`, starting in the shell
+    /// directory of the block `cwd_from` when there is one.
+    fn open_terminal(
+        &mut self,
+        host: usize,
+        method: &str,
+        mut payload: Value,
+        session: &str,
+        cwd_from: Option<&str>,
+    ) {
+        payload["session_id"] = json!(session);
+        let method = method.into();
+        let command = match cwd_from {
+            Some(block) => HostCommand::NewTerminal {
+                method,
+                payload,
+                cwd_from: block.into(),
+            },
+            None => HostCommand::Request { method, payload },
+        };
+        self.send(host, command);
+    }
+
     pub fn new_terminal(&mut self, host: usize) -> Value {
         let theme = self
             .term_theme
@@ -1873,8 +1896,13 @@ impl Workspace {
                 &[("Host name", "my-host", ""), ("Endpoint", "https://host.example.ts.net, ssh://user@host[/socket] or unix:///path", "")],
             ),
             Intent::NewWindow => {
-                let layout = self.new_terminal(self.active);
-                self.request("session.new_window", json!({"window_label":DEFAULT_TAB_LABEL,"layout":layout,"focus":true}));
+                let model = self.model();
+                if let Some(session) = model.selected.clone() {
+                    let from = model.focused().map(str::to_owned);
+                    let layout = self.new_terminal(self.active);
+                    let payload = json!({"window_label":DEFAULT_TAB_LABEL,"layout":layout,"focus":true});
+                    self.open_terminal(self.active, "session.new_window", payload, &session, from.as_deref());
+                }
             }
             Intent::Split(direction) => {
                 let model = self.model();
@@ -1883,10 +1911,12 @@ impl Workspace {
                     model.selected.as_deref(),
                     model.window().and_then(|w| w.window_id.as_deref()),
                 ) {
+                    let (block, session) = (block.to_owned(), session.to_owned());
                     let anchor =
-                        self.split_anchor(self.active, session, window, block, direction);
+                        self.split_anchor(self.active, &session, window, &block, direction);
                     let layout = self.new_terminal(self.active);
-                    self.request("session.new_split", split_payload(&anchor, direction, layout));
+                    let payload = split_payload(&anchor, direction, layout);
+                    self.open_terminal(self.active, "session.new_split", payload, &session, Some(&block));
                 }
             }
             Intent::RenameSession => {
@@ -2213,10 +2243,12 @@ impl Workspace {
                     direction,
                 );
                 let layout = self.new_terminal(target.host);
-                request(
-                    self,
+                self.open_terminal(
+                    target.host,
                     "session.new_split",
                     split_payload(&anchor, direction, layout),
+                    &target.session,
+                    Some(&target.block),
                 );
             }
             PaneAction::Zoom => {
