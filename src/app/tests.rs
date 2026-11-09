@@ -4038,6 +4038,31 @@ fn sessions_show_their_activity_in_the_sidebar() {
 }
 
 #[test]
+fn a_session_working_with_progress_draws_a_bar_in_the_sidebar() {
+    use rex_linux::connection::activity::{ProgramState::Working, TerminalProgress::Set};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 1);
+    set_activity(&mut ws, "other:0", &[("", record(Working, true))]);
+    ws.hosts[0]
+        .model
+        .progress
+        .insert("other:0".into(), Set(Some(42)));
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(
+        !has(&rt, "session-word:0:other"),
+        "working progress is a bar, not a word"
+    );
+    assert!(has(&rt, "session-progress:0:other"));
+    assert!(!has(&rt, "session-progress:0:s"));
+    rt.update(|s, _| s.settings.notifications.show_in_tabs = false);
+    settle(&mut rt);
+    assert!(!has(&rt, "session-progress:0:other"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn the_switcher_names_session_activity() {
     let (mut ws, _rx) = tabbed_workspace("single");
     blocked_session(&mut ws, "other", 2);
