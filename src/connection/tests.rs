@@ -623,6 +623,32 @@ fn progress_goes_with_the_process_not_just_its_name() {
 }
 
 #[test]
+fn the_shells_directory_comes_from_the_child_only() {
+    use activity::shell_dir;
+    assert_eq!(
+        shell_dir(&json!({"child":{"cwd":"/srv/app"},"foreground":{"cwd":"/tmp"}})).as_deref(),
+        Some("/srv/app")
+    );
+    assert_eq!(shell_dir(&json!({"foreground":{"cwd":"/tmp"}})), None);
+    assert_eq!(shell_dir(&json!({"child":null})), None);
+    assert_eq!(shell_dir(&json!({"child":{"cwd":""}})), None);
+    assert_eq!(shell_dir(&json!({"child":{"cwd":"rel/dir"}})), None);
+    // macOS: login wraps the shell.
+    let login = json!({"name":"login","cwd":"/"});
+    let zsh = json!({"name":"zsh","cwd":"/Users/me/app"});
+    let vim = json!({"name":"vim","cwd":"/tmp"});
+    assert_eq!(
+        shell_dir(&json!({"child":login,"foreground":zsh,"ancestors":[login]})).as_deref(),
+        Some("/Users/me/app")
+    );
+    assert_eq!(
+        shell_dir(&json!({"child":login,"foreground":vim,"ancestors":[zsh,login]})).as_deref(),
+        Some("/Users/me/app")
+    );
+    assert_eq!(shell_dir(&json!({"child":login})), None);
+}
+
+#[test]
 fn program_names_prefer_the_script_and_drop_login_dashes() {
     let name = |v: Value| activity::program_name(&v);
     assert_eq!(
