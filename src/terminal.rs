@@ -309,10 +309,21 @@ impl Frame {
         Some((row * cols + start, row * cols + end))
     }
     /// Local viewport cropping must retain the newest rows, or the cursor when
-    /// a TUI has positioned it above them. This never changes the server size.
+    /// a TUI has positioned it above them, or the selected search match while the user steps
+    /// through them. This never changes the server size.
     pub fn display_row_start(&self, visible_rows: usize) -> usize {
-        let bottom = (self.rows as usize).saturating_sub(visible_rows.max(1));
-        self.cursor.map_or(bottom, |(_, y)| bottom.min(y as usize))
+        let visible = visible_rows.max(1);
+        let bottom = (self.rows as usize).saturating_sub(visible);
+        let start = self.cursor.map_or(bottom, |(_, y)| bottom.min(y as usize));
+        let Some(found) = self.search.as_ref().and_then(|s| s.selected) else {
+            return start;
+        };
+        let row = usize::from(found.start.1);
+        if row < start {
+            row
+        } else {
+            start.max((row + 1).saturating_sub(visible)).min(bottom)
+        }
     }
 
     pub fn selected_text(&self, a: usize, b: usize) -> String {
@@ -595,6 +606,28 @@ mod tests {
         assert_eq!(cell("C").underline_color, None);
         assert!(cell("D").style.overline);
         assert_eq!(cell("D").style.underline, Underline::None);
+    }
+
+    #[test]
+    fn snapshot_with_kitty_image_in_history_installs_a_terminal() {
+        // A Kitty image payload record follows READY in the snapshot; decoding every record
+        // kind (not only page progress) is what makes such a snapshot usable.
+        let mut terminal = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 10,
+            rows: 3,
+            max_scrollback: 1 << 20,
+        })
+        .unwrap();
+        terminal.set_kitty_image_storage_limit(1 << 20).unwrap();
+        terminal.vt_write(b"\x1b_Ga=T,f=24,s=1,v=1;CQkJ\x1b\\\r\n");
+        for line in 0..2000 {
+            terminal.vt_write(format!("line {line}\r\n").as_bytes());
+        }
+        let snapshot = ghostty_vt::snapshot::encode(&terminal).unwrap();
+        let mut stream = TerminalStream::new(42);
+        stream.feed(&snapshot).unwrap();
+        assert!(stream.terminal.is_some());
+        assert!(stream.text().unwrap().contains("line 0\n"));
     }
 
     #[test]

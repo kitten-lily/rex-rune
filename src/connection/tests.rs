@@ -527,6 +527,99 @@ fn progress_reports_set_and_clear_a_blocks_progress() {
     );
     model.forget_block("b");
     assert!(model.progress.is_empty(), "a closed block's progress goes");
+
+    // A report belongs to the program in the foreground: when another takes its place, or
+    // the shell comes back, the report goes with it; the same program keeps it.
+    let process = |name: Option<&str>| activity::BlockEvent::Process {
+        name: name.map(str::to_owned),
+        pids: name.map(|_| vec![7]).unwrap_or_default(),
+    };
+    model.apply_block_event("s", "b".into(), process(Some("cargo")));
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::BlockEvent::Progress(Some(Set(Some(5)))),
+    );
+    model.apply_block_event("s", "b".into(), process(Some("cargo")));
+    assert_eq!(
+        model.progress.get("b").copied(),
+        Some(Set(Some(5))),
+        "same program"
+    );
+    model.apply_block_event("s", "b".into(), process(None));
+    assert!(
+        model.progress.is_empty(),
+        "the program ended without clearing it"
+    );
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::BlockEvent::Progress(Some(Set(Some(5)))),
+    );
+    model.apply_block_event("s", "b".into(), process(Some("vim")));
+    assert!(
+        model.progress.is_empty(),
+        "another program took the foreground"
+    );
+}
+
+#[test]
+fn progress_goes_when_another_process_of_the_same_name_takes_the_foreground() {
+    use activity::TerminalProgress::Set;
+    let mut model = HostModel::default();
+    let python = |pids: Vec<u64>| activity::BlockEvent::Process {
+        name: Some("python".into()),
+        pids,
+    };
+    let progress = activity::BlockEvent::Progress(Some(Set(Some(42))));
+    model.apply_block_event("s", "b".into(), python(vec![11, 1]));
+    model.apply_block_event("s", "b".into(), progress);
+    model.apply_block_event("s", "b".into(), python(vec![11, 1]));
+    assert_eq!(
+        model.progress.get("b").copied(),
+        Some(Set(Some(42))),
+        "the same process keeps its report"
+    );
+    model.apply_block_event("s", "b".into(), python(vec![12, 1]));
+    assert!(
+        model.progress.is_empty(),
+        "a new python must not inherit the last one's report"
+    );
+}
+
+#[test]
+fn progress_goes_with_the_process_not_just_its_name() {
+    use activity::{BlockEvent, TerminalProgress::Set};
+    let mut model = HostModel::default();
+    let python = |pids: &[u64]| BlockEvent::Process {
+        name: Some("python".into()),
+        pids: pids.to_vec(),
+    };
+    let report = BlockEvent::Progress(Some(Set(Some(42))));
+    model.apply_block_event("s", "b".into(), python(&[11, 1]));
+    model.apply_block_event("s", "b".into(), report.clone());
+
+    // Rex repeats `process_changed` when the process only moves directory, and to each client
+    // that starts receiving the terminal.
+    model.apply_block_event("s", "b".into(), python(&[11, 1]));
+    assert_eq!(
+        model.progress.get("b"),
+        Some(&Set(Some(42))),
+        "same process"
+    );
+
+    // A child in the foreground leaves the program that reported running beneath it.
+    model.apply_block_event("s", "b".into(), python(&[12, 11, 1]));
+    assert_eq!(model.progress.get("b"), Some(&Set(Some(42))), "same parent");
+
+    // Back to the parent: the foreground process that may have reported is gone.
+    model.apply_block_event("s", "b".into(), python(&[11, 1]));
+    assert!(model.progress.is_empty(), "the child ended");
+
+    // Another run of the same program, seen without the shell between them.
+    model.apply_block_event("s", "b".into(), report);
+    model.apply_block_event("s", "b".into(), python(&[13, 1]));
+    assert!(model.progress.is_empty(), "the job was replaced");
 }
 
 #[test]
@@ -1738,4 +1831,73 @@ fn working_directories_follow_pwd_reports() {
     assert_eq!(activity::cwd_path("/plain"), "/plain");
     assert_eq!(activity::cwd_path("file:///x"), "/x");
     assert_eq!(activity::cwd_path("file://h/bad%zz"), "/bad%zz");
+}
+
+#[tokio::test]
+async fn searching_needs_no_server_while_the_host_reconnects() {
+    // Nothing listens here, so the host stays between attempts.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let host = HostConnection::spawn(endpoint, None, None, None, true, None);
+    let send = |command| {
+        host.commands
+            .send(HostCommand::Terminal {
+                session: "s".into(),
+                block: "b".into(),
+                command,
+            })
+            .unwrap();
+    };
+    let notice = || host.model.lock().unwrap().notice.clone();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    send(Command::Search("needle".into()));
+    send(Command::SearchStep(true));
+    send(Command::Search(String::new()));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(notice(), None, "a search is this client's own");
+
+    // Input still isn't taken for later.
+    send(Command::Reconnect);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        notice().is_some_and(|n| n.contains("not sent while disconnected")),
+        "{:?}",
+        notice()
+    );
+    drop(host);
+}
+
+#[tokio::test]
+async fn a_worker_gets_its_search_whatever_the_control_connection_is_doing() {
+    let (commands, received) = flume::unbounded();
+    let workers = HashMap::from([(
+        "b".to_owned(),
+        PaneWorker {
+            session: "s".into(),
+            commands,
+            task: tokio::spawn(async {}),
+            size: None,
+        },
+    )]);
+    assert!(forward_search(
+        &workers,
+        "b",
+        &Command::Search("needle".into())
+    ));
+    assert!(forward_search(&workers, "b", &Command::SearchStep(false)));
+    assert!(
+        forward_search(&workers, "gone", &Command::SearchStep(false)),
+        "a closed pane's search goes nowhere, and needs no notice"
+    );
+    assert!(!forward_search(&workers, "b", &Command::Reconnect));
+    assert!(matches!(
+        received.try_recv(),
+        Ok(DataCommand::Search(needle)) if needle == "needle"
+    ));
+    assert!(matches!(
+        received.try_recv(),
+        Ok(DataCommand::SearchStep(false))
+    ));
+    assert!(received.try_recv().is_err());
 }

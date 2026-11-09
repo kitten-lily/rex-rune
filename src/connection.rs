@@ -112,6 +112,8 @@ pub struct Model {
     pub revision: u64,
     pub restore_generation: u64,
     pub input_events: u64,
+    /// Words for the user from the pane's worker (a failed search), taken once shown.
+    pub notice: Option<String>,
 }
 
 #[derive(Clone)]
@@ -279,10 +281,23 @@ impl HostModel {
                 }
             }
             BlockEvent::Process { name, pids } => {
+                // A progress report belongs to the program in the foreground; one that ends
+                // without clearing its report (a crash, a kill) must not leave it on the tab.
+                // Another run of the same program has the same name, so its pid counts too;
+                // a child taking the foreground leaves its parent's pid in the chain.
+                let was = self.programs.get(&block).cloned();
+                let left = self
+                    .foreground
+                    .get(&block)
+                    .and_then(|chain| chain.first())
+                    .is_some_and(|pid| !pids.contains(pid));
                 match name {
                     Some(name) => self.programs.insert(block.clone(), name),
                     None => self.programs.remove(&block),
                 };
+                if left || self.programs.get(&block) != was.as_ref() {
+                    self.progress.remove(&block);
+                }
                 if pids.is_empty() {
                     self.foreground.remove(&block);
                 } else {
@@ -1130,7 +1145,7 @@ struct Startup {
 }
 
 async fn run_host(
-    endpoint: String,
+    configured: String,
     startup: Startup,
     commands: flume::Receiver<HostCommand>,
     sender: flume::Sender<HostCommand>,
@@ -1147,8 +1162,22 @@ async fn run_host(
     let mut retry = 0;
     let mut prefetch = prefetch::Prefetch::default();
     let mut probes = probes::Probes::default();
+    // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
+    // fresh one, and its end is a disconnect like any other.
+    let ssh = crate::ssh::Target::parse(&configured)?;
+    let mut tunnel: Option<crate::ssh::Tunnel> = None;
     loop {
         let result: Result<bool> = async {
+            let endpoint = match &ssh {
+                Some(target) => {
+                    shared.status("Connecting over SSH…", false);
+                    let opened = crate::ssh::Tunnel::open(target).await?;
+                    let local = opened.endpoint().to_owned();
+                    tunnel = Some(opened);
+                    local
+                }
+                None => configured.clone(),
+            };
             let mut control = transport::control(&endpoint, token.as_deref()).await?;
             let identity = control.welcome().client.as_ref().context("Rex client identity")?;
             token = Some(identity.reconnect_token.clone());
@@ -1278,6 +1307,7 @@ async fn run_host(
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
                     }
+                    error = crate::ssh::closed(&mut tunnel) => return Err(error),
                     command = commands.recv_async() => {
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
@@ -1303,6 +1333,7 @@ async fn run_host(
                 }
             }
         }.await;
+        tunnel = None;
         if matches!(result, Ok(true)) {
             return Ok(());
         }
@@ -1334,6 +1365,7 @@ async fn run_host(
                     Ok(HostCommand::Terminal { block, command: Command::Resize(a,b,c,d), .. }) => {
                         if let Some(worker) = workers.get_mut(&block) { worker.size = Some((a,b,c,d)); }
                     }
+                    Ok(HostCommand::Terminal { block, command, .. }) if forward_search(&workers, &block, &command) => {}
                     Ok(_) => shared.update(|m| m.notice = Some("Action not sent while disconnected. Try it again after reconnecting.".into())),
                 }
             }
@@ -1351,6 +1383,9 @@ async fn run_host(
                 }
                 HostCommand::RequestTracked { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
+                }
+                HostCommand::Terminal { block, command, .. } => {
+                    forward_search(&workers, &block, &command);
                 }
                 _ => {}
             }
@@ -1381,6 +1416,21 @@ async fn refresh_after_request(
         }
     }
     Ok(())
+}
+
+/// A search runs on the pane's own terminal, so it needs no server: it reaches the pane's worker
+/// even while the host reconnects, or closing a search then would leave its highlights behind.
+/// False for any other command.
+fn forward_search(workers: &HashMap<String, PaneWorker>, block: &str, command: &Command) -> bool {
+    let command = match command {
+        Command::Search(needle) => DataCommand::Search(needle.clone()),
+        Command::SearchStep(older) => DataCommand::SearchStep(*older),
+        _ => return false,
+    };
+    if let Some(worker) = workers.get(block) {
+        let _ = worker.commands.send(command);
+    }
+    true
 }
 
 /// Reserves every file of one drop or paste as a batch, then streams them off the control
@@ -1757,9 +1807,10 @@ async fn run_data(
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
                         Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; dirty = true; },
                         Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); dirty = true; },
-                        Ok(DataCommand::Search(needle)) => { search.set_needle(stream.terminal.as_ref(), needle)?; dirty = true; },
+                        // A search that fails is dropped with a notice; the terminal's stream is not its to end.
+                        Ok(DataCommand::Search(needle)) => { if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } dirty = true; },
                         // Ghostty scrolls the selected match into view.
-                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &stream.terminal { search.step(terminal, older)?; selection.after_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &stream.terminal { if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } selection.after_scroll(terminal)?; dirty = true; },
                         Ok(DataCommand::Reconnect) => { shared.status("Reconnecting terminal…", false); return Ok(false); }
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
@@ -1768,10 +1819,16 @@ async fn run_data(
                         if stream.render_held(Instant::now())? { continue; }
                         if let Some(terminal) = &mut stream.terminal {
                             selection.tick(terminal)?;
-                            let search_pending = search.update(terminal)?;
+                            let search_pending = match search.update(terminal) {
+                                Ok(pending) => pending,
+                                Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); false }
+                            };
                             let mut frame = renderer.frame(terminal)?;
                             frame.selection_revision = selection.revision;
-                            frame.search = search.results(terminal)?;
+                            frame.search = match search.results(terminal) {
+                                Ok(results) => results,
+                                Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); None }
+                            };
                             let frame = Arc::new(frame);
                             let mut transitioned = false;
                             shared.update(|m| {

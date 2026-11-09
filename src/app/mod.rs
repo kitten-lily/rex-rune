@@ -2,6 +2,7 @@
 mod activity;
 mod activity_list;
 mod dialogs;
+mod discover;
 mod fonts;
 mod input;
 mod integrations;
@@ -148,6 +149,15 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     }
     if s.notices.iter().any(|n| !n.sticky) {
         tx.wake_after(Duration::from_secs(1));
+    }
+    // A pane waiting for a frame at its size draws anyway at its deadline; be awake for it.
+    let now = std::time::Instant::now();
+    for term in s.terminals.values_mut() {
+        if term.draw_anyway(now) {
+            changed = true;
+        } else if let Some(deadline) = term.draws_anyway_at() {
+            tx.wake_after(deadline - now);
+        }
     }
     changed
 }

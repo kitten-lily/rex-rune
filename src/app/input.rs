@@ -86,6 +86,18 @@ pub fn zoom_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
+/// Opens the focused pane's search field.
+pub const SEARCH: &str = "client.search";
+
+/// Runs the client action a binding names. False when no action has that name.
+pub fn run_action(s: &mut Workspace, name: &str) -> bool {
+    match name {
+        SEARCH => s.open_search(),
+        _ => return false,
+    }
+    true
+}
+
 /// Workspace shortcuts with no popup open. True when one ran.
 fn shortcut(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     let m = ev.mods;
@@ -103,7 +115,7 @@ fn shortcut(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
         } else if letter(ev, tx, 'd') {
             s.perform(Intent::Split("horizontal"), tx);
         } else if letter(ev, tx, 'f') {
-            s.open_search();
+            run_action(s, SEARCH);
         } else if letter(ev, tx, 's') {
             s.perform(Intent::CycleColumnWidth, tx);
         } else if letter(ev, tx, 'm') {

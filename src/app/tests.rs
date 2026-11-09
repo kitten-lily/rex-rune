@@ -2186,8 +2186,8 @@ fn background_bells_latch_until_their_tab_is_seen() {
 }
 
 #[test]
-fn a_tabs_progress_report_shows_below_trouble_and_above_done() {
-    use super::activity::{tab_activity, tab_word};
+fn a_tabs_progress_report_is_a_bar_while_working_and_a_word_when_paused_or_failed() {
+    use super::activity::{tab_activity, tab_progress, tab_word};
     use rex_linux::connection::activity::{ProgramState::Blocked, TerminalProgress::*};
     let (mut ws, _rx) = tabbed_workspace("single");
     let model = &mut ws.hosts[0].model;
@@ -2195,30 +2195,73 @@ fn a_tabs_progress_report_shows_below_trouble_and_above_done() {
     let word = |model: &rex_linux::connection::HostModel, tab: usize, done: bool| {
         tab_word(&tab_activity(model, &view.windows[tab]), done, false).map(|(w, _)| w.into_owned())
     };
-    for (progress, expected) in [
-        (Set(Some(42)), "42%"),
-        (Set(None), "Working"),
-        (Indeterminate, "Working"),
-        (Paused(Some(7)), "Paused 7%"),
-        (Paused(None), "Paused"),
-        (Error(Some(3)), "Error"),
+    let bar = |model: &rex_linux::connection::HostModel, tab: usize| {
+        tab_progress(&tab_activity(model, &view.windows[tab])).map(|(n, _)| n)
+    };
+    // A working program's report is a bar and no word; Done still shows while it works.
+    for (progress, fraction) in [
+        (Set(Some(42)), Some(42)),
+        (Set(None), None),
+        (Indeterminate, None),
+    ] {
+        model.progress.insert("block:a".into(), progress);
+        assert_eq!(word(model, 0, false), None, "{progress:?}");
+        assert_eq!(word(model, 0, true).as_deref(), Some("Done"));
+        assert_eq!(bar(model, 0), Some(fraction), "{progress:?}");
+    }
+    // Paused and failed reports are trouble, so they carry a word, and keep the bar.
+    for (progress, expected, fraction) in [
+        (Paused(Some(7)), "Paused 7%", Some(7)),
+        (Paused(None), "Paused", None),
+        (Error(Some(3)), "Error", Some(3)),
     ] {
         model.progress.insert("block:a".into(), progress);
         assert_eq!(word(model, 0, true).as_deref(), Some(expected));
+        assert_eq!(bar(model, 0), Some(fraction));
     }
     // Across a split, an error beats a pause beats progress.
     model.progress.insert("block:b".into(), Set(Some(10)));
     model.progress.insert("block:c".into(), Paused(Some(20)));
     assert_eq!(word(model, 1, false).as_deref(), Some("Paused 20%"));
+    assert_eq!(bar(model, 1), Some(Some(20)));
     model.progress.insert("block:b".into(), Error(None));
     assert_eq!(word(model, 1, false).as_deref(), Some("Error"));
-    // OSC 7501 trouble still comes first.
+    // OSC 7501 trouble still comes first, and takes the bar with it.
     model.activity.insert(
         "block:a".into(),
         [("".into(), record(Blocked, true))].into(),
     );
     assert_eq!(word(model, 0, false).as_deref(), Some("Needs input"));
+    assert_eq!(bar(model, 0), None);
     std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_working_progress_report_draws_a_bar_on_its_tab_and_pane() {
+    use rex_linux::connection::activity::TerminalProgress::Set;
+    let (mut ws, _rx) = tabbed_workspace("split");
+    ws.hosts[0]
+        .model
+        .progress
+        .insert("block:c".into(), Set(Some(60)));
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "tab-progress:split"));
+    assert!(has(&rt, "pane-progress:block:c"));
+    assert!(
+        !has(&rt, "pane-progress:block:b"),
+        "only the pane that reported"
+    );
+    assert!(!has(&rt, "tab-word:split"), "working is a bar, not a word");
+    rt.update(|s, _| s.settings.notifications.show_in_tabs = false);
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        !has(&rt, "tab-progress:split"),
+        "the activity switch hides it"
+    );
+    assert!(!has(&rt, "pane-progress:block:c"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
 #[test]
@@ -2240,7 +2283,7 @@ fn a_titled_pane_shows_its_title_but_renames_from_its_label() {
 
 #[test]
 fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
-    use super::activity::{pane_activity, program_icon, tab_activity, tab_word};
+    use super::activity::{pane_activity, program_icon, tab_activity, tab_progress, tab_word};
     use rex_linux::connection::activity::{BlockedKind, ProgramState::*, TerminalProgress::Set};
     let (mut ws, _rx) = tabbed_workspace("split");
     let model = &mut ws.hosts[0].model;
@@ -2256,27 +2299,30 @@ fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
         .activity
         .insert("block:c".into(), [("".into(), working)].into());
     let word = |a| tab_word(&a, false, false).map(|(w, _)| w.into_owned());
+    let bar = |a| tab_progress(&a).map(|(n, _)| n);
     assert_eq!(
         word(pane_activity(model, "block:b")).as_deref(),
         Some("Needs approval")
     );
-    assert_eq!(
-        word(pane_activity(model, "block:c")).as_deref(),
-        Some("40%")
-    );
+    // A working record's percentage is a bar on its pane, not a word.
+    assert_eq!(word(pane_activity(model, "block:c")), None);
+    assert_eq!(bar(pane_activity(model, "block:c")), Some(Some(40)));
     let view = model.view().unwrap().clone();
     assert_eq!(
         word(tab_activity(model, &view.windows[1])).as_deref(),
         Some("Needs approval")
     );
+    assert_eq!(
+        bar(tab_activity(model, &view.windows[1])),
+        None,
+        "trouble has the tab's attention"
+    );
     // An OSC 9;4 report beats the record's own progress.
     model.progress.insert("block:c".into(), Set(Some(10)));
-    assert_eq!(
-        word(pane_activity(model, "block:c")).as_deref(),
-        Some("10%")
-    );
-    // A pane with nothing to report says nothing.
+    assert_eq!(bar(pane_activity(model, "block:c")), Some(Some(10)));
+    // A pane with nothing to report shows nothing.
     assert_eq!(word(pane_activity(model, "block:a")), None);
+    assert_eq!(bar(pane_activity(model, "block:a")), None);
     // Equal Working records: the one with progress decides, whatever its id order.
     model.progress.clear();
     for ids in [("a", "z"), ("z", "a")] {
@@ -2286,10 +2332,7 @@ fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
             "block:c".into(),
             [(ids.0.into(), with), (ids.1.into(), record(Working, true))].into(),
         );
-        assert_eq!(
-            word(pane_activity(model, "block:c")).as_deref(),
-            Some("25%")
-        );
+        assert_eq!(bar(pane_activity(model, "block:c")), Some(Some(25)));
     }
     // Across panes too: block:b Working without progress, block:c Working with 25%.
     model.activity.insert(
@@ -2297,10 +2340,8 @@ fn each_pane_reports_its_own_activity_and_osc_7501_progress() {
         [("".into(), record(Working, true))].into(),
     );
     let view = model.view().unwrap().clone();
-    assert_eq!(
-        word(tab_activity(model, &view.windows[1])).as_deref(),
-        Some("25%")
-    );
+    assert_eq!(bar(tab_activity(model, &view.windows[1])), Some(Some(25)));
+    assert_eq!(word(tab_activity(model, &view.windows[1])), None);
     assert!(std::ptr::eq(
         program_icon(Some("claude-code")),
         &super::theme::CLAUDE
@@ -3624,80 +3665,6 @@ fn a_palette_round_trip_leaves_terminal_output_and_its_selection_alone() {
 }
 
 #[test]
-fn ctrl_shift_f_searches_the_focused_terminal_without_typing_into_it() {
-    use rex_linux::connection::{Command, Connection, TerminalSender};
-    let (mut ws, _rx) = tabbed_workspace("single");
-    let (sender, sent) = flume::unbounded();
-    let connection = Connection {
-        model: Default::default(),
-        commands: TerminalSender::new(sender, "s".into(), "block:a".into()),
-        wake: flume::unbounded().1,
-    };
-    {
-        let mut m = connection.model.lock().unwrap();
-        m.connected = true;
-        m.control_connected = true;
-    }
-    let key = ws.term_key("block:a");
-    ws.terminals
-        .insert(key.clone(), super::term::Term::new(connection));
-    let mut rt = runtime(ws);
-    rt.frame(1. / 60.);
-    let sent = move || -> Vec<String> {
-        sent.try_iter()
-            .filter_map(|c| match c {
-                HostCommand::Terminal { command, .. } => Some(match command {
-                    Command::Search(needle) => format!("search {needle}"),
-                    Command::SearchStep(older) => format!("step older={older}"),
-                    Command::Key(_) => "key".into(),
-                    _ => "other".into(),
-                }),
-                _ => None,
-            })
-            .collect()
-    };
-
-    ctrl_shift(&mut rt, 'f');
-    assert!(
-        focused(&rt).is_some_and(|path| path.contains("search-field:block:a")),
-        "the search field takes the keyboard: {:?}",
-        focused(&rt)
-    );
-    for c in ["n", "e"] {
-        press(&mut rt, Key::Text(c.into()));
-    }
-    press(&mut rt, Key::Enter);
-    rt.key(KeyEvent {
-        key: Key::Enter,
-        mods: Mods {
-            shift: true,
-            ..Mods::default()
-        },
-    });
-    rt.frame(1. / 60.);
-    assert_eq!(
-        sent(),
-        [
-            "search n",
-            "search ne",
-            "step older=true",
-            "step older=false"
-        ],
-        "typing searches, Enter steps, and nothing reaches the program"
-    );
-    assert!(has(&rt, "search:block:a"));
-
-    press(&mut rt, Key::Escape);
-    assert_eq!(sent(), ["search "], "Escape clears the search");
-    assert!(rt.state.terminals[&key].search.is_none());
-    assert!(!has(&rt, "search:block:a"));
-    assert_eq!(focused(&rt), None, "the terminal has the keyboard again");
-    press(&mut rt, Key::Text("x".into()));
-    assert_eq!(sent(), ["key"]);
-    std::fs::remove_file(&rt.state.settings_path).ok();
-}
-
-#[test]
 fn files_dropped_on_a_pane_upload_there_and_focus_it() {
     use rex_linux::connection::{Connection, TerminalSender};
     let (mut ws, rx) = tabbed_workspace("split");
@@ -4103,4 +4070,617 @@ fn unseen_done_reaches_the_session_row() {
     ws.settings.notifications.show_in_tabs = false;
     assert!(ws.session_word(0, "s").is_none());
     std::fs::remove_file(&ws.settings_path).ok();
+}
+
+/// A tailnet of four machines: a Rex server with built-in Tailscale, a Linux box with
+/// Tailscale SSH, an Android phone, and one that is offline, plus an iPhone that is never
+/// listed.
+fn tailnet() -> Vec<rex_linux::tailnet::Machine> {
+    let machine = |name: &str, os: &str, online: bool, ssh: bool| rex_linux::tailnet::Machine {
+        name: name.into(),
+        address: format!("{name}.tail1234.ts.net"),
+        host_name: None,
+        os: os.into(),
+        online,
+        ssh,
+        this_machine: false,
+    };
+    vec![
+        rex_linux::tailnet::Machine {
+            this_machine: true,
+            ..machine("here", "linux", true, false)
+        },
+        machine("studio-rex", "macOS", true, false),
+        machine("box", "linux", true, true),
+        machine("away", "linux", false, false),
+        machine("phone", "iOS", true, false),
+        machine("pixel", "android", true, true),
+    ]
+}
+
+fn rex_at(address: &str) -> rex_linux::tailnet::Probe {
+    rex_linux::tailnet::Probe::Rex(format!("https://{address}"))
+}
+
+fn open_add_host(rt: &mut Runtime<Workspace>) {
+    let ran = rt.state.discovery.ran;
+    click(rt, "add-host");
+    assert!(
+        rt.state.panel.is_some(),
+        "the sidebar's Add host opens the list"
+    );
+    let generation = rt.state.discovery.generation;
+    assert_eq!(
+        rt.state.discovery.ran,
+        ran + 1,
+        "the list looks at the tailnet once"
+    );
+    // As the scan thread would: through the handle, so the list redraws.
+    rt.update(|s, _| {
+        s.apply_scan(generation, Ok(tailnet()));
+        s.apply_probe(
+            generation,
+            "studio-rex.tail1234.ts.net",
+            rex_at("studio-rex.tail1234.ts.net"),
+        );
+        s.apply_probe(
+            generation,
+            "box.tail1234.ts.net",
+            rex_linux::tailnet::Probe::Nothing,
+        );
+        s.apply_probe(
+            generation,
+            "pixel.tail1234.ts.net",
+            rex_linux::tailnet::Probe::Nothing,
+        );
+    });
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+}
+
+#[test]
+fn add_host_lists_the_tailnet_by_kind_and_hides_iphones_and_this_machine() {
+    let mut ws = workspace();
+    ws.sidebar.toggle();
+    // Tall enough for the sidebar's Add host button to be on screen.
+    let mut rt = runtime_at(ws, (1024., 900.));
+    click(&mut rt, "add-host");
+    let panel = rt.state.panel.as_ref().expect("the Add host list");
+    assert!(matches!(panel.kind, PanelKind::Discover));
+    assert!(panel.is_list());
+    assert_eq!(
+        rt.state.discovery_empty_message(),
+        "Looking at your tailnet…"
+    );
+    let generation = rt.state.discovery.generation;
+    rt.state.apply_scan(generation, Ok(tailnet()));
+    let before: Vec<String> = rt
+        .state
+        .entries()
+        .iter()
+        .map(|e| e.detail.clone())
+        .collect();
+    assert!(
+        before.iter().any(|d| d.starts_with("Checking for Rex…")),
+        "online machines are checked: {before:?}"
+    );
+    rt.state.apply_probe(
+        generation,
+        "studio-rex.tail1234.ts.net",
+        rex_at("studio-rex.tail1234.ts.net"),
+    );
+    rt.state.apply_probe(
+        generation,
+        "box.tail1234.ts.net",
+        rex_linux::tailnet::Probe::Nothing,
+    );
+    rt.state.apply_probe(
+        generation,
+        "pixel.tail1234.ts.net",
+        rex_linux::tailnet::Probe::Unknown("https 443: timed out".into()),
+    );
+    rt.state.apply_probe(
+        generation - 1,
+        "away.tail1234.ts.net",
+        rex_at("away.tail1234.ts.net"),
+    );
+    let entries = rt.state.entries();
+    let rows: Vec<(String, String, String)> = entries
+        .iter()
+        .map(|e| (e.group.clone(), e.label.clone(), e.detail.clone()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "Rex servers".into(),
+                "studio-rex".into(),
+                "Rex over Tailscale · macOS".into()
+            ),
+            (
+                "Tailnet".into(),
+                "box".into(),
+                "Tailscale SSH · Linux".into()
+            ),
+            (
+                "Tailnet".into(),
+                "pixel".into(),
+                "Rex check failed · Tailscale SSH · Android".into()
+            ),
+            ("Offline".into(), "away".into(), "Offline · Linux".into()),
+            ("".into(), "Enter an endpoint…".into(), "".into()),
+        ],
+        "an old scan's probe changes nothing; a failed check is said, not taken as absence"
+    );
+    assert!(matches!(entries[0].action, Intent::AddMachine(1)));
+    assert!(matches!(entries[1].action, Intent::MachineForm(2)));
+    assert!(matches!(entries[2].action, Intent::MachineForm(5)));
+    assert!(matches!(entries[3].action, Intent::MachineForm(3)));
+    assert!(entries[4].footer);
+    assert!(matches!(entries[4].action, Intent::AddHostManually));
+    assert!(
+        rt.state
+            .machine_form_note(5)
+            .contains("https 443: timed out"),
+        "the form says what the check found"
+    );
+    assert!(
+        rt.state
+            .machine_form_note(2)
+            .contains("Nothing answered on ports 443 or 7297"),
+        "{}",
+        rt.state.machine_form_note(2)
+    );
+
+    // A Rex server on port 7297 is one too, and says so.
+    rt.state.apply_probe(
+        generation,
+        "box.tail1234.ts.net",
+        rex_linux::tailnet::Probe::Rex("https://box.tail1234.ts.net:7297".into()),
+    );
+    let entries = rt.state.entries();
+    assert_eq!(entries[1].label, "box");
+    assert_eq!(entries[1].group, "Rex servers");
+    assert!(entries[1].detail.starts_with("Rex on port 7297"));
+    assert!(matches!(entries[1].action, Intent::AddMachine(2)));
+
+    rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("bo");
+    rt.state.query_changed();
+    let names: Vec<String> = rt.state.entries().iter().map(|e| e.label.clone()).collect();
+    assert_eq!(names, ["box", "Enter an endpoint…"]);
+
+    rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("nothing");
+    rt.state.query_changed();
+    assert_eq!(
+        rt.state.discovery_empty_message(),
+        "No machine by that name on your tailnet."
+    );
+    rt.state.apply_scan(
+        generation,
+        Err("Tailscale isn't installed on this machine".into()),
+    );
+    assert_eq!(rt.state.entries().len(), 1, "only the footer remains");
+    assert_eq!(
+        rt.state.discovery_empty_message(),
+        "Tailscale isn't installed on this machine"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_rex_server_on_the_tailnet_is_added_with_one_press() {
+    let mut ws = workspace();
+    ws.sidebar.toggle();
+    // Tall enough for the sidebar's Add host button to be on screen.
+    let mut rt = runtime_at(ws, (1024., 900.));
+    open_add_host(&mut rt);
+    assert_eq!(rt.state.panel.as_ref().unwrap().selected, 0);
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none(), "added and closed");
+    assert_eq!(rt.state.settings.hosts.len(), 2);
+    let host = &rt.state.settings.hosts[1];
+    assert_eq!(host.label, "studio-rex");
+    assert_eq!(host.endpoint, "https://studio-rex.tail1234.ts.net");
+    assert_eq!(rt.state.active, 1, "the new host is the active one");
+    assert_eq!(rt.state.hosts.len(), 2, "and it is connecting");
+    let saved = Settings::load(&rt.state.settings_path).unwrap();
+    assert_eq!(
+        saved.hosts[1].endpoint,
+        "https://studio-rex.tail1234.ts.net"
+    );
+
+    // Listed again, it is marked as added; pressing it offers another login over SSH
+    // rather than adding the same endpoint twice.
+    open_add_host(&mut rt);
+    let entries = rt.state.entries();
+    assert_eq!(entries[0].label, "studio-rex");
+    assert!(entries[0].current && entries[0].enabled);
+    assert!(
+        entries[0]
+            .detail
+            .starts_with("Added as studio-rex · Rex over Tailscale")
+    );
+    assert!(matches!(entries[0].action, Intent::MachineForm(1)));
+    press(&mut rt, Key::Enter);
+    let panel = rt.state.panel.as_ref().expect("the SSH form");
+    assert!(matches!(panel.kind, PanelKind::Form(Form::AddSsh(1))));
+    assert!(
+        rt.state
+            .machine_form_note(1)
+            .contains("Rex also answers at https://studio-rex.tail1234.ts.net"),
+        "{}",
+        rt.state.machine_form_note(1)
+    );
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("root");
+    click(&mut rt, "save-form");
+    assert_eq!(
+        rt.state.settings.hosts.len(),
+        3,
+        "a second login to the machine"
+    );
+    assert_eq!(
+        rt.state.settings.hosts[2].endpoint,
+        "ssh://root@studio-rex.tail1234.ts.net"
+    );
+    open_add_host(&mut rt);
+    let entries = rt.state.entries();
+    assert!(
+        entries[0]
+            .detail
+            .starts_with("Added as studio-rex, studio-rex · "),
+        "{}",
+        entries[0].detail
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn another_machine_takes_a_user_and_connects_over_ssh() {
+    let mut ws = workspace();
+    ws.sidebar.toggle();
+    // Tall enough for the sidebar's Add host button to be on screen.
+    let mut rt = runtime_at(ws, (1024., 900.));
+    open_add_host(&mut rt);
+    rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("box");
+    rt.state.query_changed();
+    press(&mut rt, Key::Enter);
+    let panel = rt.state.panel.as_ref().expect("the SSH form");
+    assert!(matches!(panel.kind, PanelKind::Form(Form::AddSsh(2))));
+    assert_eq!(panel.title, "Add box over SSH");
+    assert_eq!(panel.inputs[0].text, "box");
+    assert_eq!(
+        panel.inputs[1].text,
+        super::discover::local_user(),
+        "the local user name is offered"
+    );
+    assert_eq!(
+        panel.inputs[2].text, "",
+        "the socket is looked up unless named"
+    );
+    assert!(
+        rt.state
+            .machine_form_note(2)
+            .contains("Tailscale SSH is on"),
+        "{}",
+        rt.state.machine_form_note(2)
+    );
+    assert!(has(&rt, "save-form"));
+
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("me@box");
+    click(&mut rt, "save-form");
+    let panel = rt.state.panel.as_ref().expect("still the form");
+    assert_eq!(
+        panel.error.as_deref(),
+        Some("Enter one user name, without the host")
+    );
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("");
+    click(&mut rt, "save-form");
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().error.as_deref(),
+        Some("Enter the user to log in as")
+    );
+
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("admin");
+    rt.state.panel.as_mut().unwrap().inputs[2] = rune::TextEdit::new("run/rex/server.sock");
+    click(&mut rt, "save-form");
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().error.as_deref(),
+        Some("Enter an absolute socket path, such as /run/rex/server.sock")
+    );
+
+    rt.state.panel.as_mut().unwrap().inputs[2] = rune::TextEdit::new("");
+    click(&mut rt, "save-form");
+    assert!(rt.state.panel.is_none());
+    let host = &rt.state.settings.hosts[1];
+    assert_eq!(host.label, "box");
+    assert_eq!(host.endpoint, "ssh://admin@box.tail1234.ts.net");
+    assert_eq!(rt.state.active, 1);
+
+    // The same machine, as another user at a named socket, is another host.
+    open_add_host(&mut rt);
+    rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("box");
+    rt.state.query_changed();
+    let entries = rt.state.entries();
+    assert!(entries[0].current, "marked as added");
+    assert!(entries[0].detail.starts_with("Added as box · "));
+    press(&mut rt, Key::Enter);
+    rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("box (shared)");
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("ops");
+    rt.state.panel.as_mut().unwrap().inputs[2] = rune::TextEdit::new("/run/rex/server.sock");
+    click(&mut rt, "save-form");
+    assert!(
+        rt.state.panel.is_none(),
+        "{:?}",
+        rt.state.panel.as_ref().unwrap().error
+    );
+    assert_eq!(
+        rt.state.settings.hosts[2].endpoint,
+        "ssh://ops@box.tail1234.ts.net/run/rex/server.sock"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn escape_walks_back_from_a_machine_form_to_the_list_and_settings() {
+    let mut ws = workspace();
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::Settings, &mut tx);
+    ws.perform(Intent::AddHost, &mut tx);
+    let generation = ws.discovery.generation;
+    ws.apply_scan(generation, Ok(tailnet()));
+    ws.apply_probe(
+        generation,
+        "studio-rex.tail1234.ts.net",
+        rex_at("studio-rex.tail1234.ts.net"),
+    );
+    ws.perform(Intent::MachineForm(3), &mut tx);
+    let mut rt = runtime(ws);
+    assert!(matches!(
+        rt.state.panel.as_ref().unwrap().kind,
+        PanelKind::Form(Form::AddSsh(3))
+    ));
+    press(&mut rt, Key::Escape);
+    assert!(
+        matches!(rt.state.panel.as_ref().unwrap().kind, PanelKind::Discover),
+        "Escape on the form returns to the list"
+    );
+    press(&mut rt, Key::Escape);
+    assert!(
+        matches!(rt.state.panel.as_ref().unwrap().kind, PanelKind::Settings),
+        "and from the list to Settings"
+    );
+
+    // Saving from the form returns to Settings through the list.
+    rt.update(|s, tx| {
+        s.perform(Intent::AddHost, tx);
+        let generation = s.discovery.generation;
+        s.apply_scan(generation, Ok(tailnet()));
+        s.perform(Intent::MachineForm(3), tx);
+        s.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("me");
+    });
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+    click(&mut rt, "save-form");
+    let panel = rt.state.panel.as_ref().expect("back in Settings");
+    assert!(
+        matches!(panel.kind, PanelKind::Settings),
+        "{:?} {:?}",
+        panel.kind,
+        panel.error
+    );
+    assert_eq!(
+        rt.state.settings.hosts[1].endpoint,
+        "ssh://me@away.tail1234.ts.net"
+    );
+
+    // Adding a Rex server from the list goes back to Settings too.
+    rt.update(|s, tx| {
+        s.perform(Intent::AddHost, tx);
+        let generation = s.discovery.generation;
+        s.apply_scan(generation, Ok(tailnet()));
+        s.apply_probe(
+            generation,
+            "studio-rex.tail1234.ts.net",
+            rex_at("studio-rex.tail1234.ts.net"),
+        );
+        s.perform(Intent::AddMachine(1), tx);
+    });
+    assert!(matches!(
+        rt.state.panel.as_ref().unwrap().kind,
+        PanelKind::Settings
+    ));
+    assert_eq!(rt.state.settings.hosts.len(), 3);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn an_endpoint_by_hand_takes_ssh_and_rejects_duplicates() {
+    let mut ws = workspace();
+    ws.sidebar.toggle();
+    // Tall enough for the sidebar's Add host button to be on screen.
+    let mut rt = runtime_at(ws, (1024., 900.));
+    open_add_host(&mut rt);
+    let footer = rt.state.entries().len() - 1;
+    click(&mut rt, &format!("entry:{footer}"));
+    let panel = rt.state.panel.as_ref().expect("the endpoint form");
+    assert!(matches!(panel.kind, PanelKind::Form(Form::AddHost)));
+    assert!(panel.back.is_some(), "it goes back to the list");
+    rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("lab");
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("ssh://lab/");
+    click(&mut rt, "save-form");
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().error.as_deref(),
+        Some("Use an absolute socket path after the host, such as /run/rex/server.sock")
+    );
+    rt.state.panel.as_mut().unwrap().inputs[1] =
+        rune::TextEdit::new("unix:///nonexistent/rex-test.sock");
+    click(&mut rt, "save-form");
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().error.as_deref(),
+        Some("This endpoint is already in the workspace")
+    );
+    rt.state.panel.as_mut().unwrap().inputs[1] = rune::TextEdit::new("ssh://ops@lab:2222");
+    click(&mut rt, "save-form");
+    assert!(rt.state.panel.is_none());
+    assert_eq!(rt.state.settings.hosts[1].endpoint, "ssh://ops@lab:2222");
+    assert_eq!(rt.state.settings.hosts[1].label, "lab");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_search_field_keeps_clicks_from_a_program_that_tracks_the_mouse() {
+    use rex_linux::connection::{Command, Connection, TerminalSender};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    let connection = Connection {
+        model: Default::default(),
+        commands: TerminalSender::new(sender, "s".into(), "block:a".into()),
+        wake: flume::unbounded().1,
+    };
+    let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    })
+    .unwrap();
+    terminal.vt_write(b"\x1b[?1000h\x1b[?1006h");
+    {
+        let mut m = connection.model.lock().unwrap();
+        m.connected = true;
+        m.control_connected = true;
+        m.frame = Some(std::sync::Arc::new(
+            rex_linux::terminal::Renderer::new()
+                .unwrap()
+                .frame(&terminal)
+                .unwrap(),
+        ));
+    }
+    let key = ws.term_key("block:a");
+    let mut term = super::term::Term::new(connection);
+    term.refresh();
+    ws.terminals.insert(key.clone(), term);
+    let mut rt = runtime(ws);
+    rt.frame(1. / 60.);
+    // Presses and releases; a program that asks for every move still hears the pointer pass.
+    let clicks = move || {
+        sent.try_iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    HostCommand::Terminal {
+                        command: Command::Mouse(m),
+                        ..
+                    } if m["action"] != "motion"
+                )
+            })
+            .count()
+    };
+    ctrl_shift(&mut rt, 'f');
+    assert!(has(&rt, "search:block:a"));
+    click(&mut rt, "search-field:block:a");
+    assert_eq!(clicks(), 0, "a click on the field isn't the program's");
+    assert!(
+        focused(&rt).is_some_and(|path| path.contains("search-field:block:a")),
+        "and the field keeps the keyboard"
+    );
+
+    // A click on the terminal is, and takes the keyboard back there.
+    click(&mut rt, "grid:block:a");
+    assert_eq!(
+        clicks(),
+        2,
+        "a click on the terminal is: press, then release"
+    );
+    assert_eq!(focused(&rt), None, "the terminal has the keyboard");
+    assert!(has(&rt, "search:block:a"), "the search stays open");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn ctrl_shift_f_searches_the_focused_terminal_without_typing_into_it() {
+    use rex_linux::connection::{Command, Connection, TerminalSender};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    let connection = Connection {
+        model: Default::default(),
+        commands: TerminalSender::new(sender, "s".into(), "block:a".into()),
+        wake: flume::unbounded().1,
+    };
+    {
+        let mut m = connection.model.lock().unwrap();
+        m.connected = true;
+        m.control_connected = true;
+    }
+    let key = ws.term_key("block:a");
+    ws.terminals
+        .insert(key.clone(), super::term::Term::new(connection));
+    let mut rt = runtime(ws);
+    rt.frame(1. / 60.);
+    let sent = move || -> Vec<String> {
+        sent.try_iter()
+            .filter_map(|c| match c {
+                HostCommand::Terminal { command, .. } => Some(match command {
+                    Command::Search(needle) => format!("search {needle}"),
+                    Command::SearchStep(older) => format!("step older={older}"),
+                    Command::Key(_) => "key".into(),
+                    _ => "other".into(),
+                }),
+                _ => None,
+            })
+            .collect()
+    };
+
+    ctrl_shift(&mut rt, 'f');
+    assert!(
+        focused(&rt).is_some_and(|path| path.contains("search-field:block:a")),
+        "the search field takes the keyboard: {:?}",
+        focused(&rt)
+    );
+    for c in ["n", "e"] {
+        press(&mut rt, Key::Text(c.into()));
+    }
+    press(&mut rt, Key::Enter);
+    rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1. / 60.);
+    assert_eq!(
+        sent(),
+        [
+            "search n",
+            "search ne",
+            "step older=true",
+            "step older=false"
+        ],
+        "typing searches, Enter steps, and nothing reaches the program"
+    );
+    assert!(has(&rt, "search:block:a"));
+
+    press(&mut rt, Key::Escape);
+    assert_eq!(sent(), ["search "], "Escape clears the search");
+    assert!(rt.state.terminals[&key].search.is_none());
+    assert!(!has(&rt, "search:block:a"));
+    assert_eq!(focused(&rt), None, "the terminal has the keyboard again");
+    press(&mut rt, Key::Text("x".into()));
+    assert_eq!(sent(), ["key"]);
+
+    // The shortcut runs a named action, which bindings can run by its name.
+    assert_eq!(super::input::SEARCH, "client.search");
+    rt.update(|s, _| {
+        assert!(!super::input::run_action(s, "client.nothing"));
+        assert!(super::input::run_action(s, super::input::SEARCH));
+    });
+    rt.frame(1. / 60.);
+    assert!(
+        focused(&rt).is_some_and(|path| path.contains("search-field:block:a")),
+        "client.search opens the search field: {:?}",
+        focused(&rt)
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }

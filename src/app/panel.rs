@@ -41,7 +41,14 @@ pub enum Intent {
     Activity,
     Settings,
     Fonts,
+    /// The Add host list: the tailnet's machines, or an endpoint by hand.
     AddHost,
+    /// Attach to the Rex server with built-in Tailscale on a listed machine at once.
+    AddMachine(usize),
+    /// The SSH form for a listed machine.
+    MachineForm(usize),
+    /// The endpoint form, from the Add host list.
+    AddHostManually,
     EditHost(usize),
     RemoveHost(usize),
     Retry,
@@ -55,7 +62,8 @@ pub enum Intent {
     Chrome(ChromeTheme),
 }
 impl Intent {
-    /// Actions that open another panel instead of closing the current one.
+    /// Actions that open another panel instead of closing the current one, or close it
+    /// themselves.
     pub fn opens_followup(&self) -> bool {
         matches!(
             self,
@@ -70,6 +78,9 @@ impl Intent {
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
                 | Intent::AddHost
+                | Intent::AddMachine(_)
+                | Intent::MachineForm(_)
+                | Intent::AddHostManually
                 | Intent::EditHost(_)
                 | Intent::RemoveHost(_)
                 | Intent::Pane(_, PaneAction::Rename | PaneAction::Close)
@@ -127,6 +138,8 @@ pub enum Form {
     RenameWindow(String),
     RenamePane(String),
     AddHost,
+    /// A listed machine's name and SSH user, from the Add host list.
+    AddSsh(usize),
     /// A host's name, endpoint and default shell, from Settings.
     EditHost(usize),
 }
@@ -190,6 +203,8 @@ pub enum PanelKind {
     Themes,
     /// The chrome palettes.
     Chromes,
+    /// The Add host list of the tailnet's machines, filtered by the search field.
+    Discover,
     /// Confirm forgetting a saved host; its server and programs are untouched.
     RemoveHost(usize),
     Confirm {
@@ -260,6 +275,7 @@ impl Panel {
                 | PanelKind::Window(_)
                 | PanelKind::Themes
                 | PanelKind::Chromes
+                | PanelKind::Discover
         )
     }
 }
@@ -529,6 +545,9 @@ impl Workspace {
         let lower = query.to_lowercase();
         if matches!(panel.kind, PanelKind::Themes) {
             return self.theme_entries(&lower);
+        }
+        if matches!(panel.kind, PanelKind::Discover) {
+            return self.discovery_entries(&lower);
         }
         if matches!(panel.kind, PanelKind::Chromes) {
             return ChromeTheme::ALL
