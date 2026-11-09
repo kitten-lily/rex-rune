@@ -4063,6 +4063,39 @@ fn a_session_working_with_progress_draws_a_bar_in_the_sidebar() {
 }
 
 #[test]
+fn the_switcher_names_a_sessions_working_progress() {
+    use rex_linux::connection::activity::{
+        ProgramState::Working,
+        TerminalProgress::{Indeterminate, Set},
+    };
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 1);
+    set_activity(&mut ws, "other:0", &[("", record(Working, true))]);
+    ws.picker(true);
+    let detail = |ws: &Workspace| {
+        ws.entries()
+            .into_iter()
+            .find(|e| e.label == "other-label")
+            .map(|e| e.detail)
+    };
+    assert_eq!(
+        detail(&ws).as_deref(),
+        Some(""),
+        "working with no progress report has no bar, so no word"
+    );
+    let progress = |ws: &mut Workspace, p| {
+        ws.hosts[0].model.progress.insert("other:0".into(), p);
+    };
+    progress(&mut ws, Set(Some(42)));
+    assert_eq!(detail(&ws).as_deref(), Some("42%"));
+    progress(&mut ws, Indeterminate);
+    assert_eq!(detail(&ws).as_deref(), Some("Working"));
+    ws.settings.notifications.show_in_tabs = false;
+    assert_eq!(detail(&ws).as_deref(), Some(""));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn the_switcher_names_session_activity() {
     let (mut ws, _rx) = tabbed_workspace("single");
     blocked_session(&mut ws, "other", 2);

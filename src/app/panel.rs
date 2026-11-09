@@ -736,15 +736,23 @@ impl Workspace {
                     format!("{label} · Offline")
                 };
                 for session in &host.model.sessions {
-                    let word =
-                        self.session_word(index, &session.session_id)
-                            .map(|(word, _, needing)| {
-                                if needing >= 2 {
-                                    format!("{word} · {needing}")
-                                } else {
-                                    word.into_owned()
-                                }
-                            });
+                    let word = self
+                        .session_word(index, &session.session_id)
+                        .map(|(word, _, needing)| {
+                            if needing >= 2 {
+                                format!("{word} · {needing}")
+                            } else {
+                                word.into_owned()
+                            }
+                        })
+                        // The switcher has no bar: name working progress instead, as
+                        // Activity rows do. Paused and failed reports already have a word.
+                        .or_else(|| {
+                            self.session_progress(index, &session.session_id)
+                                .map(|(percent, _)| {
+                                    percent.map_or("Working".into(), |n| format!("{n}%"))
+                                })
+                        });
                     let detail = match (sessions_only, word) {
                         (true, word) => word.unwrap_or_default(),
                         (false, Some(word)) => format!("{label} · {word}"),
