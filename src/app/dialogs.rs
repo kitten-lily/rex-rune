@@ -22,7 +22,15 @@ fn modal(s: &Workspace, viewport: [f32; 2], body: El) -> El {
 
 /// A centered dialog surface over a dark scrim; `surface` sets its own size and padding.
 pub fn modal_frame(s: &Workspace, surface: El) -> El {
-    let panel = glass(surface.key("dialog").role("dialog"), 16., true).transition(pop_in());
+    // The dialog takes every press inside it itself: a press goes to the topmost element that
+    // handles input, so one on padding, a divider or a disabled switch would otherwise fall
+    // through to the scrim and close the dialog.
+    let surface = surface
+        .key("dialog")
+        .role("dialog")
+        .preserve_focus_on_press(true)
+        .on_press(|_: &mut Workspace| {});
+    let panel = glass(surface, 16., true).transition(pop_in());
     let mut layer = overlay()
         .center()
         .modal(false, |s: &mut Workspace| s.cancel_panel_quiet())

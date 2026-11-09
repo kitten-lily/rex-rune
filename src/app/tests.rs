@@ -1795,6 +1795,77 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
 }
 
 #[test]
+fn a_notification_switch_flips_and_settings_stay_open() {
+    let mut ws = workspace();
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::Settings, &mut tx);
+    let mut rt = runtime(ws);
+    click(&mut rt, "settings-section:notifications");
+    assert!(rt.state.settings.notifications.show_in_tabs);
+    click(&mut rt, "notify-tabs");
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Settings)
+        ),
+        "Settings stays open"
+    );
+    assert!(
+        !rt.state.settings.notifications.show_in_tabs,
+        "the switch flipped"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_disabled_notification_switch_leaves_settings_open() {
+    let mut ws = workspace();
+    ws.settings.notifications.system_notifications = false;
+    let blocked = ws.settings.notifications.blocked;
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::Settings, &mut tx);
+    let mut rt = runtime(ws);
+    click(&mut rt, "settings-section:notifications");
+    click(&mut rt, "notify-blocked");
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Settings)
+        ),
+        "a press on a disabled switch must not reach the dismiss layer"
+    );
+    assert_eq!(rt.state.settings.notifications.blocked, blocked, "disabled");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_press_on_a_dialogs_padding_leaves_it_open() {
+    let mut ws = workspace();
+    let mut tx = rune::Tx::default();
+    ws.perform(Intent::Settings, &mut tx);
+    let mut rt = runtime(ws);
+    let r = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("dialog"))
+        .expect("the Settings dialog")
+        .rect;
+    rt.pointer_down(r[0] + 6., r[1] + 6.);
+    rt.pointer_up(r[0] + 6., r[1] + 6.);
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Settings)
+        ),
+        "only a press outside the dialog closes it"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn settings_sections_and_their_forms_return_to_settings() {
     let mut ws = workspace_hosts(2);
     let mut tx = rune::Tx::default();
