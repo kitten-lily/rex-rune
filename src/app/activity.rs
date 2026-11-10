@@ -286,7 +286,8 @@ impl Workspace {
     }
 
     /// Compare each pane of host `index` with its last state: latch unseen Done, clear what
-    /// the user now sees, and notify about live changes in panes they can't see.
+    /// the user now sees, and notify about live changes in panes they can't see. A pane seen
+    /// for the first time, including one that closed and came back, is only a baseline.
     pub fn track_activity(&mut self, index: usize) {
         let id = self.hosts[index].id;
         let epoch = self.hosts[index].model.activity_epoch;
@@ -311,12 +312,27 @@ impl Workspace {
                     let key = (id, block.to_owned());
                     let activity = pane_activity(model, block);
                     let state = activity.state;
-                    let before = self.pane_states.get(&key).map(|t| t.state);
-                    let done = before.is_some_and(|b| finished(b, state));
+                    let Some(before) = self.pane_states.get(&key).copied() else {
+                        let track = PaneTrack {
+                            state,
+                            finished: state == ProgramState::Done,
+                        };
+                        now.insert(key, (track, seen, window_id.clone()));
+                        continue;
+                    };
+                    let done = finished(before.state, state);
                     let shown = if done { ProgramState::Done } else { state };
-                    // Queries only restore what was already true; only live reports are news.
-                    let news = before != Some(state)
-                        && (done || (activity.live && state != ProgramState::Idle));
+                    // Queries only restore what was already true; only live reports are news,
+                    // and a completion already announced is not announced again.
+                    let news = before.state != state
+                        && (done || (activity.live && state != ProgramState::Idle))
+                        && !(shown == ProgramState::Done && before.finished);
+                    let finished = match state {
+                        ProgramState::Working | ProgramState::Blocked | ProgramState::Error => {
+                            false
+                        }
+                        _ => before.finished || shown == ProgramState::Done,
+                    };
                     if news && !seen && shown == ProgramState::Done {
                         latched.push(key.clone());
                     }
@@ -329,7 +345,10 @@ impl Workspace {
                             activity,
                         ));
                     }
-                    now.insert(key, (PaneTrack { state }, seen, window_id.clone()));
+                    now.insert(
+                        key,
+                        (PaneTrack { state, finished }, seen, window_id.clone()),
+                    );
                 }
             }
         }
@@ -660,6 +679,9 @@ impl Workspace {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaneTrack {
     pub state: ProgramState,
+    /// Its completion has been announced (or was already true at its baseline), so another
+    /// Done before new work is the same completion.
+    pub finished: bool,
 }
 
 /// Each pane's activity when last synced, by host and block.

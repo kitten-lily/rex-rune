@@ -2689,6 +2689,26 @@ fn notification_settings_gate_what_is_sent() {
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
+/// Drop `block` from the "dev" tab's layer, as a server does when a pane closes.
+fn close_split_pane(ws: &mut Workspace, block: &str) {
+    let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+    for layer in &mut view.windows[1].layers {
+        layer
+            .blocks
+            .retain(|b| b.block_id.as_deref() != Some(block));
+    }
+    ws.track_activity(0);
+}
+
+/// Put `block` back into the "dev" tab's layer.
+fn reopen_split_pane(ws: &mut Workspace, block: &str) {
+    let view = ws.hosts[0].model.views.get_mut("s").unwrap();
+    view.windows[1].layers[0]
+        .blocks
+        .push(serde_json::from_value(serde_json::json!({"block_id": block})).unwrap());
+    ws.track_activity(0);
+}
+
 #[test]
 fn each_pane_notifies_with_its_own_block_and_keeps_its_tab_done() {
     use rex_linux::connection::activity::ProgramState::*;
@@ -2711,6 +2731,64 @@ fn each_pane_notifies_with_its_own_block_and_keeps_its_tab_done() {
     );
     set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
     assert!(!ws.unseen("split"), "working again clears that pane's Done");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn unchanged_reports_and_snapshots_notify_once() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+    ws.track_activity(0);
+    assert_eq!(ws.outbox.len(), 1, "a repeated Blocked report is not news");
+    set_activity(&mut ws, "block:c", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Done, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Done, true))]);
+    assert_eq!(ws.outbox.len(), 2, "one Done");
+    // The record is cleared, then reported again: still the same completion.
+    set_activity(&mut ws, "block:c", &[]);
+    set_activity(&mut ws, "block:c", &[("", record(Done, true))]);
+    assert_eq!(ws.outbox.len(), 2, "no second Done");
+    // A program that stops working without a record, then reports Done, finished once.
+    set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:b", &[]);
+    set_activity(&mut ws, "block:b", &[("", record(Done, true))]);
+    assert_eq!(ws.outbox.len(), 3);
+    // New work arms the next completion.
+    set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:b", &[("", record(Done, true))]);
+    assert_eq!(ws.outbox.len(), 4);
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_pane_that_returns_gets_a_fresh_baseline() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    set_activity(&mut ws, "block:c", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Done, true))]);
+    assert_eq!(ws.outbox.len(), 1);
+    assert!(ws.unseen("split"));
+    // The pane closes: its Done goes with it.
+    close_split_pane(&mut ws, "block:c");
+    assert!(!ws.unseen("split"));
+    // Its block ID comes back, its old live records still held: nothing is replayed.
+    reopen_split_pane(&mut ws, "block:c");
+    assert_eq!(ws.outbox.len(), 1);
+    assert!(!ws.unseen("split"));
+    // A pane closing while working and returning finished is a baseline too.
+    set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+    close_split_pane(&mut ws, "block:b");
+    ws.hosts[0].model.activity.remove("block:b");
+    reopen_split_pane(&mut ws, "block:b");
+    assert_eq!(ws.outbox.len(), 1);
+    assert!(!ws.unseen("split"));
+    // After the baseline, live changes are news again.
+    set_activity(&mut ws, "block:b", &[("", record(Error, true))]);
+    assert_eq!(ws.outbox.len(), 2);
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
@@ -2742,6 +2820,39 @@ fn a_clicked_notification_focuses_its_exact_pane() {
             r#"session.focus_block {"block_id":"block:c","session_id":"s"}"#.to_owned()
         ]
     );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_notification_for_a_closed_pane_never_targets_its_replacement() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    set_activity(&mut ws, "block:c", &[("", record(Error, true))]);
+    let target = ws.outbox[0].target.clone();
+    // block:c closes and block:d takes its place in the same position.
+    close_split_pane(&mut ws, "block:c");
+    reopen_split_pane(&mut ws, "block:d");
+    rx.try_iter().count();
+    ws.open_note(target.clone(), None, &mut rune::Tx::default());
+    assert_eq!(
+        sent_commands(&rx),
+        ["navigate s split".to_owned()],
+        "its tab still exists, so it is shown, and no pane is focused"
+    );
+    assert!(ws.notices.iter().any(|n| n.text.contains("closed")));
+    // With its tab gone too, nothing moves.
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .windows
+        .remove(1);
+    ws.notices.clear();
+    ws.open_note(target, None, &mut rune::Tx::default());
+    assert!(sent_commands(&rx).is_empty());
+    assert!(ws.notices.iter().any(|n| n.text.contains("closed")));
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
