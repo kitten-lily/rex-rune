@@ -4248,17 +4248,91 @@ fn commands_offer_activity() {
     use rex_linux::settings::SidebarMode;
     let mut ws = workspace();
     ws.picker(false);
-    assert!(
-        ws.entries()
-            .iter()
-            .any(|e| e.label == "Activity" && matches!(e.action, Intent::Activity))
-    );
+    let entries = ws.entries();
+    for (label, name) in [
+        ("View Activity", "pane.view_activity"),
+        ("Toggle Activity", "client.sidebar.activity.toggle"),
+        (
+            "Show Activity by session",
+            "client.sidebar.activity.by_session",
+        ),
+        (
+            "Show Activity by priority",
+            "client.sidebar.activity.by_priority",
+        ),
+    ] {
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.label == label
+                    && matches!(e.action, Intent::ClientAction(n, _) if n == name)),
+            "{label}"
+        );
+    }
     assert!(!ws.sidebar.is_open());
     ws.perform(Intent::Activity, &mut rune::Tx::default());
     assert!(ws.sidebar.is_open());
     assert_eq!(ws.settings.sidebar_mode, SidebarMode::Activity);
     ws.perform(Intent::Activity, &mut rune::Tx::default());
     assert!(ws.sidebar.is_open(), "never toggles it closed");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn activity_actions_show_switch_and_group_the_sidebar() {
+    use rex_linux::settings::{ActivityGrouping, SidebarMode};
+    let mut ws = workspace();
+    let mut tx = rune::Tx::default();
+    let mut run = |ws: &mut Workspace, name: &str| {
+        assert!(super::actions::run(
+            ws,
+            name,
+            &serde_json::Value::Null,
+            &mut tx
+        ));
+        (
+            ws.sidebar.is_open(),
+            ws.settings.sidebar_mode,
+            ws.settings.activity_grouping,
+        )
+    };
+    use ActivityGrouping::{Priority, Session};
+    use SidebarMode::{Activity, Sessions};
+    assert!(!ws.sidebar.is_open());
+    assert_eq!(ws.settings.sidebar_mode, Sessions);
+    // A hidden sidebar opens on Activity; an open one switches between its lists.
+    let toggle = "client.sidebar.activity.toggle";
+    assert_eq!(run(&mut ws, toggle), (true, Activity, Priority));
+    assert_eq!(run(&mut ws, toggle), (true, Sessions, Priority));
+    assert_eq!(run(&mut ws, toggle), (true, Activity, Priority));
+    ws.toggle_sidebar();
+    assert_eq!(run(&mut ws, toggle), (true, Activity, Priority));
+    ws.toggle_sidebar();
+    ws.set_sidebar_mode(Sessions);
+    let view = "pane.view_activity";
+    assert_eq!(run(&mut ws, view), (true, Activity, Priority));
+    assert_eq!(
+        run(&mut ws, view),
+        (true, Activity, Priority),
+        "never hides"
+    );
+    ws.set_sidebar_mode(Sessions);
+    let by_session = "client.sidebar.activity.by_session";
+    assert_eq!(run(&mut ws, by_session), (true, Activity, Session));
+    ws.toggle_sidebar();
+    let by_priority = "client.sidebar.activity.by_priority";
+    assert_eq!(run(&mut ws, by_priority), (true, Activity, Priority));
+    assert!(!super::actions::run(
+        &mut ws,
+        by_priority,
+        &serde_json::json!({"extra": 1}),
+        &mut rune::Tx::default()
+    ));
+    ws.set_sidebar_mode(Sessions);
+    assert_eq!(run(&mut ws, by_session), (true, Activity, Session));
+    let saved = Settings::load(&ws.settings_path).unwrap();
+    assert_eq!(saved.sidebar_mode, Activity);
+    assert_eq!(saved.activity_grouping, Session);
     std::fs::remove_file(&ws.settings_path).ok();
 }
 

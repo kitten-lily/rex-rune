@@ -2000,6 +2000,21 @@ impl Workspace {
         self.set_sidebar_mode(SidebarMode::Activity);
     }
 
+    /// Switches an open sidebar between Sessions and Activity; a hidden one opens on Activity.
+    pub fn toggle_activity(&mut self) {
+        if self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity {
+            self.set_sidebar_mode(SidebarMode::Sessions);
+        } else {
+            self.show_activity();
+        }
+    }
+
+    /// Groups the Activity list and shows it.
+    pub fn show_activity_by(&mut self, grouping: rex_linux::settings::ActivityGrouping) {
+        self.settings.activity_grouping = grouping;
+        self.show_activity();
+    }
+
     pub fn set_vertical_tabs(&mut self, vertical: bool) {
         self.settings.vertical_tabs = vertical;
         if vertical {

@@ -79,6 +79,7 @@ impl Intent {
             Self::RenameWindow(_) => ("client.tab.rename", Value::Null),
             Self::CloseWindow(_) => ("client.tab.close", Value::Null),
             Self::Sidebar => ("client.sidebar.toggle", Value::Null),
+            Self::Activity => (super::actions::VIEW_ACTIVITY, Value::Null),
             Self::Settings => ("client.settings", Value::Null),
             Self::Pane(_, pane) => match pane {
                 PaneAction::Split(direction) => (
@@ -709,7 +710,22 @@ impl Workspace {
                     "",
                     Intent::Sidebar,
                 ),
-                ("Activity", "", Intent::Activity),
+                ("View Activity", "", Intent::Activity),
+                (
+                    "Toggle Activity",
+                    "",
+                    Intent::ClientAction(super::actions::TOGGLE_ACTIVITY, Value::Null),
+                ),
+                (
+                    "Show Activity by session",
+                    "",
+                    Intent::ClientAction(super::actions::ACTIVITY_BY_SESSION, Value::Null),
+                ),
+                (
+                    "Show Activity by priority",
+                    "",
+                    Intent::ClientAction(super::actions::ACTIVITY_BY_PRIORITY, Value::Null),
+                ),
                 ("Remote control", "", Intent::RemoteControl(self.active)),
                 ("Default shell…", "", Intent::HostShell(self.active)),
                 ("Settings…", "", Intent::Settings),
@@ -749,6 +765,7 @@ impl Workspace {
                         | Intent::NewSession
                         | Intent::NewWindow
                         | Intent::Sidebar
+                        | Intent::Activity
                         | Intent::Settings
                 ) && let Some((name, args)) = entry.action.shortcut()
                 {

@@ -1,7 +1,7 @@
 //! Named workspace actions shared by keyboard, pointer and Commands dispatch.
 //! The registry structure follows Andrea Zito (nivox), commit 8037d78.
 use super::{panel::Intent, workspace::Workspace};
-use rex_linux::connection::Command;
+use rex_linux::{connection::Command, settings::ActivityGrouping};
 use rune::Tx;
 use serde_json::{Value, json};
 
@@ -14,12 +14,20 @@ pub const HISTORY_FORWARD: &str = "client.history.forward";
 pub const CYCLE_COLUMN: &str = "client.column.cycle_width";
 pub const MAXIMIZE_COLUMN: &str = "client.column.maximize";
 pub const MOVE_COLUMN: &str = "client.column.move";
+pub const VIEW_ACTIVITY: &str = "pane.view_activity";
+pub const TOGGLE_ACTIVITY: &str = "client.sidebar.activity.toggle";
+pub const ACTIVITY_BY_SESSION: &str = "client.sidebar.activity.by_session";
+pub const ACTIVITY_BY_PRIORITY: &str = "client.sidebar.activity.by_priority";
 
 #[derive(Clone, Copy)]
 enum Handler {
     Palette,
     Settings,
     Sidebar,
+    ViewActivity,
+    ToggleActivity,
+    ActivityBySession,
+    ActivityByPriority,
     Close,
     Search,
     NewTab,
@@ -69,6 +77,10 @@ specs! {
     "client.palette.toggle" => Palette,
     "client.settings" => Settings,
     "client.sidebar.toggle" => Sidebar,
+    VIEW_ACTIVITY => ViewActivity,
+    TOGGLE_ACTIVITY => ToggleActivity,
+    ACTIVITY_BY_SESSION => ActivityBySession,
+    ACTIVITY_BY_PRIORITY => ActivityByPriority,
     "client.close" => Close,
     SEARCH => Search,
     "client.tab.new" => NewTab,
@@ -121,7 +133,9 @@ impl Spec {
             NextTab | PreviousTab | GotoTab | FocusPane | SelectSession => {
                 Remote::View { navigation: true }
             }
-            Sidebar | ZoomPane | Scroll => Remote::View { navigation: false },
+            // Like the sidebar toggle, these change the saved sidebar state and nothing else.
+            Sidebar | ViewActivity | ToggleActivity | ActivityBySession | ActivityByPriority
+            | ZoomPane | Scroll => Remote::View { navigation: false },
             Paste => Remote::Never(
                 "Use rex send instead; remote actions cannot read this computer's clipboard.",
             ),
@@ -151,6 +165,17 @@ impl Spec {
             ),
         }
     }
+    /// Acts on the tab or pane on screen, so a remote request needs one there.
+    pub fn needs_tab(&self) -> bool {
+        !matches!(
+            self.handler,
+            Handler::Sidebar
+                | Handler::ViewActivity
+                | Handler::ToggleActivity
+                | Handler::ActivityBySession
+                | Handler::ActivityByPriority
+        )
+    }
     pub fn global(&self) -> bool {
         matches!(
             self.handler,
@@ -175,6 +200,10 @@ impl Spec {
             Handler::Palette => "Commands",
             Handler::Settings => "Settings",
             Handler::Sidebar => "Toggle sidebar",
+            Handler::ViewActivity => "View Activity",
+            Handler::ToggleActivity => "Toggle Activity",
+            Handler::ActivityBySession => "Show Activity by session",
+            Handler::ActivityByPriority => "Show Activity by priority",
             Handler::Close => "Close focused pane or tab",
             Handler::Search => "Search terminal",
             Handler::NewTab => "New tab",
@@ -214,6 +243,10 @@ impl Spec {
             Handler::Palette
             | Handler::Settings
             | Handler::Sidebar
+            | Handler::ViewActivity
+            | Handler::ToggleActivity
+            | Handler::ActivityBySession
+            | Handler::ActivityByPriority
             | Handler::ZoomIn
             | Handler::ZoomOut
             | Handler::ZoomReset => "Interface",
@@ -348,6 +381,10 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::Palette => s.picker(false),
         Handler::Settings => s.perform(Intent::Settings, tx),
         Handler::Sidebar => s.perform(Intent::Sidebar, tx),
+        Handler::ViewActivity => s.perform(Intent::Activity, tx),
+        Handler::ToggleActivity => s.toggle_activity(),
+        Handler::ActivityBySession => s.show_activity_by(ActivityGrouping::Session),
+        Handler::ActivityByPriority => s.show_activity_by(ActivityGrouping::Priority),
         Handler::Close => s.close_focused(tx),
         Handler::Search => s.open_search(),
         Handler::NewTab => s.perform(Intent::NewWindow, tx),

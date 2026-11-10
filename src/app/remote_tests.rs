@@ -39,12 +39,16 @@ fn remote_set_is_exact_and_every_denial_is_described() {
     assert_eq!(
         allowed,
         [
+            "client.sidebar.activity.by_priority",
+            "client.sidebar.activity.by_session",
+            "client.sidebar.activity.toggle",
             "client.sidebar.toggle",
             "client.tab.goto",
             "client.tab.next",
             "client.tab.previous",
             "pane.focus",
             "pane.scroll",
+            "pane.view_activity",
             "pane.zoom",
             "session.select"
         ]
@@ -68,6 +72,8 @@ fn remote_set_is_exact_and_every_denial_is_described() {
 fn remote_default_off_and_all_hazards_are_denied_without_side_effects() {
     let (mut ws, rx) = tabbed_workspace("single");
     let sidebar = ws.sidebar.is_open();
+    let mode = ws.settings.sidebar_mode;
+    let grouping = ws.settings.activity_grouping;
     for enabled in [false, true] {
         ws.settings.hosts[0].remote_control = enabled;
         for spec in actions::SPECS {
@@ -91,6 +97,8 @@ fn remote_default_off_and_all_hazards_are_denied_without_side_effects() {
             );
             assert!(ws.panel.is_none());
             assert_eq!(ws.sidebar.is_open(), sidebar);
+            assert_eq!(ws.settings.sidebar_mode, mode);
+            assert_eq!(ws.settings.activity_grouping, grouping);
         }
     }
     assert_eq!(ws.notices.len(), 1, "off notice once per host per launch");
@@ -103,6 +111,11 @@ fn remote_guards_and_argument_checks_do_not_dispatch() {
     ws.settings.hosts[0].remote_control = true;
     for (action, args) in [
         ("client.sidebar.toggle", json!({"extra":1})),
+        ("pane.view_activity", json!({"extra":1})),
+        (
+            "client.sidebar.activity.by_session",
+            json!({"grouping":"session"}),
+        ),
         ("pane.focus", json!({"direction":"sideways"})),
         ("pane.scroll", json!({"lines":1.5})),
         ("client.tab.goto", json!({"index":0})),
@@ -188,6 +201,86 @@ fn remote_view_actions_use_the_local_handlers_and_announce_requester() {
         );
         assert!(!ws.notices[0].sticky);
     }
+}
+
+#[test]
+fn remote_activity_actions_show_activity_only_with_control_on() {
+    use rex_linux::settings::{ActivityGrouping, SidebarMode};
+    for (name, grouping) in [
+        ("pane.view_activity", ActivityGrouping::Priority),
+        ("client.sidebar.activity.toggle", ActivityGrouping::Priority),
+        (
+            "client.sidebar.activity.by_session",
+            ActivityGrouping::Session,
+        ),
+        (
+            "client.sidebar.activity.by_priority",
+            ActivityGrouping::Priority,
+        ),
+    ] {
+        for enabled in [false, true] {
+            let (mut ws, rx) = tabbed_workspace("single");
+            ws.settings.hosts[0].remote_control = enabled;
+            ws.sidebar.set_open(false);
+            ws.settings.sidebar_mode = SidebarMode::Sessions;
+            // Start from the other grouping, so a grouping action has something to change.
+            let start = if name.ends_with("by_priority") {
+                ActivityGrouping::Session
+            } else {
+                ActivityGrouping::Priority
+            };
+            ws.settings.activity_grouping = start;
+            ws.remote_perform(0, pending(name, Value::Null), &mut rune::Tx::default());
+            if enabled {
+                assert_eq!(reply(&rx), Outcome::Performed, "{name}");
+                assert!(ws.sidebar.is_open(), "{name}");
+                assert_eq!(ws.settings.sidebar_mode, SidebarMode::Activity, "{name}");
+                assert_eq!(ws.settings.activity_grouping, grouping, "{name}");
+                assert!(
+                    ws.notices
+                        .iter()
+                        .any(|n| n.text.contains(&format!("performed {name}")))
+                );
+            } else {
+                code(reply(&rx), "refused");
+                assert!(!ws.sidebar.is_open(), "{name}");
+                assert_eq!(ws.settings.sidebar_mode, SidebarMode::Sessions, "{name}");
+                assert_eq!(ws.settings.activity_grouping, start, "{name}");
+            }
+            std::fs::remove_file(&ws.settings_path).ok();
+        }
+    }
+}
+
+#[test]
+fn remote_sidebar_actions_need_no_tab_on_screen() {
+    for name in [
+        "client.sidebar.toggle",
+        "pane.view_activity",
+        "client.sidebar.activity.toggle",
+        "client.sidebar.activity.by_session",
+        "client.sidebar.activity.by_priority",
+    ] {
+        let mut ws = workspace();
+        let rx = capture_host(&mut ws, 0);
+        ws.hosts[0].model.connected = true;
+        ws.settings.hosts[0].remote_control = true;
+        assert!(ws.model().window().is_none());
+        ws.remote_perform(0, pending(name, Value::Null), &mut rune::Tx::default());
+        assert_eq!(reply(&rx), Outcome::Performed, "{name}");
+        std::fs::remove_file(&ws.settings_path).ok();
+    }
+    // Actions on a tab or pane still need one.
+    let mut ws = workspace();
+    let rx = capture_host(&mut ws, 0);
+    ws.hosts[0].model.connected = true;
+    ws.settings.hosts[0].remote_control = true;
+    ws.remote_perform(
+        0,
+        pending("pane.zoom", Value::Null),
+        &mut rune::Tx::default(),
+    );
+    code(reply(&rx), "internal");
 }
 
 #[test]

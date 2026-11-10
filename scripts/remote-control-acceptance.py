@@ -205,7 +205,7 @@ try:
     for i in range(2):
         wait(lambda: client_id(i), f"enabled host {i} did not register")
 
-    # Part 1 has seven actions; part 2 additionally supports cross-host selection.
+    # Part 1 has eleven actions; part 2 additionally supports cross-host selection.
     active = 1 if declaration else 0
 
     def view(host=active):
@@ -230,8 +230,13 @@ try:
         wait(lambda: view()["active_window_id"] == windows[index], f"{action} did not focus expected tab")
     perform(active, "client.sidebar.toggle")
     perform(active, "client.sidebar.toggle")
-    print("PASS all eight view-only actions, cross-host session/tab selection and goto -1" if declaration else
-          "PASS all seven part-1 view-only actions", flush=True)
+    # These open the sidebar on Activity; the last toggle returns it to Sessions.
+    for action in ("pane.view_activity", "client.sidebar.activity.by_session",
+                   "client.sidebar.activity.by_priority", "client.sidebar.activity.toggle"):
+        perform(active, action)
+    perform(active, "client.sidebar.toggle")  # Closed again, as configured.
+    print("PASS all twelve view-only actions, cross-host session/tab selection and goto -1" if declaration else
+          "PASS all eleven part-1 view-only actions", flush=True)
     perform(1 - active, "client.sidebar.toggle", error="not on screen")
     perform(active, "client.sidebar.toggle", {"extra": 1}, error="Invalid arguments", direct=True)
     if declaration:

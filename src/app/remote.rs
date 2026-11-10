@@ -113,7 +113,7 @@ impl Workspace {
             self.session_visit(host, &request.args)?;
             return Ok(());
         }
-        if request.action != "client.sidebar.toggle" && self.model().window().is_none() {
+        if spec.needs_tab() && self.model().window().is_none() {
             return Err(Outcome::error(
                 "internal",
                 "No tab is on screen; nothing was done.",

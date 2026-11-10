@@ -327,6 +327,47 @@ fn commands_details_follow_rebinding_unbinding_and_argument_matches() {
 }
 
 #[test]
+fn activity_actions_are_bindable_and_show_their_shortcuts() {
+    use rex_linux::settings::SidebarMode;
+    let (mut ws, _) = tabbed_workspace("single");
+    overrides(
+        &mut ws,
+        json!([
+            {"keys":"ctrl+j","action":"client.sidebar.activity.toggle"},
+            {"keys":"ctrl+b>s","action":"client.sidebar.activity.by_session"}
+        ]),
+    );
+    assert!(ws.settings.shortcut_file.overrides.diagnostics.is_empty());
+    assert!(ws.local_keymap.diagnostics.is_empty());
+    let titles: Vec<_> = ws
+        .effective_bindings()
+        .iter()
+        .map(|b| actions::binding_title(&b.binding))
+        .collect();
+    assert!(titles.iter().any(|t| t == "Toggle Activity"));
+    assert!(titles.iter().any(|t| t == "Show Activity by session"));
+    ws.picker(false);
+    let detail = |ws: &Workspace, label: &str| {
+        ws.entries()
+            .iter()
+            .find(|e| e.label == label)
+            .unwrap()
+            .detail
+            .clone()
+    };
+    assert_eq!(detail(&ws, "Toggle Activity"), "Ctrl J");
+    assert_eq!(detail(&ws, "Show Activity by session"), "Ctrl B, S");
+    assert_eq!(detail(&ws, "View Activity"), "");
+    ws.panel = None;
+    let mut rt = runtime(ws);
+    rt.key(ctrl(Key::Command('j')));
+    rt.frame(0.);
+    assert!(rt.state.sidebar.is_open());
+    assert_eq!(rt.state.settings.sidebar_mode, SidebarMode::Activity);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn effective_map_swaps_by_host_and_generation_and_preserves_problems() {
     let mut ws = workspace_hosts(2);
     let overrides = Overrides::parse(&json!([{"keys":"ctrl+b>","action":"client.settings"}]));
