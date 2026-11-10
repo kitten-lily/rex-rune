@@ -363,19 +363,25 @@ fn new_session(s: &Workspace, index: usize) -> El {
         )
 }
 
-/// One segment of a two-way switch: the active one on the tab pill's fill and hairline.
+/// One segment of a two-way switch: the active one on the tab pill's fill and hairline,
+/// with an optional count after its label.
 fn segment(
     key: &str,
     label: &'static str,
+    count: Option<(usize, u32)>,
     active: bool,
     f: impl Fn(&mut Workspace) + 'static,
 ) -> El {
-    let e = row()
+    let mut e = row()
         .key(key.to_owned())
         .role("tab")
-        .label(label)
+        .label(match count {
+            Some((n, _)) => format!("{label}, {n} unread"),
+            None => label.to_owned(),
+        })
         .h(SEGMENT)
         .px(10.)
+        .gap(5.)
         .center()
         .radius(8.)
         .continuous_corners()
@@ -391,6 +397,14 @@ fn segment(
                 .font(if active { medium(12.) } else { ui(12.) })
                 .color(rgb(if active { ink() } else { muted() })),
         );
+    if let Some((n, tone)) = count {
+        e = e.child(
+            text(n.to_string())
+                .key("sidebar-activity-count")
+                .font(medium(10.5))
+                .color(rgb(tone)),
+        );
+    }
     if active {
         e.fill(white(0.11))
             .border_gradient(1., white(0.15), white(0.04))
@@ -401,6 +415,12 @@ fn segment(
 
 fn mode_switch(s: &Workspace) -> El {
     let mode = s.settings.sidebar_mode;
+    // Panes that need you or finished unseen: `WARNING` while any needs you, else `ACCENT`.
+    let unread = match s.unread() {
+        (0, _) => None,
+        (n, true) => Some((n, warning())),
+        (n, false) => Some((n, accent())),
+    };
     row()
         .role("tablist")
         .gap(2.)
@@ -408,12 +428,14 @@ fn mode_switch(s: &Workspace) -> El {
         .child(segment(
             "sidebar-mode:sessions",
             "Sessions",
+            None,
             mode == SidebarMode::Sessions,
             |s| s.set_sidebar_mode(SidebarMode::Sessions),
         ))
         .child(segment(
             "sidebar-mode:activity",
             "Activity",
+            unread,
             mode == SidebarMode::Activity,
             |s| s.set_sidebar_mode(SidebarMode::Activity),
         ))
@@ -632,12 +654,14 @@ fn activity_bar(s: &Workspace) -> El {
                 .child(segment(
                     "activity-grouping:priority",
                     "Priority",
+                    None,
                     grouping == ActivityGrouping::Priority,
                     set(ActivityGrouping::Priority),
                 ))
                 .child(segment(
                     "activity-grouping:session",
                     "Session",
+                    None,
                     grouping == ActivityGrouping::Session,
                     set(ActivityGrouping::Session),
                 )),

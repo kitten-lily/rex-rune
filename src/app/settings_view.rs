@@ -238,6 +238,7 @@ fn channel_cell(key: String, label: String, cell: Option<(bool, bool, Field)>) -
                 let value = field(&mut s.settings.notifications);
                 *value = !*value;
                 s.sync_prefetch();
+                s.update_badge();
                 s.save();
             })
             .build(kit())

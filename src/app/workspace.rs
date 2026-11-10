@@ -180,6 +180,10 @@ pub struct Workspace {
     pub notifier: Option<Notifier>,
     /// Notifications headless tests would have sent.
     pub outbox: Vec<Note>,
+    /// The unread count the launcher badge last showed.
+    pub badge: usize,
+    /// Badge counts headless tests would have sent.
+    pub badges: Vec<usize>,
     pub integrations: super::integrations::Integrations,
     pub ssh_setup: super::ssh_setup::Setup,
     /// The tailnet's machines, for Add host.
@@ -324,6 +328,8 @@ impl Workspace {
             activity_epochs: HashMap::new(),
             notifier: None,
             outbox: Vec::new(),
+            badge: 0,
+            badges: Vec::new(),
             integrations: Default::default(),
             ssh_setup: Default::default(),
             discovery: Default::default(),
@@ -435,6 +441,7 @@ impl Workspace {
         {
             self.pending_column_change = None;
         }
+        self.update_badge();
     }
 
     /// Stop connecting to saved host `index` and drop it from the workspace. Its server, its

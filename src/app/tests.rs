@@ -2929,6 +2929,74 @@ fn each_states_tab_channel_hides_only_its_own_word() {
 }
 
 #[test]
+fn the_unread_count_follows_panes_that_need_you_or_finished_unseen() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    assert_eq!(ws.unread_count(), 0);
+    set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+    assert_eq!(ws.unread_count(), 0, "working never counts");
+    set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+    // The tab in front counts too: it needs you until it's answered.
+    set_activity(&mut ws, "block:a", &[("", record(Error, false))]);
+    assert_eq!(ws.unread_count(), 2);
+    set_activity(&mut ws, "block:b", &[]);
+    assert_eq!(ws.unread_count(), 3, "block:b finished out of sight");
+    ws.settings.notifications.blocked.badge = false;
+    assert_eq!(
+        ws.unread_count(),
+        2,
+        "Blocked doesn't count when its Count is off"
+    );
+    ws.update_badge();
+    // Seeing the tab clears its Done.
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .active_window_id = Some("split".into());
+    ws.track_activity(0);
+    assert_eq!(ws.unread_count(), 1);
+    set_activity(&mut ws, "block:a", &[]);
+    assert_eq!(ws.unread_count(), 0);
+    // The badge is sent only when the count changes.
+    assert_eq!(ws.badges, [1, 2, 3, 2, 1, 0]);
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn the_activity_segment_shows_the_unread_count() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let count = |badge: bool| {
+        let (mut ws, _rx) = tabbed_workspace("single");
+        ws.track_activity(0);
+        ws.settings.notifications.blocked.badge = badge;
+        set_activity(&mut ws, "block:b", &[("", record(Blocked, true))]);
+        set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+        ws.toggle_sidebar();
+        let mut rt = runtime(ws);
+        settle(&mut rt);
+        let elements = rt.elements();
+        let text = elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some("sidebar-activity-count"))
+            .and_then(|e| e.text.clone());
+        let label = elements
+            .iter()
+            .find(|e| e.key.as_deref() == Some("sidebar-mode:activity"))
+            .and_then(|e| e.label.clone());
+        std::fs::remove_file(&rt.state.settings_path).ok();
+        (text, label)
+    };
+    assert_eq!(
+        count(true),
+        (Some("2".into()), Some("Activity, 2 unread".into()))
+    );
+    assert_eq!(count(false), (None, Some("Activity".into())));
+}
+
+#[test]
 fn tab_pills_carry_the_activity_word_and_hide_it_when_turned_off() {
     use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
     let pill = |show: bool| {

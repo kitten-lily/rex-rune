@@ -413,6 +413,60 @@ impl Workspace {
         for (state, session, window, block, activity) in notes {
             self.notify_state(index, state, session, window, block, &activity);
         }
+        self.update_badge();
+    }
+
+    /// Panes that want the user, across connected hosts: Blocked or Error, or Done they
+    /// haven't seen, each only while its state's Count channel is on. Working never counts.
+    pub fn unread_count(&self) -> usize {
+        self.unread().0
+    }
+
+    /// The unread count, and whether any of it is a pane that needs you or failed.
+    pub fn unread(&self) -> (usize, bool) {
+        let config = &self.settings.notifications;
+        let (mut count, mut trouble) = (0, false);
+        for host in self.hosts.iter().filter(|h| h.model.connected) {
+            let model = &host.model;
+            let panes: std::collections::HashSet<&str> = model
+                .views
+                .values()
+                .flat_map(|v| &v.windows)
+                .flat_map(blocks)
+                .collect();
+            for block in panes {
+                let state = pane_activity(model, block).state;
+                let needs = match state {
+                    ProgramState::Blocked => config.blocked.badge,
+                    ProgramState::Error => config.error.badge,
+                    _ => false,
+                };
+                let done =
+                    config.done.badge && self.unseen_panes.contains(&(host.id, block.to_owned()));
+                if needs || done {
+                    count += 1;
+                    trouble |= needs;
+                }
+            }
+        }
+        (count, trouble)
+    }
+
+    /// Send the unread count to the desktop's launcher badge when it changed.
+    pub fn update_badge(&mut self) {
+        let count = self.unread_count();
+        if count == self.badge {
+            return;
+        }
+        self.badge = count;
+        if cfg!(test) {
+            self.badges.push(count);
+            return;
+        }
+        let handle = self.handle.clone();
+        self.notifier
+            .get_or_insert_with(|| Notifier::spawn(handle))
+            .badge(count);
     }
 
     fn notify_state(
