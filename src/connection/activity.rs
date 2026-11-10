@@ -244,25 +244,26 @@ pub fn parse_title(body: &Value) -> BlockEvent {
 
 /// A `pwd_changed` payload or a `pwd` reply.
 pub fn parse_pwd(body: &Value) -> BlockEvent {
-    BlockEvent::Pwd(body["pwd"].as_str().filter(|s| !s.is_empty()).map(cwd_path))
+    BlockEvent::Pwd(body["pwd"].as_str().and_then(cwd_path))
 }
 
 /// The path in a reported working directory: a `file://host/path` URL's path with its `%XX`
-/// escapes decoded (an invalid escape stays as written), or a plain path unchanged.
-pub fn cwd_path(reported: &str) -> String {
+/// escapes decoded (an escape that isn't `%` and two hex digits stays as written), or a plain
+/// path unchanged. None when there's no path, as in `file://host`.
+pub fn cwd_path(reported: &str) -> Option<String> {
     let Some(rest) = reported.strip_prefix("file://") else {
-        return reported.to_owned();
+        return (!reported.is_empty()).then(|| reported.to_owned());
     };
     let path = rest.find('/').map_or("", |at| &rest[at..]);
     let bytes = path.as_bytes();
+    let hex = |b: u8| char::from(b).to_digit(16);
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        let escaped = (bytes[i] == b'%')
-            .then(|| bytes.get(i + 1..i + 3))
-            .flatten()
-            .and_then(|hex| std::str::from_utf8(hex).ok())
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        let escaped = match bytes[i..] {
+            [b'%', high, low, ..] => hex(high).zip(hex(low)).map(|(h, l)| (h * 16 + l) as u8),
+            _ => None,
+        };
         match escaped {
             Some(byte) => {
                 out.push(byte);
@@ -274,7 +275,7 @@ pub fn cwd_path(reported: &str) -> String {
             }
         }
     }
-    String::from_utf8_lossy(&out).into_owned()
+    (!out.is_empty()).then(|| String::from_utf8_lossy(&out).into_owned())
 }
 
 /// A `program_status` reply's records by id; the root record's id is empty.
