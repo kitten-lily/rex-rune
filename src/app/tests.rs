@@ -4195,6 +4195,46 @@ fn activity_mode_shows_an_empty_state() {
 }
 
 #[test]
+fn the_sidebar_segments_say_which_is_selected() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let selected = |rt: &Runtime<Workspace>, key: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("{key}"))
+            .item_selected
+    };
+    assert!(selected(&rt, "sidebar-mode:sessions"));
+    assert!(!selected(&rt, "sidebar-mode:activity"));
+    click(&mut rt, "sidebar-mode:activity");
+    settle(&mut rt);
+    assert!(!selected(&rt, "sidebar-mode:sessions"));
+    assert!(selected(&rt, "sidebar-mode:activity"));
+    assert!(selected(&rt, "activity-grouping:priority"));
+    assert!(!selected(&rt, "activity-grouping:session"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn only_sessions_mode_offers_to_find_a_session() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(has(&rt, "session-search"));
+    click(&mut rt, "sidebar-mode:activity");
+    settle(&mut rt);
+    assert!(
+        !has(&rt, "session-search"),
+        "Activity lists panes, not sessions"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn activity_grouping_and_idle_switches_apply() {
     use rex_linux::{connection::activity::ProgramState::Working, settings::ActivityGrouping};
     let (mut ws, _rx) = tabbed_workspace("single");
