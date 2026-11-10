@@ -17,7 +17,7 @@ use rex_linux::{
         HostCommand,
         activity::{ProgramState, TerminalProgress},
     },
-    settings::{ActivityGrouping, SidebarMode},
+    settings::{ActivityGrouping, SessionList, SidebarMode},
 };
 use rune::{Cursor, Cx, Edge, El, ScrollSpec, SpringPair, Transition, Tx, col, el, row, text};
 
@@ -129,7 +129,32 @@ fn host_header(s: &Workspace, index: usize) -> El {
         .child(plus)
 }
 
-fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
+/// Graphemes a flat list's host prefix keeps, before "…", while the session name shortens.
+const PREFIX_KEEP: usize = 3;
+
+/// The flat list's uppercase host prefix. It takes only the space the session name leaves
+/// (no basis of its own, at most its full width), so it shortens first, down to
+/// [`PREFIX_KEEP`] characters; the name truncates after that.
+fn host_prefix(host: &str) -> El {
+    let host = host.to_uppercase();
+    let style = label_caps();
+    let full = rune::text::advance(&host, style).ceil();
+    let kept: String = host.chars().take(PREFIX_KEEP).collect();
+    let least = if kept.len() < host.len() {
+        rune::text::advance(&format!("{kept}…"), style).ceil()
+    } else {
+        full
+    };
+    text(host)
+        .font(style)
+        .color(rgb(muted()))
+        .truncate()
+        .grow(1.)
+        .min_w(least.min(full))
+        .max_w(full)
+}
+
+fn session_row(s: &Workspace, index: usize, id: &str, label: &str, prefixed: bool) -> El {
     let host = &s.hosts[index];
     let selected = index == s.active && host.model.selected.as_deref() == Some(id);
     let count = host.model.views.get(id).map(|v| v.windows.len());
@@ -144,10 +169,17 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
     let mut e = row()
         .key(format!("session:{index}:{id}"))
         .role("button")
-        .label(if selected {
-            format!("{label} (current)")
-        } else {
-            label.to_owned()
+        .label({
+            let named = if prefixed {
+                format!("{} · {label}", s.settings.hosts[index].label)
+            } else {
+                label.to_owned()
+            };
+            if selected {
+                format!("{named} (current)")
+            } else {
+                named
+            }
         })
         .h(if s.settings.vertical_tabs {
             24.
@@ -184,6 +216,37 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
     } else {
         e = e.hover(white(0.05));
     }
+    let name = text(label.to_owned())
+        .key(format!("session-label:{index}:{id}"))
+        .font(if s.settings.vertical_tabs {
+            medium(11.5)
+        } else if selected {
+            medium(13.)
+        } else {
+            ui(13.)
+        })
+        .color(rgb(if selected && !s.settings.vertical_tabs {
+            ink()
+        } else {
+            muted()
+        }))
+        .truncate();
+    let name = if prefixed {
+        row()
+            .key(format!("session-name:{index}:{id}"))
+            .grow(1.)
+            .shrink()
+            .gap(5.)
+            .center_y()
+            .child(
+                host_prefix(&s.settings.hosts[index].label)
+                    .key(format!("session-host:{index}:{id}")),
+            )
+            .child(text("·").font(label_caps()).color(rgb(muted())))
+            .child(name)
+    } else {
+        name.grow(1.).shrink()
+    };
     e = e
         .child(if s.settings.vertical_tabs {
             el()
@@ -194,24 +257,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str) -> El {
                 rgb(if selected { accent() } else { muted() }),
             )
         })
-        .child(
-            text(label.to_owned())
-                .font(if s.settings.vertical_tabs {
-                    medium(11.5)
-                } else if selected {
-                    medium(13.)
-                } else {
-                    ui(13.)
-                })
-                .color(rgb(if selected && !s.settings.vertical_tabs {
-                    ink()
-                } else {
-                    muted()
-                }))
-                .truncate()
-                .grow(1.)
-                .shrink(),
-        );
+        .child(name);
     if let Some((word, tone, needing)) = s.session_word(index, id) {
         e = e.child(
             text(word)
@@ -658,7 +704,80 @@ fn activity_bar(s: &Workspace) -> El {
 }
 
 /// Hosts and their sessions (and with Sidebar tab position, their tabs).
+/// One host's session rows (and with Sidebar tab position, their tabs), and their height.
+fn session_rows(s: &Workspace, index: usize, prefixed: bool, mut group: El) -> (El, f32) {
+    let host = &s.hosts[index];
+    let mut height = 0.;
+    for session in &host.model.sessions {
+        group = group.child(session_row(
+            s,
+            index,
+            &session.session_id,
+            &session.label,
+            prefixed,
+        ));
+        height += if s.settings.vertical_tabs {
+            26.
+        } else {
+            SESSION_ROW + 2.
+        };
+        if s.settings.vertical_tabs
+            && let Some(view) = host.model.views.get(&session.session_id)
+        {
+            for tab in &view.windows {
+                if tab.window_id.is_some() {
+                    group = group.child(window_row(s, index, &session.session_id, tab));
+                    height += 34.;
+                }
+            }
+        }
+    }
+    (group, height)
+}
+
+/// Every connected host's sessions in one list, in host order. Offline hosts are left out
+/// (the switcher and the identity menu still list them); with two or more connected, each
+/// row names its host.
+fn flat_session_list(s: &Workspace) -> (El, f32) {
+    let connected: Vec<usize> = (0..s.hosts.len())
+        .filter(|&i| s.hosts[i].model.connected)
+        .collect();
+    let prefixed = connected.len() >= 2;
+    let mut group = col().key("group:flat").gap(2.);
+    let mut height = 0.;
+    for &index in &connected {
+        let (next, h) = session_rows(s, index, prefixed, group);
+        group = next;
+        height += h;
+    }
+    if height == 0. {
+        // Nothing to list: offer a session on the active host, or wait for one to connect.
+        let target = if connected.contains(&s.active) {
+            Some(s.active)
+        } else {
+            connected.first().copied()
+        };
+        if let Some(index) = target {
+            group = group.child(new_session(s, index));
+            height += SESSION_ROW + 2.;
+        } else {
+            group = group.child(note("Waiting for connection…", muted()));
+            height += NOTE_ROW;
+        }
+    }
+    (
+        col()
+            .key("sidebar-content")
+            .px(8.)
+            .child(group.pb(GROUP_GAP)),
+        height + GROUP_GAP,
+    )
+}
+
 fn session_list(s: &Workspace) -> (El, f32) {
+    if s.settings.sidebar_sessions == SessionList::Flat {
+        return flat_session_list(s);
+    }
     let mut list = col().key("sidebar-content").px(8.);
     let mut height = 0.;
     for (index, host) in s.hosts.iter().enumerate() {
@@ -669,24 +788,9 @@ fn session_list(s: &Workspace) -> (El, f32) {
             .child(host_header(s, index));
         height += HOST_ROW;
         if !config.collapsed {
-            for session in &host.model.sessions {
-                group = group.child(session_row(s, index, &session.session_id, &session.label));
-                height += if s.settings.vertical_tabs {
-                    26.
-                } else {
-                    SESSION_ROW + 2.
-                };
-                if s.settings.vertical_tabs
-                    && let Some(view) = host.model.views.get(&session.session_id)
-                {
-                    for tab in &view.windows {
-                        if tab.window_id.is_some() {
-                            group = group.child(window_row(s, index, &session.session_id, tab));
-                            height += 34.;
-                        }
-                    }
-                }
-            }
+            let (next, h) = session_rows(s, index, false, group);
+            group = next;
+            height += h;
             if host.model.sessions.is_empty() {
                 if host.model.connected {
                     group = group.child(new_session(s, index));

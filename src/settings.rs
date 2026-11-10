@@ -102,6 +102,16 @@ pub enum SidebarMode {
     Activity,
 }
 
+/// How Sessions mode lists sessions: under a header per host, or in one list with the host
+/// as a prefix while two or more hosts are connected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionList {
+    #[default]
+    ByHost,
+    Flat,
+}
+
 /// Client-local column widths, keyed by host endpoint, session, window and column.
 pub type ColumnWidths = HashMap<String, HashMap<String, HashMap<String, HashMap<String, f64>>>>;
 
@@ -390,6 +400,7 @@ pub struct Settings {
     /// The sidebar was open when the app last saved, so it opens again at launch.
     pub sidebar_open: bool,
     pub sidebar_mode: SidebarMode,
+    pub sidebar_sessions: SessionList,
     pub vertical_tabs: bool,
     pub font_size: f32,
     pub font_family: String,
@@ -445,6 +456,7 @@ impl Default for Settings {
             sidebar_width: 236.,
             sidebar_open: false,
             sidebar_mode: SidebarMode::default(),
+            sidebar_sessions: SessionList::default(),
             vertical_tabs: false,
             font_size: 15.,
             font_family: "JetBrainsMono Nerd Font".into(),
@@ -906,6 +918,17 @@ mod tests {
         assert_eq!(saved.activity_grouping, ActivityGrouping::Session);
         assert!(saved.activity_show_idle);
         assert_eq!(saved.sidebar_mode, SidebarMode::Activity);
+    }
+
+    #[test]
+    fn the_session_list_defaults_to_by_host_and_round_trips() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.sidebar_sessions, SessionList::ByHost);
+        let saved: Settings =
+            serde_json::from_value(serde_json::json!({ "sidebar_sessions": "flat" })).unwrap();
+        assert_eq!(saved.sidebar_sessions, SessionList::Flat);
+        let json = serde_json::to_value(&saved).unwrap();
+        assert_eq!(json["sidebar_sessions"], "flat");
     }
 
     #[test]

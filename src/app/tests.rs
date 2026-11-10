@@ -18,7 +18,7 @@ use super::{
 use clap::Parser;
 use rex_linux::{
     connection::{HostCommand, HostConnection, Options},
-    settings::{FocusCentering, Host, Settings, TabLayout, TerminalThemeChoice},
+    settings::{FocusCentering, Host, SessionList, Settings, TabLayout, TerminalThemeChoice},
     terminal_theme::ThemeDirs,
 };
 use rune::{AppSpec, Env, GesturePhase, Key, KeyEvent, Mods, Runtime, WheelEvent};
@@ -5891,4 +5891,111 @@ fn ctrl_shift_f_searches_the_focused_terminal_without_typing_into_it() {
         focused(&rt)
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// Three hosts for the flat session list: two connected (the second collapsed), one offline.
+fn flat_workspace() -> (Workspace, Vec<flume::Receiver<HostCommand>>) {
+    let mut ws = workspace_hosts(3);
+    let rx = (0..3).map(|i| capture_host(&mut ws, i)).collect();
+    for (i, ids) in [&["a", "b"][..], &["c"], &["d"]].into_iter().enumerate() {
+        ws.hosts[i].model.connected = i < 2;
+        ws.hosts[i].model.sessions = ids.iter().map(|id| session(id)).collect();
+    }
+    ws.hosts[0].model.selected = Some("a".into());
+    ws.settings.hosts[1].collapsed = true;
+    ws.settings.sidebar_sessions = SessionList::Flat;
+    ws.sidebar.toggle();
+    (ws, rx)
+}
+
+fn rect(rt: &Runtime<Workspace>, key: &str) -> [f32; 4] {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("missing {key}"))
+        .rect
+}
+
+#[test]
+fn the_flat_session_list_names_hosts_only_while_two_are_connected() {
+    let (ws, _rx) = flat_workspace();
+    let mut rt = runtime(ws);
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    for key in ["host:0", "host:1", "host:2", "retry-host:2", "session:2:d"] {
+        assert!(!has(&rt, key), "{key} is not listed");
+    }
+    let rows = ["session:0:a", "session:0:b", "session:1:c"].map(|k| rect(&rt, k)[1]);
+    assert!(
+        rows[0] < rows[1] && rows[1] < rows[2],
+        "host order: {rows:?}"
+    );
+    assert!(has(&rt, "session-host:0:a") && has(&rt, "session-host:1:c"));
+    rt.update(|s, _| s.hosts[1].model.connected = false);
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    assert!(!has(&rt, "session:1:c"));
+    assert!(has(&rt, "session:0:a") && !has(&rt, "session-host:0:a"));
+    rt.update(|s, _| s.set_session_list(SessionList::ByHost));
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        has(&rt, "host:1") && !has(&rt, "session:1:c"),
+        "still collapsed"
+    );
+    assert_eq!(
+        Settings::load(&rt.state.settings_path)
+            .unwrap()
+            .sidebar_sessions,
+        SessionList::ByHost
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_long_host_prefix_shortens_before_the_session_name() {
+    let (mut ws, _rx) = flat_workspace();
+    ws.settings.hosts[0].label = "a-rather-long-build-machine-name".into();
+    ws.hosts[0].model.sessions = vec![
+        session("a"),
+        session("a-session-name-too-long-to-fit-anywhere"),
+    ];
+    let mut rt = runtime(ws);
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    let host = |rt: &Runtime<Workspace>, id: &str| rect(rt, &format!("session-host:0:{id}"))[2];
+    let name = |rt: &Runtime<Workspace>, id: &str| rect(rt, &format!("session-label:0:{id}"))[2];
+    let full = rune::text::advance(
+        "A-RATHER-LONG-BUILD-MACHINE-NAME",
+        super::theme::label_caps(),
+    );
+    assert!(host(&rt, "a") < full, "the prefix is cut");
+    assert!(
+        name(&rt, "a") >= rune::text::advance("a", super::theme::medium(13.)) - 0.5,
+        "a short name stays whole"
+    );
+    let least = rune::text::advance("A-R…", super::theme::label_caps()).ceil();
+    let long = "a-session-name-too-long-to-fit-anywhere";
+    assert!((host(&rt, long) - least).abs() < 0.5, "down to its minimum");
+    assert!(name(&rt, long) < rune::text::advance(long, super::theme::ui(13.)));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn the_flat_list_loads_tabs_of_collapsed_hosts() {
+    let (mut ws, rx) = flat_workspace();
+    watch_no_activity(&mut ws);
+    ws.set_vertical_tabs(true);
+    assert_eq!(
+        latest(&rx[1]),
+        Some(vec!["c".to_owned()]),
+        "collapsed, but listed"
+    );
+    ws.set_session_list(SessionList::ByHost);
+    assert_eq!(latest(&rx[1]), Some(vec![]));
+    std::fs::remove_file(&ws.settings_path).ok();
 }

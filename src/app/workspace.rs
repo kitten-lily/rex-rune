@@ -18,8 +18,8 @@ use rex_linux::{
         MIN_COLUMN_WIDTH, Placement, Strip, shell_layout,
     },
     settings::{
-        ChromeTheme, FocusCentering, Host, NoticePosition, Settings, SidebarMode, TabLayout,
-        TerminalThemeChoice, normalize_font_preferences, validate_host,
+        ChromeTheme, FocusCentering, Host, NoticePosition, SessionList, Settings, SidebarMode,
+        TabLayout, TerminalThemeChoice, normalize_font_preferences, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
@@ -1759,14 +1759,16 @@ impl Workspace {
     /// Ask each host for the views of the sessions the client reads activity from: every
     /// connected host's while tabs show activity (session rows and the switcher name each
     /// session's) or the sidebar is in Activity mode, since panes report from any session; and
-    /// those of expanded hosts while the sidebar is open with Sidebar tab position.
+    /// those it lists (expanded hosts', or every host's in the flat list) while the sidebar is
+    /// open with Sidebar tab position.
     pub fn sync_prefetch(&mut self) {
         let listing = self.sidebar_tabs();
+        let flat = self.settings.sidebar_sessions == SessionList::Flat;
         let every = self.settings.notifications.watches_activity()
             || (self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity);
         for index in 0..self.hosts.len() {
             let eligible = (every && self.hosts[index].model.connected)
-                || (listing && !self.settings.hosts[index].collapsed);
+                || (listing && (flat || !self.settings.hosts[index].collapsed));
             let wanted: HashSet<String> = if eligible {
                 let sessions = &self.hosts[index].model.sessions;
                 sessions.iter().map(|s| s.session_id.clone()).collect()
@@ -2063,6 +2065,11 @@ impl Workspace {
         if vertical {
             self.sidebar.set_open(true);
         }
+        self.save();
+    }
+
+    pub fn set_session_list(&mut self, list: SessionList) {
+        self.settings.sidebar_sessions = list;
         self.save();
     }
 

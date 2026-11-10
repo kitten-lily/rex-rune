@@ -7,7 +7,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_linux::settings::{
-    Channels, FocusCentering, NoticePosition, NotificationsConfig, TabLayout,
+    Channels, FocusCentering, NoticePosition, NotificationsConfig, SessionList, TabLayout,
 };
 use rune::{Cursor, El, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::{Checkbox, IconButton, Keybind, SegmentedControl, Switch};
@@ -171,6 +171,26 @@ fn interface(s: &Workspace) -> El {
             .on_pick(|s: &mut Workspace, i, _| s.set_vertical_tabs(i == 1))
             .build(k)
             .key("tab-position"),
+        ))
+        .child(setting(
+            "Session list",
+            "Under a header per host, or one list naming each session's host while two or more are connected.",
+            SegmentedControl::new(
+                &["By host", "Flat"],
+                Some(usize::from(
+                    s.settings.sidebar_sessions == SessionList::Flat,
+                )),
+            )
+            .fit()
+            .on_pick(|s: &mut Workspace, i, _| {
+                s.set_session_list(if i == 1 {
+                    SessionList::Flat
+                } else {
+                    SessionList::ByHost
+                })
+            })
+            .build(k)
+            .key("session-list"),
         ))
         .child(setting(
             "Tab layout",
