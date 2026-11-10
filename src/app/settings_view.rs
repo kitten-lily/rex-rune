@@ -12,18 +12,27 @@ use rune_kit::{IconButton, Keybind, SegmentedControl, Switch};
 
 /// A labelled setting: name and optional explanation on the left, its control on the right.
 pub(super) fn setting(label: &str, detail: &str, control: El) -> El {
+    let detail = (!detail.is_empty()).then(|| detail_text(detail, muted()));
+    setting_with(label, detail, control)
+}
+
+/// A setting's explanation, in `muted()` or, for a problem, `warning()`.
+pub(super) fn detail_text(detail: &str, color: u32) -> El {
+    text(detail.to_owned())
+        .font(ui(11.5))
+        .color(rgb(color))
+        .wrap()
+}
+
+/// [`setting`] with an explanation built by the caller.
+pub(super) fn setting_with(label: &str, detail: Option<El>, control: El) -> El {
     let mut words = col()
         .grow(1.)
         .min_w(0.)
         .gap(2.)
         .child(text(label.to_owned()).font(ui(13.)).color(rgb(ink())));
-    if !detail.is_empty() {
-        words = words.child(
-            text(detail.to_owned())
-                .font(ui(11.5))
-                .color(rgb(muted()))
-                .wrap(),
-        );
+    if let Some(detail) = detail {
+        words = words.child(detail);
     }
     row()
         .w_full()
@@ -476,6 +485,7 @@ fn hosts(s: &Workspace) -> El {
                     .build(kit())
                     .key(format!("remote-control:{i}")),
             ))
+            .child(super::tailscale::rows(s, i))
             .child(divider());
     }
     body.child(row().mt(8.).child(pill(

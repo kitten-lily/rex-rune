@@ -175,6 +175,8 @@ pub enum Form {
     ClientLabel,
     /// A host's default shell for new terminals.
     HostShell(usize),
+    /// A local host's built-in Tailscale device name.
+    TailscaleName(usize),
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
     RenameSession(Option<SessionTarget>),
     RenameWindow(String),
