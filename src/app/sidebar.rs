@@ -300,13 +300,7 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
                 .grow(1.)
                 .min_w(0.),
         );
-    if active {
-        row = row
-            .fill(white(0.11))
-            .border_gradient(1., white(0.15), white(0.04));
-    } else {
-        row = row.hover(white(0.05));
-    }
+    row = pill(row, active);
     let config = &s.settings.notifications;
     if let Some((word, tone)) = shown_word(
         config,
@@ -363,8 +357,41 @@ fn new_session(s: &Workspace, index: usize) -> El {
         )
 }
 
+/// The tab pill's fill and hairline when `on`, else only a hover fill.
+fn pill(e: El, on: bool) -> El {
+    if on {
+        e.fill(white(0.11))
+            .border_gradient(1., white(0.15), white(0.04))
+    } else {
+        e.hover(white(0.05))
+    }
+}
+
+/// A 26 pt pill button: a segment or a toggle, its label medium and in ink when on.
+fn pill_button(key: &str, label: &'static str, on: bool) -> El {
+    pill(
+        row()
+            .key(key.to_owned())
+            .label(label)
+            .h(SEGMENT)
+            .px(10.)
+            .center()
+            .radius(8.)
+            .continuous_corners()
+            .cursor(Cursor::Pointer)
+            .preserve_focus_on_press(true)
+            .tab_index(-1)
+            .child(
+                text(label)
+                    .font(if on { medium(12.) } else { ui(12.) })
+                    .color(rgb(if on { ink() } else { muted() })),
+            ),
+        on,
+    )
+}
+
 /// One segment of a two-way switch: the active one on the tab pill's fill and hairline,
-/// with an optional count after its label.
+/// selected for assistive technology, with an optional count after its label.
 fn segment(
     key: &str,
     label: &'static str,
@@ -372,44 +399,26 @@ fn segment(
     active: bool,
     f: impl Fn(&mut Workspace) + 'static,
 ) -> El {
-    let mut e = row()
-        .key(key.to_owned())
+    let e = pill_button(key, label, active)
+        .gap(5.)
         .role("tab")
         .label(match count {
             Some((n, _)) => format!("{label}, {n} unread"),
             None => label.to_owned(),
         })
-        .h(SEGMENT)
-        .px(10.)
-        .gap(5.)
-        .center()
-        .radius(8.)
-        .continuous_corners()
-        .cursor(Cursor::Pointer)
-        .preserve_focus_on_press(true)
-        .tab_index(-1)
+        .focus_selected(active)
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
             f(s);
             tx.blur();
-        })
-        .child(
-            text(label)
-                .font(if active { medium(12.) } else { ui(12.) })
-                .color(rgb(if active { ink() } else { muted() })),
-        );
-    if let Some((n, tone)) = count {
-        e = e.child(
+        });
+    match count {
+        Some((n, tone)) => e.child(
             text(n.to_string())
                 .key("sidebar-activity-count")
                 .font(medium(10.5))
                 .color(rgb(tone)),
-        );
-    }
-    if active {
-        e.fill(white(0.11))
-            .border_gradient(1., white(0.15), white(0.04))
-    } else {
-        e.hover(white(0.05))
+        ),
+        None => e,
     }
 }
 
@@ -559,7 +568,8 @@ fn activity_group(s: &Workspace, n: usize, group: &ActivityGroup) -> (El, f32) {
 }
 
 /// The panes reporting activity on every connected host, grouped as the user chose.
-fn activity_list(s: &Workspace) -> (El, f32) {
+/// `empty_height` is the empty-state note's height as last laid out: it wraps when narrow.
+fn activity_list(s: &Workspace, empty_height: Option<f32>) -> (El, f32) {
     let hosts: Vec<_> = s
         .hosts
         .iter()
@@ -582,7 +592,7 @@ fn activity_list(s: &Workspace) -> (El, f32) {
                 .grow(1.)
                 .min_w(0.),
         );
-        return (list.child(empty), NOTE_ROW);
+        return (list.child(empty), empty_height.unwrap_or(NOTE_ROW));
     }
     let mut height = 0.;
     for (n, group) in groups.iter().enumerate() {
@@ -603,44 +613,20 @@ fn activity_bar(s: &Workspace) -> El {
             s.save();
         }
     };
-    let mut toggle = row()
-        .key("activity-idle")
+    let action = if idle {
+        "Hide idle agents"
+    } else {
+        "Show idle agents"
+    };
+    let toggle = pill_button("activity-idle", "Idle", idle)
         .role("button")
-        .label(if idle {
-            "Hide idle agents"
-        } else {
-            "Show idle agents"
-        })
-        .help(if idle {
-            "Hide idle agents"
-        } else {
-            "Show idle agents"
-        })
-        .h(SEGMENT)
-        .px(10.)
-        .center()
-        .radius(8.)
-        .continuous_corners()
-        .cursor(Cursor::Pointer)
-        .preserve_focus_on_press(true)
-        .tab_index(-1)
+        .label(action)
+        .help(action)
         .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
             s.settings.activity_show_idle = !s.settings.activity_show_idle;
             s.save();
             tx.blur();
-        })
-        .child(
-            text("Idle")
-                .font(if idle { medium(12.) } else { ui(12.) })
-                .color(rgb(if idle { ink() } else { muted() })),
-        );
-    toggle = if idle {
-        toggle
-            .fill(white(0.11))
-            .border_gradient(1., white(0.15), white(0.04))
-    } else {
-        toggle.hover(white(0.05))
-    };
+        });
     row()
         .h(40.)
         .px(8.)
@@ -736,7 +722,7 @@ fn session_list(s: &Workspace) -> (El, f32) {
 pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     let activity = s.settings.sidebar_mode == SidebarMode::Activity;
     let (list, height) = if activity {
-        activity_list(s)
+        activity_list(s, cx.layout_size("activity-empty").map(|[_, h]| h))
     } else {
         session_list(s)
     };
@@ -824,9 +810,12 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                         |s, tx| s.perform(Intent::ChooseHost(String::new()), tx),
                     )
                 }),
-        )
-        .child(find)
-        .child(area);
+        );
+    // Activity lists panes, not sessions; ⌃K still opens the switcher there.
+    if !activity {
+        panel = panel.child(find);
+    }
+    panel = panel.child(area);
     if overflow {
         panel = panel.child(fx.hint_el());
     }

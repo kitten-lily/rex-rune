@@ -1948,9 +1948,35 @@ fn working_directories_follow_pwd_reports() {
     model.forget_block("b");
     assert!(model.cwds.is_empty(), "a closed block's directory goes");
 
-    assert_eq!(activity::cwd_path("/plain"), "/plain");
-    assert_eq!(activity::cwd_path("file:///x"), "/x");
-    assert_eq!(activity::cwd_path("file://h/bad%zz"), "/bad%zz");
+    let path = |reported| activity::cwd_path(reported);
+    assert_eq!(path("/plain").as_deref(), Some("/plain"));
+    assert_eq!(path("file:///x").as_deref(), Some("/x"));
+    assert_eq!(path("file://h/bad%zz").as_deref(), Some("/bad%zz"));
+    assert_eq!(path("file://h/a%2fb").as_deref(), Some("/a/b"));
+    assert_eq!(
+        path("file://h/x%+f").as_deref(),
+        Some("/x%+f"),
+        "an escape is two hex digits, never a sign"
+    );
+    assert_eq!(path("file://h/x%").as_deref(), Some("/x%"), "a trailing %");
+    assert_eq!(
+        path("file://h/x%2").as_deref(),
+        Some("/x%2"),
+        "half an escape"
+    );
+    assert_eq!(
+        path("file://h"),
+        None,
+        "a host with no path is no directory"
+    );
+    assert_eq!(path(""), None);
+
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::parse_pwd(&json!({"pwd":"file://h"})),
+    );
+    assert!(model.cwds.is_empty(), "an empty path stores nothing");
 }
 
 #[tokio::test]

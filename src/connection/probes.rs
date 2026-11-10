@@ -1,8 +1,11 @@
 //! What each known terminal last reported before this client was listening: its program
 //! status, title, foreground process and working directory. Every session whose view is known
-//! is read, the selected one first, one request in flight at a time and each (block, probe)
-//! once per connection (again only when a live event outdated its answer), alongside control
-//! traffic rather than in its way. Live events keep the answers current afterwards.
+//! is read, the selected one first, and every block's status before any title, process or
+//! directory, since a row needs only its status to appear. One request is in flight at a time
+//! and each (block, probe) is asked once per connection, alongside control traffic rather than
+//! in its way. Live events keep the answers current afterwards; a status read that a live
+//! event outdated is asked again, while any other outdated read is dropped, since its event
+//! already carried the whole value.
 use crate::{
     connection::{
         HostModel,
@@ -14,7 +17,7 @@ use crate::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     time::{Duration, Instant},
 };
 use tokio::sync::oneshot;
@@ -25,9 +28,9 @@ const TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
 pub struct Probes {
-    /// Every (block, probe) asked on this connection, answered or not: a failed read isn't
-    /// retried until the next connection, only an outdated one.
-    started: HashSet<(String, Probe)>,
+    /// Each block's probes asked on this connection, by `Probe as usize`, answered or not: a
+    /// failed read isn't retried until the next connection, only an outdated status read.
+    started: HashMap<String, [bool; 4]>,
     in_flight: Option<InFlight>,
 }
 
@@ -48,7 +51,8 @@ pub struct Finished {
     pub probe: Probe,
     /// The block's stamp for this probe when it was sent.
     pub stamp: u64,
-    /// The response's payload; none on an error or a timeout.
+    /// The response's payload; none on an error or a timeout. A response with neither a
+    /// payload nor an error is a failed read too.
     pub reply: Option<Value>,
 }
 
@@ -56,9 +60,10 @@ pub struct Finished {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Applied,
-    /// Outdated by a live event; it will be asked again.
+    /// A status read outdated by a live event; it will be asked again.
     Stale,
-    /// Failed, or its session or block is gone; it won't be asked again on this connection.
+    /// Failed, outdated by a live event that carried the whole value, or its session or block
+    /// is gone; it won't be asked again on this connection.
     Dropped,
 }
 
@@ -79,30 +84,62 @@ impl Probes {
         self.in_flight.is_some()
     }
 
-    /// The next probe to send, as (session, block, probe): none while one is in flight. The
-    /// selected session comes first, then the others in list order; a session whose view isn't
-    /// known yet waits. Blocks in `streamed` skip `Process`: their streams report it anyway.
+    fn started(&self, block: &str, probe: Probe) -> bool {
+        self.started
+            .get(block)
+            .is_some_and(|asked| asked[probe as usize])
+    }
+
+    fn mark(&mut self, block: &str, probe: Probe) {
+        match self.started.get_mut(block) {
+            Some(asked) => asked[probe as usize] = true,
+            None => {
+                let mut asked = [false; 4];
+                asked[probe as usize] = true;
+                self.started.insert(block.to_owned(), asked);
+            }
+        }
+    }
+
+    /// The next probe to send, as (session, block, probe): none while one is in flight. Every
+    /// block's `Status` comes before any other probe; within each pass the selected session
+    /// comes first, then the others in list order. A session whose view isn't known yet waits,
+    /// and a selected session that isn't listed is skipped. Blocks `streamed` reports skip
+    /// `Process`: their streams report it anyway. Allocates only for the probe it returns.
     pub fn next(
         &self,
         model: &HostModel,
-        streamed: &HashSet<String>,
+        streamed: impl Fn(&str) -> bool,
     ) -> Option<(String, String, Probe)> {
         if self.in_flight.is_some() {
             return None;
         }
-        let selected = model.selected.as_deref();
-        let others = model
-            .sessions
-            .iter()
-            .map(|s| s.session_id.as_str())
-            .filter(|id| Some(*id) != selected);
-        selected.into_iter().chain(others).find_map(|session| {
-            view_blocks(model.views.get(session)?).find_map(|block| {
-                let probe = Probe::ALL
-                    .into_iter()
-                    .filter(|p| *p != Probe::Process || !streamed.contains(&block))
-                    .find(|p| !self.started.contains(&(block.clone(), *p)))?;
-                Some((session.to_owned(), block, probe))
+        let selected = model
+            .selected
+            .as_deref()
+            .filter(|id| model.sessions.iter().any(|s| s.session_id == *id));
+        let sessions = || {
+            let others = model
+                .sessions
+                .iter()
+                .map(|s| s.session_id.as_str())
+                .filter(move |id| Some(*id) != selected);
+            selected.into_iter().chain(others)
+        };
+        const PASSES: [&[Probe]; 2] = [
+            &[Probe::Status],
+            &[Probe::Title, Probe::Process, Probe::Pwd],
+        ];
+        PASSES.into_iter().find_map(|pass| {
+            sessions().find_map(|session| {
+                view_blocks(model.views.get(session)?).find_map(|block| {
+                    let probe = pass
+                        .iter()
+                        .copied()
+                        .filter(|p| *p != Probe::Process || !streamed(block))
+                        .find(|p| !self.started(block, *p))?;
+                    Some((session.to_owned(), block.to_owned(), probe))
+                })
             })
         })
     }
@@ -124,7 +161,7 @@ impl Probes {
                 json!({"session_id": session, "block_id": block, "args": {}}),
             )
             .await?;
-        self.started.insert((block.clone(), probe));
+        self.mark(&block, probe);
         self.in_flight = Some(InFlight {
             session,
             block,
@@ -163,8 +200,9 @@ impl Probes {
 
     /// Apply a finished probe to the model. It is dropped for good when it failed or its
     /// session or block is gone. When a live event of its kind arrived after it was sent, the
-    /// event is newer than the answer, so the answer is dropped and asked again: one record's
-    /// event doesn't stand in for a snapshot of all of them.
+    /// event is newer than the answer, so the answer is dropped. A status read is asked again,
+    /// since one record's event doesn't stand in for a snapshot of all of them; a title,
+    /// process or directory event carries the whole value, so re-reading it would gain nothing.
     pub fn apply(&mut self, model: &mut HostModel, done: &Finished) -> Outcome {
         let Some(reply) = &done.reply else {
             return Outcome::Dropped;
@@ -178,7 +216,12 @@ impl Probes {
             return Outcome::Dropped;
         }
         if model.stamp(&done.block, done.probe) != done.stamp {
-            self.started.remove(&(done.block.clone(), done.probe));
+            if done.probe != Probe::Status {
+                return Outcome::Dropped;
+            }
+            if let Some(asked) = self.started.get_mut(&done.block) {
+                asked[Probe::Status as usize] = false;
+            }
             return Outcome::Stale;
         }
         let block = done.block.clone();
@@ -207,6 +250,7 @@ mod tests {
     use crate::connection::activity::{BlockEvent, ProgramState, StatusRecord, TERMINAL};
     use rexrs::api::session;
     use serde_json::json;
+    use std::collections::HashSet;
 
     /// Sessions in `model.sessions` order, each with the terminal blocks its one window lists.
     fn model(selected: &str, sessions: &[(&str, &[&str])]) -> HostModel {
@@ -236,13 +280,21 @@ mod tests {
 
     /// The next probe, marked started as `start` would.
     fn take(probes: &mut Probes, model: &HostModel, streamed: &HashSet<String>) -> (String, Probe) {
-        let (_, block, probe) = probes.next(model, streamed).expect("a probe due");
-        probes.started.insert((block.clone(), probe));
+        let (_, block, probe) = next(probes, model, streamed).expect("a probe due");
+        probes.mark(&block, probe);
         (block, probe)
     }
 
+    fn next(
+        probes: &Probes,
+        model: &HostModel,
+        streamed: &HashSet<String>,
+    ) -> Option<(String, String, Probe)> {
+        probes.next(model, |b| streamed.contains(b))
+    }
+
     fn in_flight(probes: &mut Probes, session: &str, block: &str, probe: Probe) {
-        probes.started.insert((block.into(), probe));
+        probes.mark(block, probe);
         probes.in_flight = Some(InFlight {
             session: session.into(),
             block: block.into(),
@@ -258,26 +310,45 @@ mod tests {
     }
 
     #[test]
-    fn the_selected_session_is_probed_first() {
-        let model = model("s1", &[("s2", &["b2"]), ("s1", &["b1"])]);
+    fn every_status_comes_first_and_the_selected_session_leads() {
+        let model = model("s1", &[("s2", &["b2", "b3"]), ("s1", &["b1"])]);
         let mut probes = Probes::default();
         let none = HashSet::new();
-        let order: Vec<_> = (0..8).map(|_| take(&mut probes, &model, &none)).collect();
-        let mut expected = sequence("b1", &Probe::ALL);
-        expected.extend(sequence("b2", &Probe::ALL));
+        let order: Vec<_> = (0..12).map(|_| take(&mut probes, &model, &none)).collect();
+        let mut expected = vec![
+            ("b1".to_owned(), Probe::Status),
+            ("b2".to_owned(), Probe::Status),
+            ("b3".to_owned(), Probe::Status),
+        ];
+        let rest = [Probe::Title, Probe::Process, Probe::Pwd];
+        expected.extend(sequence("b1", &rest));
+        expected.extend(sequence("b2", &rest));
+        expected.extend(sequence("b3", &rest));
         assert_eq!(order, expected);
-        assert_eq!(probes.next(&model, &none), None, "each probe runs once");
+        assert_eq!(next(&probes, &model, &none), None, "each probe runs once");
     }
 
     #[test]
     fn switching_sessions_never_repeats_a_probe() {
         let mut model = model("s1", &[("s1", &["b1"]), ("s2", &["b2"])]);
         let mut probes = Probes::default();
-        probes.started.insert(("b2".into(), Probe::Status));
+        probes.mark("b1", Probe::Status);
+        probes.mark("b2", Probe::Status);
         model.selected = Some("s2".into());
         assert_eq!(
-            probes.next(&model, &HashSet::new()),
+            next(&probes, &model, &HashSet::new()),
             Some(("s2".into(), "b2".into(), Probe::Title))
+        );
+    }
+
+    #[test]
+    fn a_selected_session_that_is_not_listed_is_not_probed() {
+        let mut model = model("s1", &[("s1", &["b1"])]);
+        model.views.insert("gone".into(), view(&["b9"]));
+        model.selected = Some("gone".into());
+        assert_eq!(
+            next(&Probes::default(), &model, &HashSet::new()),
+            Some(("s1".into(), "b1".into(), Probe::Status))
         );
     }
 
@@ -293,7 +364,7 @@ mod tests {
             order,
             sequence("b1", &[Probe::Status, Probe::Title, Probe::Pwd])
         );
-        assert_eq!(probes.next(&model, &streamed), None);
+        assert_eq!(next(&probes, &model, &streamed), None);
     }
 
     #[test]
@@ -302,7 +373,7 @@ mod tests {
         let mut probes = Probes::default();
         in_flight(&mut probes, "s1", "b1", Probe::Status);
         assert!(probes.in_flight());
-        assert_eq!(probes.next(&model, &HashSet::new()), None);
+        assert_eq!(next(&probes, &model, &HashSet::new()), None);
     }
 
     fn status(stamp: u64, state: &str) -> Finished {
@@ -417,7 +488,7 @@ mod tests {
         };
         assert_eq!(probes.apply(&mut model, &both(stamp)), Outcome::Stale);
         assert!(!model.activity["b1"].contains_key(""), "not applied yet");
-        let again = probes.next(&model, &none);
+        let again = next(&probes, &model, &none);
         assert_eq!(again, Some(("s1".into(), "b1".into(), Probe::Status)));
         take(&mut probes, &model, &none);
         let stamp = model.stamp("b1", Probe::Status);
@@ -475,9 +546,87 @@ mod tests {
         probes.reset();
         assert!(!probes.in_flight());
         assert_eq!(
-            probes.next(&model, &none),
+            next(&probes, &model, &none),
             Some(("s1".into(), "b1".into(), Probe::Status))
         );
+    }
+
+    #[test]
+    fn an_outdated_title_process_or_directory_is_dropped_for_good() {
+        let mut model = model("s1", &[("s1", &["b1"])]);
+        let mut probes = Probes::default();
+        let none = HashSet::new();
+        for _ in Probe::ALL {
+            take(&mut probes, &model, &none);
+        }
+        let events = [
+            (
+                Probe::Title,
+                BlockEvent::Title {
+                    text: "live".into(),
+                    owner: None,
+                },
+                json!({"title":"old"}),
+            ),
+            (
+                Probe::Process,
+                BlockEvent::Process {
+                    name: Some("live".into()),
+                    pids: vec![],
+                },
+                json!({"foreground":{"pid":1,"name":"old"}}),
+            ),
+            (
+                Probe::Pwd,
+                BlockEvent::Pwd(Some("/live".into())),
+                json!({"pwd":"/old"}),
+            ),
+        ];
+        for (probe, event, reply) in events {
+            let stamp = model.stamp("b1", probe);
+            model.apply_block_event("s1", "b1".into(), event);
+            let done = Finished {
+                probe,
+                reply: Some(reply),
+                ..status(stamp, "")
+            };
+            assert_eq!(
+                probes.apply(&mut model, &done),
+                Outcome::Dropped,
+                "{probe:?}"
+            );
+        }
+        assert_eq!(model.title("b1"), Some("live"));
+        assert_eq!(model.cwds["b1"], "/live");
+        assert_eq!(
+            next(&probes, &model, &none),
+            None,
+            "the live events already carried the values"
+        );
+    }
+
+    #[test]
+    fn a_probe_wakes_the_ui_only_when_it_changed_something() {
+        let (wake, woken) = flume::unbounded();
+        let shared = crate::connection::Shared {
+            model: std::sync::Arc::new(std::sync::Mutex::new(model("s1", &[("s1", &["b1"])]))),
+            wake,
+        };
+        let mut probes = Probes::default();
+        let failed = Finished {
+            reply: None,
+            ..status(0, "")
+        };
+        assert_eq!(
+            crate::connection::apply_probe(&shared, &mut probes, &failed),
+            Outcome::Dropped
+        );
+        assert!(woken.try_recv().is_err(), "a failed read changes nothing");
+        assert_eq!(
+            crate::connection::apply_probe(&shared, &mut probes, &status(0, "blocked")),
+            Outcome::Applied
+        );
+        assert!(woken.try_recv().is_ok());
     }
 
     #[tokio::test]
@@ -492,6 +641,7 @@ mod tests {
                 r#"{"type":"response","id":"x","error":{"code":"block_not_found"}}"#,
                 None,
             ),
+            (r#"{"type":"response","id":"x"}"#, None),
             ("not json", None),
         ] {
             in_flight(&mut probes, "s1", "b1", Probe::Pwd);

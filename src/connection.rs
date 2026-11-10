@@ -634,6 +634,9 @@ struct Shared {
 impl Shared {
     fn update(&self, change: impl FnOnce(&mut HostModel)) {
         change(&mut self.model.lock().expect("host model"));
+        self.wake();
+    }
+    fn wake(&self) {
         let _ = self.wake.try_send(());
     }
     fn status(&self, status: impl Into<String>, connected: bool) {
@@ -975,13 +978,26 @@ fn reconcile(
     }
 }
 
-pub(crate) fn view_blocks(view: &session::ViewResponse) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn view_blocks(view: &session::ViewResponse) -> impl Iterator<Item = &str> {
     view.windows
         .iter()
         .flat_map(|w| &w.layers)
         .flat_map(|l| &l.blocks)
         .filter(|b| b.creator_name.as_deref() == Some(activity::TERMINAL))
-        .filter_map(|b| b.block_id.clone())
+        .filter_map(|b| b.block_id.as_deref())
+}
+
+/// Apply a finished probe, waking the UI only when it changed the model.
+fn apply_probe(
+    shared: &Shared,
+    probes: &mut probes::Probes,
+    done: &probes::Finished,
+) -> probes::Outcome {
+    let outcome = probes.apply(&mut shared.model.lock().expect("host model"), done);
+    if outcome == probes::Outcome::Applied {
+        shared.wake();
+    }
+    outcome
 }
 
 /// Declare `theme` to each streamed block Rex would apply it to at once: blocks this client
@@ -1052,7 +1068,7 @@ fn remove_session(shared: &Shared, workers: &mut HashMap<String, PaneWorker>, id
         m.sessions.retain(|s| s.session_id != id);
         if let Some(view) = m.views.remove(id) {
             for block in view_blocks(&view) {
-                m.forget_block(&block);
+                m.forget_block(block);
             }
         }
         for block in blocks {
@@ -1382,17 +1398,18 @@ async fn run_host(
                     }
                     state.performs_since = None;
                 }
-                let streamed: HashSet<String> = workers.keys().cloned().collect();
+                // Blocks with a stream skip the process probe.
+                let streamed = |block: &str| workers.contains_key(block);
                 let (due, probe_due) = {
                     let m = shared.model.lock().expect("host model");
-                    (prefetch.due(&m, Instant::now()), probes.next(&m, &streamed).is_some())
+                    (prefetch.due(&m, Instant::now()), probes.next(&m, streamed).is_some())
                 };
                 tokio::select! {
                     _ = probe_pace.tick(), if probe_due => {
                         busy_since = Some(Instant::now());
                         let next = {
                             let m = shared.model.lock().expect("host model");
-                            probes.next(&m, &streamed).map(|(session, block, probe)| {
+                            probes.next(&m, streamed).map(|(session, block, probe)| {
                                 let stamp = m.stamp(&block, probe);
                                 (session, block, probe, stamp)
                             })
@@ -1403,9 +1420,7 @@ async fn run_host(
                     }
                     done = probes.finished(), if probes.in_flight() => {
                         busy_since = Some(Instant::now());
-                        shared.update(|m| {
-                            probes.apply(m, &done);
-                        });
+                        apply_probe(shared, &mut probes, &done);
                     }
                     _ = expiry.tick() => {
                         busy_since = Some(Instant::now());
