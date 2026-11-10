@@ -4,6 +4,9 @@ use serde_json::Value;
 
 pub type Status = rexrs::api::session::Tailscale;
 
+/// The problem shown for a call to a server without built-in Tailscale.
+pub const UNSUPPORTED: &str = "This server can't run built-in Tailscale.";
+
 /// A Tailscale call the client should make.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {

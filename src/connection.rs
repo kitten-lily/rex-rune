@@ -228,6 +228,11 @@ pub struct HostModel {
     pub themes_unsupported: bool,
     /// A theme was declared to this server, by `set_theme` or in a new block's layout.
     pub theme_declared: bool,
+    /// Built-in Tailscale's latest status; none when the server can't run it (or before the
+    /// first connection). Kept across a disconnect: check `connected` before trusting it.
+    pub tailscale: Option<tailscale::Status>,
+    /// Why the last Tailscale call failed, until the next one succeeds or the host reconnects.
+    pub tailscale_problem: Option<String>,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -468,6 +473,12 @@ pub enum HostCommand {
     /// The terminal theme to declare from now on, also while disconnected; none declares
     /// nothing (Follow server).
     Theme(Option<SetTheme>),
+    /// The device name to keep built-in Tailscale on and named as, or none to leave it alone:
+    /// an explicit change in Settings, remembered across reconnects. Never sent for the saved
+    /// value at spawn, which `spawn_labeled` takes.
+    KeepTailscale(Option<String>),
+    /// An explicit Tailscale call; never replayed after a disconnect.
+    Tailscale(tailscale::Call),
     Shutdown,
     Ticket {
         session: String,
@@ -498,6 +509,11 @@ struct ControlState {
     viewed: HashSet<String>,
     /// The theme last declared to each block on this connection.
     themed: HashMap<String, SetTheme>,
+    /// A `tailscale_status_changed` event at or below this sequence is older than the status
+    /// already applied, from bootstrap or a Tailscale call's reply.
+    tailscale_seq: u64,
+    /// What this connection has already done to keep Tailscale on.
+    keeper: tailscale::Keeper,
     // This pool is scoped to the terminal data ref and subprotocol; other sources
     // are filtered out before insertion. It lives only as long as this control socket.
     tickets: HashMap<(String, String), PendingTicket>,
@@ -719,9 +735,14 @@ impl HostConnection {
             visible,
             theme,
             crate::settings::hostname(),
+            None,
         )
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each is a separate startup choice"
+    )]
     pub fn spawn_labeled(
         endpoint: String,
         preferred: Option<String>,
@@ -730,6 +751,8 @@ impl HostConnection {
         visible: bool,
         theme: Option<SetTheme>,
         label: String,
+        // The saved device name to keep built-in Tailscale on as; none leaves it alone.
+        keep_tailscale: Option<String>,
     ) -> Self {
         let model = Arc::new(Mutex::new(HostModel {
             visible,
@@ -749,6 +772,7 @@ impl HostConnection {
             block,
             theme,
             label,
+            keep_tailscale,
         };
         std::thread::Builder::new()
             .name("rex-host".into())
@@ -782,6 +806,67 @@ async fn request(control: &mut Client, method: &str, payload: Value) -> Result<V
             .await
             .context("Rex request timed out; action was not retried")??,
     )
+}
+
+/// Makes one Tailscale call and stores the status it returns. A refusal or a timeout becomes the
+/// host's Tailscale problem, never retried; only a transport failure is returned.
+async fn tailscale_call(
+    control: &mut Client,
+    shared: &Shared,
+    state: &mut ControlState,
+    call: &tailscale::Call,
+) -> Result<()> {
+    use rexrs::api::server;
+    use tailscale::Call;
+    let result = tokio::time::timeout(Duration::from_secs(8), async {
+        let reply = match call {
+            Call::Enable { hostname } => {
+                // Pass the server's current access setting, so enabling never changes it.
+                let current = control.call_with_seq(server::Status::new()).await?;
+                let Some(current) = current.value.tailscale else {
+                    return Ok(None);
+                };
+                let request = server::TailscaleEnable::new(current.allow_tailnet_members)
+                    .hostname(hostname.clone());
+                let reply = control.call_with_seq(request).await?;
+                (reply.seq, reply.value.tailscale)
+            }
+            Call::Disable => {
+                let reply = control
+                    .call_with_seq(server::TailscaleDisable::new())
+                    .await?;
+                (reply.seq, reply.value.tailscale)
+            }
+            Call::Rename { hostname } => {
+                let request = server::TailscaleRename::new(hostname.clone());
+                let reply = control.call_with_seq(request).await?;
+                (reply.seq, reply.value.tailscale)
+            }
+        };
+        Ok::<_, rexrs::Error>(Some(reply))
+    })
+    .await;
+    let problem = match result {
+        Ok(Ok(Some((seq, status)))) => {
+            state.tailscale_seq = state.tailscale_seq.max(seq);
+            shared.update(|m| {
+                m.tailscale = Some(tailscale::from_server(status));
+                m.tailscale_problem = None;
+            });
+            return Ok(());
+        }
+        Ok(Ok(None)) => {
+            shared.update(|m| m.tailscale = None);
+            tailscale::UNSUPPORTED.to_owned()
+        }
+        Ok(Err(rexrs::Error::Api(error))) => {
+            format!("Couldn't {}: {}", call.verb(), error.message())
+        }
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => format!("Couldn't {}: Rex didn't answer in time.", call.verb()),
+    };
+    shared.update(|m| m.tailscale_problem = Some(problem));
+    Ok(())
 }
 
 /// Read on the server, not this machine or an OSC 7 cache. Bound the optional read so a
@@ -1073,8 +1158,12 @@ fn apply_bootstrap(
 ) {
     state.bootstrap_seq = reply.seq;
     state.list_seq = reply.seq;
+    state.tailscale_seq = reply.seq;
     let boot = reply.value;
-    shared.update(|m| m.sessions = boot.attach_all.sessions);
+    shared.update(|m| {
+        m.sessions = boot.attach_all.sessions;
+        m.tailscale = boot.server_status.tailscale;
+    });
     for attached in boot
         .attached_sessions
         .into_iter()
@@ -1098,6 +1187,7 @@ async fn handle_event(
     workers: &mut HashMap<String, PaneWorker>,
     state: &mut ControlState,
     keymap: Option<&keymap::Declaration>,
+    keep_tailscale: Option<&str>,
 ) -> Result<()> {
     // This is a directed request, not a session update: even an unattached session or a
     // sequence below bootstrap's cutoff needs an answer on this same connection.
@@ -1112,6 +1202,23 @@ async fn handle_event(
         };
         if refresh && let Some(declaration) = keymap {
             keymap::refresh(control, shared, declaration).await;
+        }
+        return Ok(());
+    }
+    // A server event with its own floor: bootstrap and Tailscale call replies.
+    if event.name == "tailscale_status_changed" {
+        if event.seq <= state.tailscale_seq {
+            return Ok(());
+        }
+        let Some(status) = tailscale::parse_event(&event.payload) else {
+            return Ok(());
+        };
+        state.tailscale_seq = event.seq;
+        shared.update(|m| m.tailscale = Some(status.clone()));
+        if let Some(name) = keep_tailscale
+            && let Some(call) = state.keeper.on_event(&status, name)
+        {
+            tailscale_call(control, shared, state, &call).await?;
         }
         return Ok(());
     }
@@ -1241,6 +1348,7 @@ struct Startup {
     create: Option<(String, Option<String>)>,
     block: Option<String>,
     theme: Option<SetTheme>,
+    keep_tailscale: Option<String>,
 }
 
 async fn run_host(
@@ -1256,6 +1364,7 @@ async fn run_host(
         block: mut initial_block,
         mut theme,
         label,
+        mut keep_tailscale,
     } = startup;
     let mut token: Option<String> = None;
     let mut workers = HashMap::<String, PaneWorker>::new();
@@ -1298,6 +1407,7 @@ async fn run_host(
                 m.progress.clear();
                 m.stamps.clear();
                 m.activity_epoch += 1;
+                m.tailscale_problem = None;
             });
             let mut state = ControlState::default();
             let mut busy_since = Some(Instant::now());
@@ -1348,7 +1458,16 @@ async fn run_host(
             }
             state.performs_since = busy_since;
             let queued: Vec<_> = control.drain_events().collect();
-            for event in queued { handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?; }
+            for event in queued { handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?; }
+            // Only the bootstrap status may turn Tailscale on: a newer event (a CLI disable during
+            // startup) wins, and events never enable.
+            let status = shared.model.lock().expect("host model").tailscale.clone();
+            if let (Some(name), Some(status)) = (&keep_tailscale, status)
+                && state.tailscale_seq == state.bootstrap_seq
+                && let Some(call) = state.keeper.at_connect(&status, name)
+            {
+                tailscale_call(&mut control, shared, &mut state, &call).await?;
+            }
             state.prune(&shared.model.lock().expect("host model"));
             shared.update(|m| m.ssh_server_missing = false);
             shared.status("Connected", true);
@@ -1375,7 +1494,7 @@ async fn run_host(
                     // than MAX_WAIT. They must not gain another five seconds in the UI queue.
                     use futures_util::FutureExt;
                     if let Some(event) = control.next_event().now_or_never() {
-                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
+                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
@@ -1433,7 +1552,7 @@ async fn run_host(
                     }
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
-                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
+                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
@@ -1450,6 +1569,26 @@ async fn run_host(
                             continue;
                         }
                         if let HostCommand::PrefetchViews(sessions) = command { prefetch.set_eligible(sessions); continue; }
+                        if let HostCommand::KeepTailscale(new) = command {
+                            keep_tailscale = new;
+                            // The user's own request, so it may enable even after a CLI disable.
+                            state.keeper = tailscale::Keeper::default();
+                            let status = shared.model.lock().expect("host model").tailscale.clone();
+                            if let (Some(name), Some(status)) = (&keep_tailscale, status)
+                                && let Some(call) = state.keeper.at_connect(&status, name)
+                            {
+                                tailscale_call(&mut control, shared, &mut state, &call).await?;
+                            }
+                            continue;
+                        }
+                        if let HostCommand::Tailscale(call) = command {
+                            if shared.model.lock().expect("host model").tailscale.is_some() {
+                                tailscale_call(&mut control, shared, &mut state, &call).await?;
+                            } else {
+                                shared.update(|m| m.tailscale_problem = Some(tailscale::UNSUPPORTED.into()));
+                            }
+                            continue;
+                        }
                         if let HostCommand::Upload { session, block, files } = command {
                             if let Err(error) = upload(&mut control, shared, &endpoint, &session, &block, files).await {
                                 shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
@@ -1515,6 +1654,7 @@ async fn run_host(
                     Ok(HostCommand::Visibility(visible)) => shared.update(|m|m.visible=visible),
                     Ok(HostCommand::PrefetchViews(sessions)) => prefetch.set_eligible(sessions),
                     Ok(HostCommand::Theme(new)) => theme = new,
+                    Ok(HostCommand::KeepTailscale(new)) => keep_tailscale = new,
                     Ok(HostCommand::Keymap(new)) => keymap = Some(new),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
@@ -1538,6 +1678,7 @@ async fn run_host(
                 HostCommand::Visibility(visible) => shared.update(|m| m.visible = visible),
                 HostCommand::PrefetchViews(sessions) => prefetch.set_eligible(sessions),
                 HostCommand::Theme(new) => theme = new,
+                HostCommand::KeepTailscale(new) => keep_tailscale = new,
                 HostCommand::Keymap(new) => keymap = Some(new),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
@@ -1956,6 +2097,8 @@ async fn handle_command(
         | HostCommand::Shutdown
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)
+        | HostCommand::KeepTailscale(_)
+        | HostCommand::Tailscale(_)
         | HostCommand::Upload { .. } => {
             unreachable!()
         }

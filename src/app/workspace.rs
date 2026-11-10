@@ -388,6 +388,7 @@ impl Workspace {
             index == self.active,
             self.declared_theme(),
             self.settings.client_label(),
+            None,
         );
         let _ = connection
             .commands

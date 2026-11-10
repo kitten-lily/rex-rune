@@ -7,6 +7,8 @@ mod keymap_tests;
 mod navigation_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
+#[path = "tailscale_tests.rs"]
+mod tailscale_tests;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
