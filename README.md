@@ -247,6 +247,7 @@ The following actions have no default key binding:
 | `pane.view_activity` | None | Show the sidebar's Activity list (opening the sidebar if needed) |
 | `client.sidebar.activity.toggle` | None | Switch an open sidebar between Sessions and Activity; a hidden sidebar opens on Activity |
 | `client.sidebar.activity.by_session` / `client.sidebar.activity.by_priority` | None | Group the Activity list by session / by priority and show it |
+| `client.config.reload` | None | Reread `shortcuts.json` now and send changed overrides to every host (Reload config in Commands) |
 
 Omit `args` for actions with no arguments (an empty object also works).
 For argument-taking actions, supply exactly the required field: `pane.split`
@@ -340,7 +341,10 @@ captures Settings → Remote Hosts and the performed-request notice. If a privat
 `sshd` cannot run, it reports that and checks two local sockets instead.
 
 Later entries win; `null` frees those exact keys for the terminal. Hand edits reload
-when the window regains focus or Settings opens, gated by file mtime and length.
+when the window regains focus or Settings opens, gated by file mtime and length;
+`client.config.reload` (Reload config in Commands) rereads the file at once without
+that check. It reloads only `shortcuts.json`: `workspace.json` is read at launch, and
+the app overwrites it when preferences change. Remote requests cannot reload config.
 `cmd`/`super` means Super, not Ctrl. Physical keys use W3C names such as
 `ctrl+[KeyT]`; sequences use `>`, Escape cancels, and a failed tail goes to the
 terminal without retrying it as a new shortcut. Non-ASCII bindings such as

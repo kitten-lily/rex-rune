@@ -726,6 +726,11 @@ impl Workspace {
                     "",
                     Intent::ClientAction(super::actions::ACTIVITY_BY_PRIORITY, Value::Null),
                 ),
+                (
+                    "Reload config",
+                    "",
+                    Intent::ClientAction(super::actions::RELOAD_CONFIG, Value::Null),
+                ),
                 ("Remote control", "", Intent::RemoteControl(self.active)),
                 ("Default shell…", "", Intent::HostShell(self.active)),
                 ("Settings…", "", Intent::Settings),

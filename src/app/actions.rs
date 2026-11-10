@@ -18,6 +18,7 @@ pub const VIEW_ACTIVITY: &str = "pane.view_activity";
 pub const TOGGLE_ACTIVITY: &str = "client.sidebar.activity.toggle";
 pub const ACTIVITY_BY_SESSION: &str = "client.sidebar.activity.by_session";
 pub const ACTIVITY_BY_PRIORITY: &str = "client.sidebar.activity.by_priority";
+pub const RELOAD_CONFIG: &str = "client.config.reload";
 
 #[derive(Clone, Copy)]
 enum Handler {
@@ -28,6 +29,7 @@ enum Handler {
     ToggleActivity,
     ActivityBySession,
     ActivityByPriority,
+    ReloadConfig,
     Close,
     Search,
     NewTab,
@@ -81,6 +83,7 @@ specs! {
     TOGGLE_ACTIVITY => ToggleActivity,
     ACTIVITY_BY_SESSION => ActivityBySession,
     ACTIVITY_BY_PRIORITY => ActivityByPriority,
+    RELOAD_CONFIG => ReloadConfig,
     "client.close" => Close,
     SEARCH => Search,
     "client.tab.new" => NewTab,
@@ -156,6 +159,9 @@ impl Spec {
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
                 "Only the person at this computer can change saved interface preferences.",
             ),
+            ReloadConfig => Remote::Never(
+                "Only the person at this computer can reload this client's configuration.",
+            ),
             NextGlobal | PreviousGlobal | Back | Forward => {
                 Remote::Never("Use rex do session.select on the target host instead.")
             }
@@ -204,6 +210,7 @@ impl Spec {
             Handler::ToggleActivity => "Toggle Activity",
             Handler::ActivityBySession => "Show Activity by session",
             Handler::ActivityByPriority => "Show Activity by priority",
+            Handler::ReloadConfig => "Reload config",
             Handler::Close => "Close focused pane or tab",
             Handler::Search => "Search terminal",
             Handler::NewTab => "New tab",
@@ -247,6 +254,7 @@ impl Spec {
             | Handler::ToggleActivity
             | Handler::ActivityBySession
             | Handler::ActivityByPriority
+            | Handler::ReloadConfig
             | Handler::ZoomIn
             | Handler::ZoomOut
             | Handler::ZoomReset => "Interface",
@@ -385,6 +393,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::ToggleActivity => s.toggle_activity(),
         Handler::ActivityBySession => s.show_activity_by(ActivityGrouping::Session),
         Handler::ActivityByPriority => s.show_activity_by(ActivityGrouping::Priority),
+        Handler::ReloadConfig => s.reload_config(),
         Handler::Close => s.close_focused(tx),
         Handler::Search => s.open_search(),
         Handler::NewTab => s.perform(Intent::NewWindow, tx),

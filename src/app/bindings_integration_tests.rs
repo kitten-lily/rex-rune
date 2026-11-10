@@ -473,6 +473,126 @@ fn changed_shortcuts_reach_offline_hosts_but_unchanged_touches_send_nothing() {
 }
 
 #[test]
+fn config_reload_rereads_shortcuts_now_and_resends_only_changes() {
+    use rex_linux::settings::shortcuts::Shortcuts;
+    let mut ws = workspace_hosts(2);
+    let receivers = [capture_host(&mut ws, 0), capture_host(&mut ws, 1)];
+    ws.hosts[0].model.connected = true;
+    ws.hosts[1].model.connected = false;
+    let path = Shortcuts::path(&ws.settings_path);
+    std::fs::write(&path, r#"[{"keys":"ctrl+j","action":"client.tab.new"}]"#).unwrap();
+    ws.settings.shortcut_file = Shortcuts::load(&ws.settings_path);
+    let old = ws.keymap_generation;
+    // An edit with the same length and timestamp slips past the focus/Settings check.
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::fs::write(&path, r#"[{"keys":"ctrl+k","action":"client.tab.new"}]"#).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert!(!ws.settings.shortcut_file.changed());
+    ws.reload_shortcuts();
+    assert_eq!(ws.keymap_generation, old);
+    assert!(receivers.iter().all(|rx| rx.is_empty()));
+    let mut tx = rune::Tx::default();
+    assert!(actions::run(
+        &mut ws,
+        "client.config.reload",
+        &Value::Null,
+        &mut tx
+    ));
+    assert_eq!(ws.keymap_generation, old + 1);
+    assert_eq!(
+        ws.settings.shortcut_file.overrides.layer.bindings[0].keys,
+        ["ctrl+k"]
+    );
+    assert!(
+        ws.local_keymap
+            .bindings
+            .iter()
+            .any(|b| b.binding.keys == ["ctrl+k"] && b.binding.action == "client.tab.new")
+    );
+    for rx in &receivers {
+        let commands: Vec<_> = rx.try_iter().collect();
+        assert_eq!(commands.len(), 1, "connected and offline hosts alike");
+        let HostCommand::Keymap(declaration) = &commands[0] else {
+            panic!("expected keymap declaration");
+        };
+        assert_eq!(declaration.generation, old + 1);
+        assert_eq!(declaration.overrides, ws.settings.shortcut_file.overrides);
+    }
+    assert!(ws.notices.last().unwrap().text.contains("Reloaded"));
+    // Nothing changed: nothing is sent, but the reload is still acknowledged.
+    ws.notices.clear();
+    assert!(actions::run(
+        &mut ws,
+        "client.config.reload",
+        &Value::Null,
+        &mut tx
+    ));
+    assert_eq!(ws.keymap_generation, old + 1);
+    assert!(receivers.iter().all(|rx| rx.is_empty()));
+    assert_eq!(ws.notices.len(), 1);
+    assert!(!ws.notices[0].sticky);
+    // A file with problems says so every time it is reloaded on request.
+    std::fs::write(&path, r#"[{"keys":"ctrl+b>","action":"client.settings"}]"#).unwrap();
+    for _ in 0..2 {
+        ws.notices.clear();
+        assert!(actions::run(
+            &mut ws,
+            "client.config.reload",
+            &Value::Null,
+            &mut tx
+        ));
+        assert!(
+            ws.notices
+                .iter()
+                .any(|n| n.text.contains(&path.display().to_string())),
+            "{:?}",
+            ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+        );
+    }
+    assert!(!actions::run(
+        &mut ws,
+        "client.config.reload",
+        &json!({"extra": 1}),
+        &mut tx
+    ));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn config_reload_is_in_commands_and_refused_remotely() {
+    let mut ws = workspace();
+    ws.picker(false);
+    assert!(ws.entries().iter().any(|e| e.label == "Reload config"
+        && matches!(e.action, Intent::ClientAction("client.config.reload", _))));
+    let spec = actions::find("client.config.reload").unwrap();
+    let actions::Remote::Never(message) = spec.remote() else {
+        panic!("client.config.reload must not be remote");
+    };
+    assert!(message.contains("Only the person at this computer"));
+    let rx = capture_host(&mut ws, 0);
+    ws.hosts[0].model.connected = true;
+    ws.settings.hosts[0].remote_control = true;
+    ws.panel = None;
+    let generation = ws.keymap_generation;
+    ws.remote_perform(
+        0,
+        super::remote_tests::pending("client.config.reload", Value::Null),
+        &mut rune::Tx::default(),
+    );
+    let outcome = super::remote_tests::reply(&rx);
+    assert!(
+        matches!(&outcome, rex_linux::connection::perform::Outcome::Error { code, .. } if *code == "not_supported"),
+        "{outcome:?}"
+    );
+    assert_eq!(ws.keymap_generation, generation);
+}
+
+#[test]
 fn shortcut_import_notice_uses_custom_config_filenames() {
     let ws = workspace();
     std::fs::write(

@@ -959,13 +959,39 @@ impl Workspace {
         }
     }
 
+    /// Focus and Settings: reread `shortcuts.json` when its mtime or length changed.
     pub fn reload_shortcuts(&mut self) {
+        if self.reread_shortcuts(false)
+            && let Some(notice) = self.settings.shortcut_file.notice.take()
+        {
+            self.notify(notice);
+        }
+    }
+
+    /// `client.config.reload`: reread `shortcuts.json` now, even when its mtime and length
+    /// look unchanged, and say what happened. `workspace.json` is this client's own saved
+    /// state, read once at launch, so there is nothing else to reload.
+    pub fn reload_config(&mut self) {
+        let changed = self.reread_shortcuts(true);
+        let path = self.settings.shortcut_file.path.display().to_string();
+        match self.settings.shortcut_file.notice.take() {
+            Some(notice) => self.notify(notice),
+            None if changed => self.inform(format!("Reloaded {path}.")),
+            None => self.inform(format!("Reloaded {path}; no shortcuts changed.")),
+        }
+    }
+
+    /// Whether the overrides changed; changes go to every host, connected or not.
+    fn reread_shortcuts(&mut self, force: bool) -> bool {
         let previous = self.settings.shortcut_file.overrides.clone();
-        if !self.settings.shortcut_file.reload(&self.settings_path) {
-            return;
+        if force {
+            self.settings.shortcut_file =
+                rex_linux::settings::shortcuts::Shortcuts::load(&self.settings_path);
+        } else if !self.settings.shortcut_file.reload(&self.settings_path) {
+            return false;
         }
         if previous == self.settings.shortcut_file.overrides {
-            return;
+            return false;
         }
         self.local_keymap = super::actions::resolve(&self.settings.shortcut_file.overrides);
         self.keymap_generation += 1;
@@ -975,9 +1001,7 @@ impl Workspace {
         for index in 0..self.hosts.len() {
             self.send(index, HostCommand::Keymap(Box::new(declaration.clone())));
         }
-        if let Some(notice) = self.settings.shortcut_file.notice.take() {
-            self.notify(notice);
-        }
+        true
     }
 
     pub fn refresh_terminal(&mut self, key: &(HostId, String)) {
