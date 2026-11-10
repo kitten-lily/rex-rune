@@ -82,9 +82,19 @@ fn parse_font_size(value: &str) -> std::result::Result<f32, String> {
     Ok(size.clamp(8., 48.))
 }
 
+pub mod actions;
+pub mod keymap;
+pub mod perform;
+
 pub enum Command {
     Selection(crate::terminal::selection::Input),
     Key(Value),
+    KeyWithPrefix {
+        key: Value,
+        prefix: Vec<String>,
+    },
+    /// Explicit pane.send_key only; normal keys always use client.key.
+    SendKey(Value),
     Paste(String),
     /// A `block.event` mouse payload: `action`, `button`, `x`, `y` (cells) and `mods`.
     Mouse(Value),
@@ -168,14 +178,25 @@ pub struct ProtocolStats {
 
 #[derive(Clone, Default)]
 pub struct HostModel {
+    /// A successful SSH lookup found no default server; setup may be offered, never run.
+    pub ssh_server_missing: bool,
     pub visible: bool,
     pub connected: bool,
     pub status: String,
     pub notice: Option<String>,
     pub client_id: String,
+    pub keymap: Option<Arc<keymap::Snapshot>>,
+    pub keymap_error: Option<String>,
+    pub keymap_revision: u64,
+    /// Taken once before cloning the worker model into the UI.
+    pub client_actions: Vec<actions::Queued>,
+    pub performs: Vec<perform::Pending>,
+    pub connection_epoch: u64,
     pub protocol: ProtocolStats,
     pub sessions: Vec<session::Session>,
     pub selected: Option<String>,
+    /// Completion of the latest client navigation request (id, success), not a notice.
+    pub navigation_result: Option<(u64, bool)>,
     pub views: HashMap<String, session::ViewResponse>,
     pub terminals: HashMap<String, Connection>,
     /// Each terminal block's OSC 7501 records, by record id (empty for the root record).
@@ -379,6 +400,16 @@ impl HostModel {
 }
 
 pub enum HostCommand {
+    PerformReply {
+        epoch: u64,
+        call_id: String,
+        outcome: perform::Outcome,
+    },
+    Keymap(Box<keymap::Declaration>),
+    Action {
+        generation: u64,
+        request: Box<rexrs::api::client::Action>,
+    },
     Visibility(bool),
     /// Take size ownership of these blocks, as the native Rex clients do when they attach or
     /// come forward. Failures are silent: another client may have closed a block meanwhile.
@@ -387,6 +418,14 @@ pub enum HostCommand {
         blocks: Vec<String>,
     },
     Select(String),
+    /// Select a session and optionally focus a window as one correlated navigation.
+    Navigate {
+        id: u64,
+        /// The UI's deadline, including time spent queued behind other commands.
+        deadline: Instant,
+        session: String,
+        window: Option<String>,
+    },
     /// The sessions whose views to load in the background, for listing their tabs; empty
     /// stops loading.
     PrefetchViews(HashSet<String>),
@@ -400,9 +439,8 @@ pub enum HostCommand {
         method: String,
         payload: Value,
     },
-    /// A request that opens a terminal (`session.new_split` or `session.new_window`) with the
-    /// layout `payload["layout"]`, started in the shell directory of `cwd_from`, a block of the
-    /// payload's session, when the server can tell in time; otherwise in the server's default.
+    /// Explicit tab/split creation, inheriting the named source block's shell directory.
+    /// A failed or slow read leaves the server's default starting directory unchanged.
     NewTerminal {
         method: String,
         payload: Value,
@@ -450,6 +488,8 @@ struct PendingTicket {
 
 #[derive(Default)]
 struct ControlState {
+    // Earliest possible arrival of events buffered during the preceding busy step.
+    performs_since: Option<Instant>,
     bootstrap_seq: u64,
     list_seq: u64,
     view_seq: HashMap<String, u64>,
@@ -602,6 +642,8 @@ impl Shared {
             m.connected = connected;
             if !connected {
                 m.clipboard = None;
+                m.keymap = None;
+                m.keymap_revision += 1;
             }
             for terminal in m.terminals.values() {
                 terminal
@@ -668,6 +710,26 @@ impl HostConnection {
         // The terminal theme to declare; none declares nothing.
         theme: Option<SetTheme>,
     ) -> Self {
+        Self::spawn_labeled(
+            endpoint,
+            preferred,
+            create,
+            block,
+            visible,
+            theme,
+            crate::settings::hostname(),
+        )
+    }
+
+    pub fn spawn_labeled(
+        endpoint: String,
+        preferred: Option<String>,
+        create: Option<(String, Option<String>)>,
+        block: Option<String>,
+        visible: bool,
+        theme: Option<SetTheme>,
+        label: String,
+    ) -> Self {
         let model = Arc::new(Mutex::new(HostModel {
             visible,
             status: "Connecting…".into(),
@@ -685,6 +747,7 @@ impl HostConnection {
             create,
             block,
             theme,
+            label,
         };
         std::thread::Builder::new()
             .name("rex-host".into())
@@ -720,8 +783,8 @@ async fn request(control: &mut Client, method: &str, payload: Value) -> Result<V
     )
 }
 
-/// The working directory of `block`'s shell, if the server can tell within a second. Any
-/// failure means none: a dead transport fails the request that follows instead.
+/// Read on the server, not this machine or an OSC 7 cache. Bound the optional read so a
+/// missing/unsupported process query cannot hold up creation indefinitely.
 async fn shell_dir_of(control: &mut Client, session: &str, block: &str) -> Option<String> {
     let method = format!("{}.process", activity::TERMINAL);
     let args = json!({"session_id":session,"block_id":block,"args":{}});
@@ -1033,7 +1096,24 @@ async fn handle_event(
     shared: &Shared,
     workers: &mut HashMap<String, PaneWorker>,
     state: &mut ControlState,
+    keymap: Option<&keymap::Declaration>,
 ) -> Result<()> {
+    // This is a directed request, not a session update: even an unattached session or a
+    // sequence below bootstrap's cutoff needs an answer on this same connection.
+    if event.name == "client_perform_requested" {
+        return perform::receive(control, shared, event.payload, state.performs_since).await;
+    }
+    // Config-wide events have no session sequence. Do not broaden includes().
+    if event.name == "keymap_changed" {
+        let refresh = {
+            let m = shared.model.lock().expect("host model");
+            m.connected && keymap::changed(m.keymap.as_deref(), &event.payload)
+        };
+        if refresh && let Some(declaration) = keymap {
+            keymap::refresh(control, shared, declaration).await;
+        }
+        return Ok(());
+    }
     if !state.includes(&event) {
         return Ok(());
     }
@@ -1155,6 +1235,7 @@ async fn handle_event(
 
 /// What a host connection starts with.
 struct Startup {
+    label: String,
     preferred: Option<String>,
     create: Option<(String, Option<String>)>,
     block: Option<String>,
@@ -1173,12 +1254,14 @@ async fn run_host(
         mut create,
         block: mut initial_block,
         mut theme,
+        label,
     } = startup;
     let mut token: Option<String> = None;
     let mut workers = HashMap::<String, PaneWorker>::new();
     let mut retry = 0;
     let mut prefetch = prefetch::Prefetch::default();
     let mut probes = probes::Probes::default();
+    let mut keymap: Option<Box<keymap::Declaration>> = None;
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
     let ssh = crate::ssh::Target::parse(&configured)?;
@@ -1195,11 +1278,13 @@ async fn run_host(
                 }
                 None => configured.clone(),
             };
-            let mut control = transport::control(&endpoint, token.as_deref()).await?;
+            let mut control = transport::control_with_label(&endpoint, token.as_deref(), &label).await?;
             let identity = control.welcome().client.as_ref().context("Rex client identity")?;
             token = Some(identity.reconnect_token.clone());
             let wanted = preferred.clone().or_else(|| shared.model.lock().expect("host model").selected.clone());
             shared.update(|m| {
+                m.connection_epoch += 1;
+                m.performs.clear();
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.views.clear();
@@ -1214,6 +1299,7 @@ async fn run_host(
                 m.activity_epoch += 1;
             });
             let mut state = ControlState::default();
+            let mut busy_since = Some(Instant::now());
             let boot = bootstrap_request(wanted.as_deref(), create.is_some(), workers.values().map(|w| w.session.clone()));
             let started = Instant::now();
             shared.update(|m| m.protocol.bootstrap_requests += 1);
@@ -1259,9 +1345,11 @@ async fn run_host(
                 request(&mut control, "session.focus_block", json!({"session_id":id,"block_id":block})).await?;
                 refresh(&mut control, shared, &mut state, id).await?;
             }
+            state.performs_since = busy_since;
             let queued: Vec<_> = control.drain_events().collect();
-            for event in queued { handle_event(event, &mut control, shared, &mut workers, &mut state).await?; }
+            for event in queued { handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?; }
             state.prune(&shared.model.lock().expect("host model"));
+            shared.update(|m| m.ssh_server_missing = false);
             shared.status("Connected", true);
             reconcile(&endpoint, shared, &sender, &mut workers);
             for (block, worker) in &workers {
@@ -1269,6 +1357,8 @@ async fn run_host(
             }
             reconcile(&endpoint, shared, &sender, &mut workers);
             declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+            // Restore terminal sizes and state before a best-effort keymap can wait.
+            if let Some(declaration) = &keymap { keymap::refresh(&mut control, shared, declaration).await; }
             retry = 0;
             prefetch.reset();
             probes.reset();
@@ -1276,7 +1366,22 @@ async fn run_host(
             pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut probe_pace = tokio::time::interval(probes::PACE);
             probe_pace.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut expiry = tokio::time::interval(Duration::from_millis(100));
             loop {
+                state.performs_since = state.performs_since.or(busy_since.take());
+                if state.performs_since.is_some() {
+                    // Buffered requests share the busy step's start, even when it took less
+                    // than MAX_WAIT. They must not gain another five seconds in the UI queue.
+                    use futures_util::FutureExt;
+                    if let Some(event) = control.next_event().now_or_never() {
+                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
+                        state.prune(&shared.model.lock().expect("host model"));
+                        reconcile(&endpoint, shared, &sender, &mut workers);
+                        declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
+                        continue;
+                    }
+                    state.performs_since = None;
+                }
                 let streamed: HashSet<String> = workers.keys().cloned().collect();
                 let (due, probe_due) = {
                     let m = shared.model.lock().expect("host model");
@@ -1284,6 +1389,7 @@ async fn run_host(
                 };
                 tokio::select! {
                     _ = probe_pace.tick(), if probe_due => {
+                        busy_since = Some(Instant::now());
                         let next = {
                             let m = shared.model.lock().expect("host model");
                             probes.next(&m, &streamed).map(|(session, block, probe)| {
@@ -1296,11 +1402,17 @@ async fn run_host(
                         }
                     }
                     done = probes.finished(), if probes.in_flight() => {
+                        busy_since = Some(Instant::now());
                         shared.update(|m| {
                             probes.apply(m, &done);
                         });
                     }
+                    _ = expiry.tick() => {
+                        busy_since = Some(Instant::now());
+                        perform::expire(&mut control, shared).await?;
+                    }
                     _ = prefetch::wait(&mut pace, due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                        busy_since = Some(Instant::now());
                         let next = prefetch.next(&shared.model.lock().expect("host model"), Instant::now());
                         if let Some(id) = next {
                             prefetch.start(&mut control, id).await?;
@@ -1319,16 +1431,23 @@ async fn run_host(
                         }
                     }
                     event = control.next_event() => {
-                        handle_event(event?, &mut control, shared, &mut workers, &mut state).await?;
+                        busy_since = Some(Instant::now());
+                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
                     }
                     error = crate::ssh::closed(&mut tunnel) => return Err(error),
                     command = commands.recv_async() => {
+                        busy_since = Some(Instant::now());
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
                         if matches!(command, HostCommand::Reconnect) { return Ok(false); }
+                        if let HostCommand::Keymap(new) = command {
+                            keymap::refresh(&mut control, shared, &new).await;
+                            keymap = Some(new);
+                            continue;
+                        }
                         if let HostCommand::PrefetchViews(sessions) = command { prefetch.set_eligible(sessions); continue; }
                         if let HostCommand::Upload { session, block, files } = command {
                             if let Err(error) = upload(&mut control, shared, &endpoint, &session, &block, files).await {
@@ -1337,8 +1456,21 @@ async fn run_host(
                             }
                             continue;
                         }
-                        if matches!(command, HostCommand::Select(_) | HostCommand::CreateSession { .. }) { preferred = None; }
+                        if let HostCommand::Navigate { id, deadline, .. } = &command
+                            && Instant::now() >= *deadline
+                        {
+                            shared.update(|m| {
+                                m.navigation_result = Some((*id, false));
+                                m.notice = Some("Navigation expired before it could be sent. Try again.".into());
+                            });
+                            continue;
+                        }
+                        if matches!(command, HostCommand::Select(_) | HostCommand::Navigate { .. } | HostCommand::CreateSession { .. }) { preferred = None; }
+                        let navigation = match &command { HostCommand::Navigate { id, .. } => Some(*id), _ => None };
                         let outcome = handle_command(command, &mut control, shared, &mut workers, &mut state, &mut theme).await;
+                        if let Some(id) = navigation {
+                            shared.update(|m| m.navigation_result = Some((id, outcome.is_ok())));
+                        }
                         if let Err(error) = outcome {
                             shared.update(|m| m.notice = Some(format!("{error:#}")));
                             if !matches!(error.downcast_ref::<rexrs::Error>(), Some(rexrs::Error::Api(_))) { return Err(error); }
@@ -1354,6 +1486,13 @@ async fn run_host(
         if matches!(result, Ok(true)) {
             return Ok(());
         }
+        shared.update(|m| {
+            m.performs.clear();
+            m.ssh_server_missing = result
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.downcast_ref::<crate::ssh::MissingServer>().is_some())
+        });
         shared.status(
             match result {
                 Err(e) => format!("Disconnected · {e:#}"),
@@ -1371,11 +1510,13 @@ async fn run_host(
                     Ok(HostCommand::Shutdown) | Err(_) => return Ok(()),
                     Ok(HostCommand::Reconnect) => break,
                     Ok(HostCommand::Select(id)) => preferred = Some(id),
+                    Ok(HostCommand::Navigate { id, .. }) => reject_navigation(shared, id),
                     Ok(HostCommand::Visibility(visible)) => shared.update(|m|m.visible=visible),
                     Ok(HostCommand::PrefetchViews(sessions)) => prefetch.set_eligible(sessions),
                     Ok(HostCommand::Theme(new)) => theme = new,
+                    Ok(HostCommand::Keymap(new)) => keymap = Some(new),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
-                    Ok(HostCommand::Claim { .. }) => {}
+                    Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
                     Ok(HostCommand::Terminal { block, command: Command::Selection(input), .. }) => {
                         if let Some(worker) = workers.get(&block) { let _ = worker.commands.send(DataCommand::Selection(input)); }
                     }
@@ -1392,9 +1533,11 @@ async fn run_host(
             match command {
                 HostCommand::Shutdown => return Ok(()),
                 HostCommand::Select(id) => preferred = Some(id),
+                HostCommand::Navigate { id, .. } => reject_navigation(shared, id),
                 HostCommand::Visibility(visible) => shared.update(|m| m.visible = visible),
                 HostCommand::PrefetchViews(sessions) => prefetch.set_eligible(sessions),
                 HostCommand::Theme(new) => theme = new,
+                HostCommand::Keymap(new) => keymap = Some(new),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
@@ -1410,29 +1553,12 @@ async fn run_host(
     }
 }
 
-async fn refresh_after_request(
-    control: &mut Client,
-    shared: &Shared,
-    workers: &mut HashMap<String, PaneWorker>,
-    state: &mut ControlState,
-    session_id: Option<String>,
-) -> Result<()> {
-    shared.update(|m| m.notice = None);
-    if let Some(id) = session_id {
-        // Destroying a session, or closing its last tab, ends it: nothing to re-read.
-        match refresh(control, shared, state, &id).await {
-            Err(error)
-                if matches!(
-                    error.downcast_ref::<rexrs::Error>(),
-                    Some(rexrs::Error::Api(rexrs::ApiError::SessionNotFound { .. }))
-                ) =>
-            {
-                remove_session(shared, workers, &id)
-            }
-            result => result?,
-        }
-    }
-    Ok(())
+fn reject_navigation(shared: &Shared, id: u64) {
+    shared.update(|m| {
+        m.navigation_result = Some((id, false));
+        m.notice =
+            Some("Navigation not sent while disconnected. Try again after reconnecting.".into());
+    });
 }
 
 /// A search runs on the pane's own terminal, so it needs no server: it reaches the pane's worker
@@ -1517,6 +1643,32 @@ async fn upload(
     Ok(())
 }
 
+/// Clear a successful request's notice and reconcile its session, which may have ended.
+async fn after_request(
+    control: &mut Client,
+    shared: &Shared,
+    workers: &mut HashMap<String, PaneWorker>,
+    state: &mut ControlState,
+    session: Option<&str>,
+) -> Result<()> {
+    shared.update(|m| m.notice = None);
+    if let Some(id) = session {
+        // Destroying a session, or closing its last tab, ends it: nothing to re-read.
+        match refresh(control, shared, state, id).await {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<rexrs::Error>(),
+                    Some(rexrs::Error::Api(rexrs::ApiError::SessionNotFound { .. }))
+                ) =>
+            {
+                remove_session(shared, workers, id)
+            }
+            result => result?,
+        }
+    }
+    Ok(())
+}
+
 async fn handle_command(
     command: HostCommand,
     control: &mut Client,
@@ -1526,6 +1678,19 @@ async fn handle_command(
     theme: &mut Option<SetTheme>,
 ) -> Result<()> {
     match command {
+        HostCommand::Action {
+            generation,
+            request,
+        } => actions::run(control, shared, generation, *request).await?,
+        HostCommand::PerformReply {
+            epoch,
+            call_id,
+            outcome,
+        } => {
+            if shared.model.lock().expect("host model").connection_epoch == epoch {
+                perform::reply(control, &call_id, &outcome).await?;
+            }
+        }
         HostCommand::Visibility(visible) => shared.update(|m| m.visible = visible),
         // Declared to every block it is due for right after this command.
         HostCommand::Theme(new) => *theme = new,
@@ -1548,6 +1713,27 @@ async fn handle_command(
                         m.set_owner(id, b["owner"].as_str());
                     }
                 }
+            });
+        }
+        HostCommand::Navigate {
+            session, window, ..
+        } => {
+            let selected = shared.model.lock().expect("host model").selected.clone();
+            if selected.as_ref() != Some(&session) {
+                attach(control, shared, state, &session).await?;
+            }
+            if let Some(window) = window {
+                request(
+                    control,
+                    "session.focus_window",
+                    json!({"session_id":session,"window_id":window}),
+                )
+                .await?;
+                refresh(control, shared, state, &session).await?;
+            }
+            shared.update(|m| {
+                m.selected = Some(session);
+                m.notice = None;
             });
         }
         HostCommand::Select(id) => {
@@ -1579,21 +1765,23 @@ async fn handle_command(
         HostCommand::Request { method, payload } => {
             let session_id = payload["session_id"].as_str().map(str::to_owned);
             request(control, &method, payload).await?;
-            refresh_after_request(control, shared, workers, state, session_id).await?;
+            after_request(control, shared, workers, state, session_id.as_deref()).await?;
         }
         HostCommand::NewTerminal {
             method,
             mut payload,
             cwd_from,
         } => {
-            let session_id = payload["session_id"].as_str().map(str::to_owned);
-            if let Some(session) = &session_id
-                && let Some(dir) = shell_dir_of(control, session, &cwd_from).await
-            {
+            let session = payload["session_id"]
+                .as_str()
+                .context("new terminal session")?
+                .to_owned();
+            if let Some(dir) = shell_dir_of(control, &session, &cwd_from).await {
                 crate::layout::with_cwd(&mut payload["layout"], &dir);
             }
+            // Creation is sent once. A failure follows the ordinary request path; never replay.
             request(control, &method, payload).await?;
-            refresh_after_request(control, shared, workers, state, session_id).await?;
+            after_request(control, shared, workers, state, Some(&session)).await?;
         }
         HostCommand::RequestTracked {
             method,
@@ -1609,7 +1797,7 @@ async fn handle_command(
                     .map_err(|error| format!("{error:#}")),
             );
             result?;
-            refresh_after_request(control, shared, workers, state, session_id).await?;
+            after_request(control, shared, workers, state, session_id.as_deref()).await?;
         }
         HostCommand::Ticket {
             session,
@@ -1678,7 +1866,9 @@ async fn handle_command(
                     }
                     // Releases, pointer motion and wheel turns never claim the block; presses do.
                     let passive = match &input {
-                        Command::Key(key) => key["action"] == "release",
+                        Command::Key(key)
+                        | Command::KeyWithPrefix { key, .. }
+                        | Command::SendKey(key) => key["action"] == "release",
                         Command::Mouse(mouse) => mouse["action"] != "press",
                         Command::Wheel(_) => true,
                         _ => false,
@@ -1712,13 +1902,18 @@ async fn handle_command(
                     {
                         let _ = worker.commands.send(DataCommand::Bottom);
                     }
-                    if matches!(input, Command::Key(_) | Command::Paste(_))
-                        && let Some(connection) = shared
-                            .model
-                            .lock()
-                            .expect("host model")
-                            .terminals
-                            .get(&block)
+                    if matches!(
+                        input,
+                        Command::Key(_)
+                            | Command::KeyWithPrefix { .. }
+                            | Command::SendKey(_)
+                            | Command::Paste(_)
+                    ) && let Some(connection) = shared
+                        .model
+                        .lock()
+                        .expect("host model")
+                        .terminals
+                        .get(&block)
                     {
                         connection
                             .model
@@ -1734,6 +1929,12 @@ async fn handle_command(
                                 json!({"session_id":session,"block_id":block,"key":key}),
                             )
                             .await?;
+                        }
+                        Command::KeyWithPrefix { key, prefix } => {
+                            request(control, "client.key", json!({"session_id":session,"block_id":block,"key":key,"prefix":prefix})).await?;
+                        }
+                        Command::SendKey(key) => {
+                            request(control, "block.event", json!({"session_id":session,"block_id":block,"event":{"type":"key","payload":key}})).await?;
                         }
                         Command::Paste(text) => {
                             request(control, "block.event", json!({"session_id":session,"block_id":block,"event":{"type":"paste","payload":{"text":text}}})).await?;
@@ -1753,6 +1954,7 @@ async fn handle_command(
         HostCommand::Reconnect
         | HostCommand::Shutdown
         | HostCommand::PrefetchViews(_)
+        | HostCommand::Keymap(_)
         | HostCommand::Upload { .. } => {
             unreachable!()
         }

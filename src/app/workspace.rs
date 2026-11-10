@@ -21,7 +21,7 @@ use rex_linux::{
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
 use rexrs::api::{session::Window, terminal::SetTheme};
-use rune::{AppHandle, PhysicalKeyCode, TextEdit, Tx};
+use rune::{AppHandle, TextEdit, Tx};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -39,6 +39,8 @@ pub struct HostState {
     pub model: HostModel,
     /// The sessions this host's worker was last told to load views of.
     pub prefetch: HashSet<String>,
+    /// Settings-source diagnostic sets already announced for this host, across reconnects.
+    pub keymap_notices: HashSet<String>,
 }
 
 pub struct DividerDrag {
@@ -127,8 +129,15 @@ pub struct Workspace {
     pub strip_gesture: bool,
     pub column_drag: Option<ColumnDrag>,
     pending_column_change: Option<PendingColumnChange>,
-    /// Physical keys whose press went to a terminal; only their releases follow.
-    pub forwarded: HashSet<PhysicalKeyCode>,
+    /// Keys whose press went to a terminal; only their releases follow.
+    pub forwarded: HashSet<super::bindings::Identity>,
+    pub bindings: super::bindings::State,
+    pub local_keymap: rex_linux::keymap::Resolved,
+    pub keymap_generation: u64,
+    pub navigation: super::navigation::History,
+    pub last_keypress: Option<std::time::Instant>,
+    pub remote_off_notices: HashSet<HostId>,
+    pub remote_navigation: Option<super::remote::Navigation>,
     /// Panes this window has taken size ownership of since it last came forward.
     pub claimed: HashSet<(HostId, String)>,
     pub handle: AppHandle<Workspace>,
@@ -170,6 +179,7 @@ pub struct Workspace {
     /// Notifications headless tests would have sent.
     pub outbox: Vec<Note>,
     pub integrations: super::integrations::Integrations,
+    pub ssh_setup: super::ssh_setup::Setup,
     /// The tailnet's machines, for Add host.
     pub discovery: super::discover::Discovery,
     /// The terminal theme this client declares, from Settings; none is Follow server.
@@ -223,6 +233,7 @@ impl Workspace {
             settings.hosts.push(Host {
                 label: rex_linux::settings::endpoint_label(&options.endpoint),
                 endpoint: options.endpoint.clone(),
+                remote_control: false,
                 collapsed: false,
                 shell: None,
             });
@@ -256,6 +267,7 @@ impl Workspace {
                 Ok(theme) => (theme, None),
                 Err(error) => (None, Some(error)),
             };
+        let local_keymap = super::actions::resolve(&settings.shortcut_file.overrides);
         let mut this = Self {
             logo: None,
             images: None,
@@ -274,6 +286,13 @@ impl Workspace {
             column_drag: None,
             pending_column_change: None,
             forwarded: HashSet::new(),
+            bindings: Default::default(),
+            local_keymap,
+            keymap_generation: 0,
+            navigation: Default::default(),
+            last_keypress: None,
+            remote_off_notices: HashSet::new(),
+            remote_navigation: None,
             claimed: HashSet::new(),
             handle,
             window_focused: true,
@@ -303,6 +322,7 @@ impl Workspace {
             notifier: None,
             outbox: Vec::new(),
             integrations: Default::default(),
+            ssh_setup: Default::default(),
             discovery: Default::default(),
             term_theme,
             theme_dirs,
@@ -311,6 +331,32 @@ impl Workspace {
         };
         if let Some(error) = theme_error {
             this.notify(format!("{error:#}; following the server's colours"));
+        }
+        if let Some(count) = this
+            .settings
+            .shortcut_file
+            .imported
+            .take()
+            .filter(|&n| n > 0)
+        {
+            let from = this
+                .settings_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let to = this
+                .settings
+                .shortcut_file
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            this.inform(format!(
+                "Moved {count} custom shortcut(s) from {from} to {to}."
+            ));
+        }
+        if let Some(problem) = this.settings.shortcut_file.notice.take() {
+            this.notify(problem);
         }
         for index in 0..this.settings.hosts.len() {
             this.connect_host(index, explicit);
@@ -332,7 +378,7 @@ impl Workspace {
         } else {
             self.settings.sessions.get(&host.endpoint).cloned()
         };
-        let connection = HostConnection::spawn(
+        let connection = HostConnection::spawn_labeled(
             host.endpoint.clone(),
             preferred,
             cli.then(|| self.options.new.clone())
@@ -341,7 +387,11 @@ impl Workspace {
             cli.then(|| self.options.block.clone()).flatten(),
             index == self.active,
             self.declared_theme(),
+            self.settings.client_label(),
         );
+        let _ = connection
+            .commands
+            .send(HostCommand::Keymap(Box::new(self.keymap_declaration())));
         let id = HostId(self.next_host);
         self.next_host += 1;
         let receiver = connection.wake.clone();
@@ -360,6 +410,7 @@ impl Workspace {
             connection,
             model,
             prefetch: HashSet::new(),
+            keymap_notices: HashSet::new(),
         }
     }
 
@@ -388,6 +439,7 @@ impl Workspace {
         if self.settings.hosts.len() <= 1 || index >= self.hosts.len() {
             return;
         }
+        self.navigation.cancel();
         let state = self.hosts.remove(index);
         self.forget_host(state);
         let host = self.settings.hosts.remove(index);
@@ -423,6 +475,7 @@ impl Workspace {
         host.label = label;
         host.shell = shell;
         if host.endpoint != endpoint {
+            host.remote_control = false;
             let old = std::mem::replace(&mut host.endpoint, endpoint);
             self.settings.sessions.remove(&old);
             let state = self.spawn_host(index, false);
@@ -456,7 +509,7 @@ impl Workspace {
     pub fn sync(&mut self, index: usize, tx: &mut Tx) {
         let id = self.hosts[index].id;
         let old_session = self.hosts[index].model.selected.clone();
-        let (model, notices, clipboard, bells) = {
+        let (model, notices, clipboard, bells, client_actions, performs) = {
             let mut shared = self.hosts[index]
                 .connection
                 .model
@@ -465,7 +518,16 @@ impl Workspace {
             let notices = std::mem::take(&mut shared.notices);
             let clipboard = shared.clipboard.take();
             let bells = std::mem::take(&mut shared.bells);
-            (shared.clone(), notices, clipboard, bells)
+            let client_actions = std::mem::take(&mut shared.client_actions);
+            let performs = std::mem::take(&mut shared.performs);
+            (
+                shared.clone(),
+                notices,
+                clipboard,
+                bells,
+                client_actions,
+                performs,
+            )
         };
         for (block, connection) in &model.terminals {
             let key = (id, block.clone());
@@ -503,9 +565,49 @@ impl Workspace {
         if model.theme_declared {
             self.note_theme_declared();
         }
+        if index == self.active
+            && (self.hosts[index].model.keymap_revision != model.keymap_revision
+                || self.hosts[index].model.connected != model.connected
+                || old_session != model.selected)
+        {
+            self.bindings.sequence.clear();
+        }
         self.hosts[index].model = model;
         let columns_changed =
             self.apply_pending_column_change(index) | self.reconcile_column_state(index);
+        self.announce_keymap_problems(index);
+        self.poll_remote_navigation(std::time::Instant::now());
+        for pending in performs {
+            self.remote_perform(index, pending, tx);
+        }
+        let action_context = (
+            self.active,
+            self.model().selected.clone(),
+            self.keymap_generation,
+        );
+        for queued in client_actions {
+            // Focus events following the reply may legitimately move to another pane.
+            // Keep host/session/generation guards, and never act behind a popup or dialog.
+            if self.panel.is_some()
+                || index != action_context.0
+                || queued.generation != action_context.2
+                || queued
+                    .session
+                    .as_ref()
+                    .is_some_and(|id| action_context.1.as_ref() != Some(id))
+            {
+                self.inform(
+                    "Returned client action skipped because its workspace context changed.",
+                );
+                continue;
+            }
+            super::actions::run(
+                self,
+                &queued.action.action,
+                queued.action.args.as_ref().unwrap_or(&Value::Null),
+                tx,
+            );
+        }
         if let Some(copy) = clipboard
             && self.window_focused
             && self.panel.is_none()
@@ -518,6 +620,7 @@ impl Workspace {
         {
             tx.copy(copy.text);
         }
+        self.observe_navigation();
         self.ring_bells(index, bells);
         self.track_activity(index);
         self.deliver_program_notices(index, notices);
@@ -749,6 +852,13 @@ impl Workspace {
 
     pub fn window_focus(&mut self, focused: bool) {
         self.window_focused = focused;
+        self.bindings.sequence.clear();
+        if focused {
+            self.reload_shortcuts();
+        } else {
+            self.bindings.consumed.clear();
+            self.forwarded.clear();
+        }
         if !focused {
             for term in self.terminals.values_mut() {
                 term.end_selection();
@@ -758,6 +868,115 @@ impl Workspace {
             self.claimed.clear();
             self.claim_visible();
             self.track_activity(self.active);
+        }
+    }
+
+    fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
+        let overrides = self.settings.shortcut_file.overrides.clone();
+        rex_linux::connection::keymap::Declaration {
+            generation: self.keymap_generation,
+            request: rexrs::api::client::Keymap::new()
+                .actions(super::actions::declarations())
+                .server_actions("all")
+                .defaults([rex_linux::keymap::defaults()])
+                .overrides([overrides.layer.clone()]),
+            overrides,
+        }
+    }
+
+    pub fn effective_keymap(&self) -> &rex_linux::keymap::Resolved {
+        self.hosts[self.active]
+            .model
+            .keymap
+            .as_ref()
+            .filter(|k| self.model().connected && k.generation == self.keymap_generation)
+            .map(|k| &k.resolved)
+            .unwrap_or(&self.local_keymap)
+    }
+
+    pub fn keymap_snapshot(&self) -> Option<&rex_linux::connection::keymap::Snapshot> {
+        self.model()
+            .keymap
+            .as_deref()
+            .filter(|k| self.model().connected && k.generation == self.keymap_generation)
+    }
+
+    pub fn effective_bindings(&self) -> Vec<&rex_linux::keymap::ResolvedBinding> {
+        super::actions::effective(
+            self.effective_keymap(),
+            self.keymap_snapshot()
+                .map(|k| k.reply.actions.as_slice())
+                .unwrap_or(&[]),
+        )
+    }
+
+    pub fn shortcut_detail(&self, action: &str, args: &Value) -> String {
+        let empty = |args: &Value| args.is_null() || args.as_object().is_some_and(|a| a.is_empty());
+        self.effective_bindings()
+            .iter()
+            .find(|b| {
+                let bound = b.binding.args.as_ref().unwrap_or(&Value::Null);
+                b.binding.action == action && (bound == args || (empty(bound) && empty(args)))
+            })
+            .and_then(|b| b.chords.as_ref())
+            .map(|chords| {
+                chords
+                    .iter()
+                    .map(|c| c.keycaps().join(" "))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    }
+
+    fn announce_keymap_problems(&mut self, index: usize) {
+        let host = &mut self.hosts[index];
+        let Some(snapshot) = &host.model.keymap else {
+            return;
+        };
+        if !host.model.connected || snapshot.generation != self.keymap_generation {
+            return;
+        }
+        // Local parse diagnostics already produced one file notice, not one per host.
+        let mut problems: Vec<_> = snapshot
+            .reply
+            .diagnostics
+            .iter()
+            .filter(|d| d.source.as_deref() == Some("settings"))
+            .map(|d| serde_json::to_string(d).expect("diagnostic"))
+            .collect();
+        problems.sort();
+        problems.dedup();
+        if problems.is_empty() {
+            return;
+        }
+        let count = problems.len();
+        if host.keymap_notices.insert(problems.join("\n")) {
+            self.notify(format!(
+                "{count} shortcut problem(s) on {}; see Settings → Shortcuts.",
+                self.settings.hosts[index].label
+            ));
+        }
+    }
+
+    pub fn reload_shortcuts(&mut self) {
+        let previous = self.settings.shortcut_file.overrides.clone();
+        if !self.settings.shortcut_file.reload(&self.settings_path) {
+            return;
+        }
+        if previous == self.settings.shortcut_file.overrides {
+            return;
+        }
+        self.local_keymap = super::actions::resolve(&self.settings.shortcut_file.overrides);
+        self.keymap_generation += 1;
+        self.bindings.sequence.clear();
+        // Disconnected workers retain the declaration for their next successful connect too.
+        let declaration = self.keymap_declaration();
+        for index in 0..self.hosts.len() {
+            self.send(index, HostCommand::Keymap(Box::new(declaration.clone())));
+        }
+        if let Some(notice) = self.settings.shortcut_file.notice.take() {
+            self.notify(notice);
         }
     }
 
@@ -1454,7 +1673,8 @@ impl Workspace {
             at: std::time::Instant::now(),
         });
         if self.notices.len() > 3 {
-            self.notices.remove(0);
+            let oldest = self.notices.iter().position(|n| !n.sticky).unwrap_or(0);
+            self.notices.remove(oldest);
         }
     }
 
@@ -1576,6 +1796,9 @@ impl Workspace {
     }
 
     pub fn request(&mut self, method: &str, mut payload: Value) {
+        if method.starts_with("session.focus") {
+            self.bindings.sequence.clear();
+        }
         let Some(session) = self.model().selected.clone() else {
             return;
         };
@@ -1594,10 +1817,7 @@ impl Workspace {
         self.settings.hosts[host].shell.as_deref()
     }
 
-    /// One new terminal for `host`: its default shell, with the declared theme unless the
-    /// host refused themes.
-    /// Ask `host` to open a terminal in `session` with `method`, starting in the shell
-    /// directory of the block `cwd_from` when there is one.
+    /// Keep the source host/session/block captured by the action, including pane-menu targets.
     fn open_terminal(
         &mut self,
         host: usize,
@@ -1619,6 +1839,8 @@ impl Workspace {
         self.send(host, command);
     }
 
+    /// One new terminal for `host`: its default shell, with the declared theme unless the
+    /// host refused themes.
     pub fn new_terminal(&mut self, host: usize) -> Value {
         let theme = self
             .term_theme
@@ -1721,22 +1943,19 @@ impl Workspace {
     }
 
     pub fn select(&mut self, host: usize, id: String, tx: &mut Tx) {
-        self.active = host;
-        self.drag = None;
-        self.column_drag = None;
-        self.update_visibility();
-        self.settings.hosts[host].collapsed = false;
-        self.send(host, HostCommand::Select(id));
-        self.save();
-        self.update_title(tx);
+        self.select_visit(host, id, tx);
     }
 
     pub fn activate_host(&mut self, host: usize, tx: &mut Tx) {
+        self.bindings.sequence.clear();
+        self.observe_navigation();
+        self.navigation.cancel();
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
         self.column_drag = None;
         self.update_visibility();
+        self.observe_navigation();
         self.save();
         self.update_title(tx);
     }
@@ -1751,23 +1970,15 @@ impl Workspace {
     }
 
     pub fn select_window(&mut self, host: usize, session: String, window: String, tx: &mut Tx) {
-        self.active = host;
-        self.drag = None;
-        self.column_drag = None;
-        self.settings.hosts[host].collapsed = false;
-        self.update_visibility();
-        if self.hosts[host].model.selected.as_ref() != Some(&session) {
-            self.send(host, HostCommand::Select(session.clone()));
-        }
-        self.send(
-            host,
-            HostCommand::Request {
-                method: "session.focus_window".into(),
-                payload: json!({"session_id": session, "window_id": window}),
+        self.observe_navigation();
+        self.navigate_to(
+            super::navigation::Visit {
+                host: self.hosts[host].id,
+                session,
+                window: Some(window),
             },
+            tx,
         );
-        self.save();
-        self.update_title(tx);
     }
 
     /// The sidebar lists tabs, so the toolbar doesn't: Sidebar tab position, open, and
@@ -1822,7 +2033,12 @@ impl Workspace {
         }
         match action {
             Intent::Select(host, id) => self.select(host, id, tx),
-            Intent::Tab(id) => self.request("session.focus_window", json!({"window_id":id})),
+            Intent::Tab(id) => {
+                if let Some(session) = self.model().selected.clone() {
+                    self.select_window(self.active, session, id, tx);
+                }
+            }
+            Intent::ClientAction(name, args) => { super::actions::run(self, name, &args, tx); }
             Intent::Switcher => self.picker(true),
             Intent::NewSession => self.create_session(self.active, None, tx),
             Intent::CreateOn(host, name) => self.create_session(host, name, tx),
@@ -1876,6 +2092,11 @@ impl Workspace {
                     ],
                 );
             }
+            Intent::RemoteControl(host) => self.toggle_remote_control(host),
+            Intent::ClientLabel => {
+                let label = self.settings.client_label();
+                self.open_panel(PanelKind::Form(Form::ClientLabel), "Client label", &[("Label", "Name this computer in Rex client lists", &label)]);
+            }
             Intent::HostShell(host) => {
                 let title = format!("Default shell on {}", self.settings.hosts[host].label);
                 let shell = self.shell(host).unwrap_or_default().to_owned();
@@ -1888,6 +2109,7 @@ impl Workspace {
             Intent::Pane(target, action) => self.pane_action(target, action, tx),
             Intent::Session(target, action) => self.session_action(target, action, tx),
             Intent::AddHost => self.open_add_host(),
+            Intent::StartSsh(host) => self.preview_ssh_start(host),
             Intent::AddMachine(index) => self.add_machine(index, tx),
             Intent::MachineForm(index) => self.machine_form(index),
             Intent::AddHostManually => self.open_panel(
@@ -1896,9 +2118,8 @@ impl Workspace {
                 &[("Host name", "my-host", ""), ("Endpoint", "https://host.example.ts.net, ssh://user@host[/socket] or unix:///path", "")],
             ),
             Intent::NewWindow => {
-                let model = self.model();
-                if let Some(session) = model.selected.clone() {
-                    let from = model.focused().map(str::to_owned);
+                if let Some(session) = self.model().selected.clone() {
+                    let from = self.focused_block();
                     let layout = self.new_terminal(self.active);
                     let payload = json!({"window_label":DEFAULT_TAB_LABEL,"layout":layout,"focus":true});
                     self.open_terminal(self.active, "session.new_window", payload, &session, from.as_deref());
@@ -1953,6 +2174,8 @@ impl Workspace {
             Intent::Sidebar => self.toggle_sidebar(),
             Intent::Activity => self.show_activity(),
             Intent::Settings => {
+                self.bindings.sequence.clear();
+                self.reload_shortcuts();
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
@@ -1983,6 +2206,7 @@ impl Workspace {
         if !self.hosts[host].model.connected {
             return;
         }
+        self.navigation.cancel();
         if self.panel.is_some() {
             self.close_panel(tx);
         }
@@ -2366,6 +2590,7 @@ impl Workspace {
     }
 
     pub fn open_panel(&mut self, kind: PanelKind, title: &str, fields: &[(&str, &str, &str)]) {
+        self.bindings.sequence.clear();
         for term in self.terminals.values_mut() {
             term.end_selection();
         }
@@ -2379,16 +2604,19 @@ impl Workspace {
                 PanelKind::Form(_)
                     | PanelKind::RemoveHost(_)
                     | PanelKind::AgentChange { .. }
+                    | PanelKind::StartSsh { .. }
                     | PanelKind::Themes
                     | PanelKind::Chromes
                     | PanelKind::Discover
             ) && previous
                 .as_ref()
                 .is_some_and(|p| matches!(p.kind, PanelKind::Settings)))
-            || (matches!(kind, PanelKind::Form(Form::AddSsh(_) | Form::AddHost))
-                && previous
-                    .as_ref()
-                    .is_some_and(|p| matches!(p.kind, PanelKind::Discover)));
+            || (matches!(
+                kind,
+                PanelKind::Form(Form::AddSsh(_) | Form::AddHost | Form::Discovered(_))
+            ) && previous
+                .as_ref()
+                .is_some_and(|p| matches!(p.kind, PanelKind::Discover)));
         let mut panel = Panel::new(kind, title, fields);
         panel.target = target;
         panel.back = if keep_back {
@@ -2418,6 +2646,9 @@ impl Workspace {
     /// Show a Settings section; Integrations reads the agents' state when first shown.
     pub fn open_section(&mut self, section: SettingsSection) {
         self.settings_section = section;
+        if section == SettingsSection::Shortcuts {
+            self.reload_shortcuts();
+        }
         if section == SettingsSection::Integrations
             && self.integrations.status == super::integrations::AgentStatus::Unknown
         {
@@ -2433,6 +2664,7 @@ impl Workspace {
     }
 
     pub fn close_panel(&mut self, tx: &mut Tx) {
+        self.bindings.sequence.clear();
         self.panel = None;
         tx.blur();
     }
@@ -2535,7 +2767,7 @@ impl Workspace {
                     Some("Enter a name".to_owned())
                 } else if let Form::AddSsh(index) = form {
                     self.machine_form_error(index, &values)
-                } else if let Form::AddHost | Form::EditHost(_) = form {
+                } else if let Form::AddHost | Form::Discovered(_) | Form::EditHost(_) = form {
                     let editing = match form {
                         Form::EditHost(i) => Some(i),
                         _ => None,
@@ -2585,6 +2817,11 @@ impl Workspace {
                             self.inform("Fonts saved. Reopen the client to use them.");
                         }
                     }
+                    Form::ClientLabel => {
+                        self.settings.client_label = Some(values[0].clone());
+                        self.save();
+                        self.inform("Client label saved. Reopen the client to use it on every host.");
+                    }
                     Form::HostShell(host) => {
                         self.settings.hosts[host].shell =
                             (!values[0].is_empty()).then(|| values[0].clone());
@@ -2607,10 +2844,11 @@ impl Workspace {
                         ),
                         None => self.request("session.set_block_label", json!({"block_id":id,"label":values[0]})),
                     },
-                    Form::AddHost => self.add_host(
+                    Form::AddHost | Form::Discovered(_) => self.add_host(
                         Host {
                             label: values[0].clone(),
                             endpoint: values[1].clone(),
+                            remote_control: false,
                             collapsed: false,
                             shell: None,
                         },
@@ -2623,6 +2861,7 @@ impl Workspace {
                             Host {
                                 label: values[0].clone(),
                                 endpoint,
+                                remote_control: false,
                                 collapsed: false,
                                 shell: None,
                             },
@@ -2642,6 +2881,7 @@ impl Workspace {
                 self.remove_host(host, tx);
                 self.panel = back;
             }
+            PanelKind::StartSsh { endpoint } => self.start_ssh(endpoint),
             PanelKind::AgentChange { change, .. } => {
                 let back = self.settings_back();
                 self.apply_agents(change);

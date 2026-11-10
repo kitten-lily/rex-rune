@@ -242,28 +242,6 @@ pub fn parse_title(body: &Value) -> BlockEvent {
     }
 }
 
-/// The working directory of a terminal's shell in a `process` reply, read by the server from
-/// the process itself, so it needs no OSC 7 and is always on the server's machine. The shell is
-/// `child`, except that on macOS `child` is the `login` that runs it, so then it is the process
-/// below `login`. None unless the directory is an absolute path.
-pub fn shell_dir(process: &Value) -> Option<String> {
-    let mut shell = &process["child"];
-    if shell["name"] == "login" {
-        // Nearest first, ending with child; empty when foreground is child.
-        shell = match process["ancestors"].as_array().map(Vec::as_slice) {
-            Some([.., below, _login]) => below,
-            _ => &process["foreground"],
-        };
-        if shell["name"] == "login" {
-            return None;
-        }
-    }
-    shell["cwd"]
-        .as_str()
-        .filter(|dir| dir.starts_with('/'))
-        .map(str::to_owned)
-}
-
 /// A `pwd_changed` payload or a `pwd` reply.
 pub fn parse_pwd(body: &Value) -> BlockEvent {
     BlockEvent::Pwd(body["pwd"].as_str().filter(|s| !s.is_empty()).map(cwd_path))
@@ -312,6 +290,27 @@ pub fn parse_status(reply: &Value) -> Vec<(String, StatusRecord)> {
             )
         })
         .collect()
+}
+
+/// The shell's directory from a server `process` reply, even without OSC 7. Prefer the
+/// terminal's child, not an editor's foreground directory. macOS wraps the shell in login;
+/// use the process just below it only when the ancestry is available.
+pub fn shell_dir(process: &Value) -> Option<String> {
+    let mut shell = &process["child"];
+    if shell["name"] == "login" {
+        shell = match process["ancestors"].as_array().map(Vec::as_slice) {
+            Some([.., below, _login]) => below,
+            Some([_login]) => &process["foreground"],
+            _ => return None,
+        };
+        if shell["name"] == "login" {
+            return None;
+        }
+    }
+    shell["cwd"]
+        .as_str()
+        .filter(|dir| dir.starts_with('/'))
+        .map(str::to_owned)
 }
 
 /// An OSC 9 or OSC 777 notification a program sent, with where it came from.

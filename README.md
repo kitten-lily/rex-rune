@@ -13,7 +13,7 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 ## Features
 
 - Multiple saved hosts, each with its sessions; session windows are tabs and splits follow the server's order and nesting. Tabs can draw those splits tiled to the window or as locally sized columns in a horizontal strip. Scrolling columns default to half a window, remember their widths on this client and keep splits inside them at the server's ratios; the server and other clients keep their own geometry.
-- Unix-socket, HTTPS/WSS and SSH endpoints. Add host lists the machines on your tailnet: one whose Rex server answers over the tailnet is attached to with one press, and any other machine takes an SSH user name and is reached by forwarding its Rex socket over SSH (Tailscale SSH needs no keys).
+- Unix-socket, HTTPS/WSS and SSH endpoints. Add host lists the machines on your tailnet: a server that answers shows its reachable endpoint and, on API 12, a review of its listener addresses and access rules before connecting. Other machines take an SSH user name and are reached by forwarding their Rex socket over SSH (Tailscale SSH needs no keys).
 - A single toolbar with session identity, tabs, commands and the window's own controls. A tab with one pane draws it edge to edge; splits are rounded pane cards. Tabs close from their right-click menu, a middle-click or `Ctrl Shift W`, always behind a confirmation. Host-grouped session navigation opens on demand, with an optional sidebar (Ctrl Shift B) that opens at launch as it was left. Tabs can sit in the toolbar or, while the sidebar is open, under each session in the sidebar.
 - Searchable session switcher (`Ctrl K`) and command palette (`Ctrl Shift P`).
 - Snapshot restore, live output, physical-layout key press and release forwarding with dead-key composition, bracketed paste, text selection and copy, local scrollback, and mouse/wheel reporting for terminal programs. Right-click always opens the pane menu; Shift+right-click sends the click to a program that tracks the mouse, and Shift with the left button selects text locally.
@@ -35,34 +35,77 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 - Borderless window with its own close button, edge resizing and drag region. There are no minimize or maximize buttons; double-clicking the drag region maximizes, and the window manager handles the rest.
 - Keys are sent by physical position (Ghostty key names), so non-US layouts work.
 
-**Attachment only.** Rex Linux never starts, stops, replaces or reconfigures a Rex server and attaching does not need a `rex` executable. The only place the app runs `rex` is Settings → Integrations, on this machine and always with `--autostart=false`; it searches `PATH`, then `$XDG_BIN_HOME` or `~/.local/bin` for desktop launches that do not inherit the shell's path. An unavailable server is shown as disconnected and retried. Closing the client leaves server programs running.
+**Attachment-only by default.** Attaching and reconnecting never start, stop, replace or reconfigure a Rex server and do not need a `rex` executable. A missing default server on an SSH host offers a separately confirmed, one-time **Start personal server…** action (see [SSH setup](#ssh-setup)); it never enables automatic starts on future connections. Settings → Integrations runs local `rex skill` with `--autostart=false`. Both explicit CLI features search `PATH`, then `$XDG_BIN_HOME` or `~/.local/bin` for desktop launches. An unavailable server is shown as disconnected and retried. Closing the client leaves server programs running.
 
 ## Install a binary release
 
-Download a package and `SHA256SUMS` from [Releases](https://github.com/shuv1337/rex-rune/releases). Choose **x86_64 / amd64** for Intel/AMD or **aarch64 / arm64** for ARM64.
+Download a package and `SHA256SUMS` from [Releases](https://github.com/shuv1337/rex-rune/releases). Choose **x86_64 / amd64** for Intel/AMD or **aarch64 / arm64** for ARM64. For signed releases, [verify the signature](#verify-a-download) before installing.
 
 ```sh
 sha256sum --ignore-missing -c SHA256SUMS
 
 # Debian/Ubuntu: install the one .deb matching your architecture.
-sudo apt install ./rex-linux_0.3.2_amd64.deb
+sudo apt install ./rex-linux_0.5.0_amd64.deb
 
 # Or extract the matching tarball and install for your user (no root).
-tar -xzf rex-linux-0.3.2-x86_64-linux-gnu.tar.gz
-cd rex-linux-0.3.2-x86_64-linux-gnu
+tar -xzf rex-linux-0.5.0-x86_64-linux-gnu.tar.gz
+cd rex-linux-0.5.0-x86_64-linux-gnu
 bash install.sh
 ```
 
 The tarball installs into `~/.local/bin` with a desktop launcher and icons, independently of any source checkout. It needs `desktop-file-utils`; uninstall with `bash scripts/install-desktop.sh --uninstall`. Uninstall a `.deb` with `sudo apt remove rex-linux`. Neither removes preferences or changes Rex servers. Avoid mixing both installation methods: a user installation can shadow `/usr/bin/rex-linux`.
 
-Prebuilt packages are built on Ubuntu 24.04 and require **glibc 2.39+**. They are dynamically linked, not self-contained AppImages. Install your distribution's graphics drivers, fontconfig (including `fc-match`), xkbcommon, Wayland/X11, EGL/OpenGL/Vulkan libraries, CA certificates and `xdg-utils`. On Debian/Ubuntu the `.deb` declares these dependencies. Rust and Zig are **not** needed to run a binary. A running Rex server with API revision 10 or 11 is required.
+Prebuilt packages are built on Ubuntu 24.04 and require **glibc 2.39+**. They are dynamically linked, not self-contained AppImages. Install your distribution's graphics drivers, fontconfig (including `fc-match`), xkbcommon, Wayland/X11, EGL/OpenGL/Vulkan libraries, CA certificates and `xdg-utils`. On Debian/Ubuntu the `.deb` declares these dependencies. Rust and Zig are **not** needed to run a binary. A running Rex server with API revision 10, 11 or 12 is required.
+
+### Verify a download
+
+The signed-release pipeline adds `SHA256SUMS.minisig`, `latest.json`, and
+`latest.json.minisig`. It requires [owner key setup](docs/releases.md#owner-setup-before-the-first-signed-release)
+before its first release; v0.4.2 and earlier remain unsigned. The CI public key is
+committed as [`packaging/keys/release.pub`](packaging/keys/release.pub):
+
+- Minisign key ID: `A1FD78C27652816E`.
+- SHA-256 fingerprint (decoded 42-byte minisign public-key record):
+  `9e779605311a46a5287d6c9b25eb2083fb17447454239c7d66f1ecebe336d0c6`.
+
+The offline recovery public key is committed as
+[`packaging/keys/release-backup.pub`](packaging/keys/release-backup.pub):
+
+- Minisign key ID: `368EA1A12E2721F3`.
+- SHA-256 fingerprint (decoded 42-byte minisign public-key record):
+  `d9fe424ca8b20725e11d6039c39445d38a33023a8d366c69e0612a1c3528de76`.
+
+See the [public-key registry](packaging/keys/README.md). Both public trust roots
+are present; tag publication still fails closed on missing secrets or invalid
+signatures. No client auto-update is implemented.
+
+For a signed release, obtain and retain a trusted copy of those public keys
+separately from the downloaded assets. With `minisign` installed, and the package,
+`SHA256SUMS` and `SHA256SUMS.minisig` from the **same release** in your directory:
+
+```sh
+# Stop if verification fails. For a recovery release, use release-backup.pub instead.
+minisign -Vm SHA256SUMS -p /path/to/trusted/release.pub &&
+  sha256sum --ignore-missing -c SHA256SUMS
+```
+
+Require both commands to succeed before installing. A checksum alone detects
+corruption, not a replaced download. First obtaining the public keys still relies
+on trusting the repository; retain them for later verification. The signed
+manifest is at `https://github.com/shuv1337/rex-rune/releases/latest/download/latest.json`
+with its `.minisig` beside it. Verify its exact bytes before parsing it; it has no expiry.
+
+Release builds also produce GitHub provenance attestations for both package formats:
+`gh attestation verify <downloaded-package> --repo shuv1337/rex-rune`.
+Attestations identify the build workflow; they do not replace minisign verification.
+Older releases do not gain signatures or attestations retroactively.
 
 ## Build requirements
 
 - Rust 1.96 or newer (edition 2024; see `rust-version` in `Cargo.toml`).
 - [Zig](https://ziglang.org/) 0.17.x. The `ghostty-vt` crate builds Ghostty's VT library from a checksum-pinned source archive with Zig.
 - Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan, xkbcommon, fontconfig and the Wayland/X11 client libraries.
-- A running Rex server that supports API revision 10 or 11. Rex is in alpha, so older revisions aren't supported; update Rex on a host that refuses the connection. Uploading files needs revision 11.
+- A running Rex server that supports API revision 10, 11 or 12. Verified with Linux server **0.1.0-preview.14 (`7e460d0`, API 12)**; see [compatibility results](docs/server-preview14.md). Rex is in alpha, so older revisions aren't supported; update Rex on a host that refuses the connection. Uploading files needs revision 11.
 
 ## Build
 
@@ -132,46 +175,222 @@ In Interface settings, **Tab position → Sidebar** lists each session's tabs un
 
 In Terminal settings, **Change…** saves the primary family and optional comma-separated fallback families. Family changes take effect when you reopen the client; they do not restart the server or its sessions. The initial family is `JetBrainsMono Nerd Font`, with bundled IBM Plex Mono used if unavailable. Missing glyphs come from the named fallbacks in order, then the fonts fontconfig orders after the terminal family (as `fc-match -s` lists them, so Nerd Font symbols or scripts installed alongside it are found), then bundled IBM Plex Mono, then automatic system fallbacks for other scripts and symbols; an empty fallback list uses only the latter three. The named families and fontconfig's chain are resolved once at startup, and their files are memory-mapped rather than copied. Linux discovery of the automatic fallbacks includes fontconfig's fonts, including fonts installed through Nix. Fallback faces supply missing glyphs without changing the primary font's grid metrics; install a suitable CJK font, such as Noto Sans CJK, for Chinese, Japanese and Korean. `--font` and `--font-fallback` take precedence over saved family choices without replacing them, so remove those flags from launchers when you want Settings to control the family.
 
-A host's default shell (empty means the server user's login shell) is used for every new session, tab and split this client creates on that host. A new split starts in the directory of the pane it splits, and a new tab in the directory of the tab's focused pane, as the server reads it from that pane's shell (no OSC 7 needed); when the server can't tell within a second, or the directory no longer exists, it starts in the home directory. Host endpoints must be `unix://` with an absolute path, `https://`, `http://`, `wss://` or `ws://` URLs, or `ssh://[user@]host[:port][/socket]`.
+A host's default shell (empty means the server user's login shell) is used for every new session, tab and split this client creates on that host. New tabs and splits start in the source pane's shell directory on that server: a new tab or split uses the focused pane; a pane-menu split uses the pane it names. The client asks the server for the shell's process directory, so no OSC 7 or local path lookup is needed; a foreground editor's directory is not used. If the read is unavailable or takes over one second, creation uses the server's default directory. Rex falls back to its home directory if the inherited directory no longer exists. New sessions keep their existing default. Host endpoints must be `unix://` with an absolute path, `https://`, `http://`, `wss://` or `ws://` URLs, or `ssh://[user@]host[:port][/socket]`.
 
 ## Hosts
 
-**Add host** (the sidebar's footer, Settings → Remote Hosts, Commands, or the switcher's footer) lists the machines on this device's tailnet, from `tailscale status --json`, searchable by name. Only machines Tailscale shows to this device appear; this machine itself and iPhones and iPads (which run neither Rex nor `sshd`) are left out. A tailnet without MagicDNS lists machines by their Tailscale IP. Each online machine is checked for a Rex server reachable over the tailnet, at the same addresses the official clients try for a bare host name: `https://<machine>` on port 443 (built-in Tailscale or `tailscale serve`), then `https://` and `http://` on port 7297. The check opens the control WebSocket and sees whether it negotiates Rex's subprotocol; nothing is sent on it.
+**Add host** (the sidebar's footer, Settings → Remote Hosts, Commands, or the switcher's footer) lists the machines on this device's tailnet, from `tailscale status --json`, searchable by name. Only machines Tailscale shows to this device appear; this machine itself and iPhones and iPads (which run neither Rex nor `sshd`) are left out. A tailnet without MagicDNS lists machines by their Tailscale IP. Each online machine is checked for a Rex server reachable over the tailnet, at the same addresses the official clients try for a bare host name: `https://<machine>` on port 443 (built-in Tailscale or `tailscale serve`), then `https://` and `http://` on port 7297. The check negotiates a control connection and reads `server.status`; it never attaches to a session or changes the server.
 
-- **Rex servers** (a check answered) are added and connected with one press, at the endpoint that answered.
+- **Rex servers** show the endpoint that actually answered. On API 12, selecting one opens **Connect to Rex**, showing each reported listener's configured endpoint, actual bound addresses, transport and admission rules before **Connect**. Bound addresses are server facts, not proof that an alternate address is reachable or admits you; only the checked endpoint is selected. Unknown rules are shown verbatim. Revision 10/11 servers, empty listener lists and failed status reads say **listener details unavailable** and retain one-press attachment.
 - Any other machine, online or offline, opens a form with its name, an **SSH user** (your user name is offered) and an optional **Rex socket**, and connects as `ssh://user@<machine>[/socket]`. The form says what the check found: nothing listening on those ports, or that it couldn't tell (a timeout or a certificate this client doesn't trust), in which case an `https://` endpoint can still be entered by hand. It also says whether Tailscale SSH is on there, in which case the tailnet's policy signs the login in with no keys; otherwise your SSH keys and configuration apply.
 - A machine already added stays listed, marked with the hosts that reach it; pressing it adds another login over SSH (another user, or another socket). The same endpoint is never added twice.
 - **Enter an endpoint…** takes any endpoint by hand, as before. Without Tailscale, the list says so and this is what remains.
 
-An `ssh://` host is reached by forwarding the Rex server's Unix socket on that machine to a local one with `ssh -L` (OpenSSH's Unix-socket forwarding, so only `sshd` is needed there). Unless the endpoint names the socket (`ssh://user@host/run/rex/server.sock`), the client first asks the machine where it is: the path `rex server status` prints, then the login user's own server (`$XDG_RUNTIME_DIR/rex/server.sock` on Linux, `~/Library/Application Support/rex/server.sock` on macOS), then a shared server's `/run/rex/server.sock` or `/var/run/rex/server.sock`; "No Rex server found on … for …" names those places when none is a socket. `ssh` runs with `BatchMode=yes` (it never prompts; use an agent for keys with passphrases), `StrictHostKeyChecking=accept-new` (a machine's key is trusted the first time and a changed key is refused), keep-alives and `ControlMaster=no` (a shared connection in your SSH configuration is not used, since it would keep the forward after this client lets go). The local end lives in a directory of this process's own under `$XDG_RUNTIME_DIR/rex-linux`, so two instances (or a probe alongside the app) forwarding the same machine don't disturb each other, and it is removed when the forward ends; directories left by a crashed instance are swept on the next forward. When the forward drops, the host reconnects through a new one like any other disconnect, and the reason `ssh` gave (for example "tailnet policy does not permit you to SSH as user …") is shown next to Retry. Edit host… shows the `ssh://` endpoint, where the user name and socket can be changed.
+An `ssh://` host is reached by forwarding the Rex server's Unix socket on that machine to a local one with `ssh -L` (OpenSSH's Unix-socket forwarding, so only `sshd` is needed there). Unless the endpoint names the socket (`ssh://user@host/run/rex/server.sock`), the client first asks the machine where it is: the path `rex server status --autostart=false` prints, then the login user's own server (`$XDG_RUNTIME_DIR/rex/server.sock` on Linux, `~/Library/Application Support/rex/server.sock` on macOS), then a shared server's `/run/rex/server.sock` or `/var/run/rex/server.sock`; "No Rex server found on … for …" names those places when none is a socket and suggests a manual `rex server install 'ssh://[user@]host[:port]'` (preview.14 or newer) for a Linux host. That command asks before installing or configuring anything; the app never runs it. `ssh` runs with `BatchMode=yes` (it never prompts; use an agent for keys with passphrases), `StrictHostKeyChecking=accept-new` (a machine's key is trusted the first time and a changed key is refused), keep-alives and `ControlMaster=no` (a shared connection in your SSH configuration is not used, since it would keep the forward after this client lets go). The local end lives in a directory of this process's own under `$XDG_RUNTIME_DIR/rex-linux`, so two instances (or a probe alongside the app) forwarding the same machine don't disturb each other, and it is removed when the forward ends; directories left by a crashed instance are swept on the next forward. When the forward drops, the host reconnects through a new one like any other disconnect, and the reason `ssh` gave (for example "tailnet policy does not permit you to SSH as user …") is shown next to Retry. Edit host… shows the `ssh://` endpoint, where the user name and socket can be changed.
+
+Ordinary attachment keeps using socket forwarding and **never auto-starts** a server. The separate, confirmed setup action below can invoke the Rex CLI's native `-S ssh://host` auto-start once. No local Rex executable or Tailscale is required for SSH attachment; your OpenSSH configuration and aliases still apply. Discovery uses `server.status` listener metadata after a documented tailnet endpoint answers; it never guesses alternate reachable addresses from wildcard, loopback or Unix bindings. Built-in Tailscale is not in the server's listener list.
 
 The SSH user is the login on that machine, which is also the user whose Rex server is forwarded; it is not a Rex account in the sense of Rex's login server, which is chosen in an `https://user@host` address instead.
 
+### SSH setup
+
+When SSH succeeds but finds no default server, **Host unavailable**, the host's menu and Commands offer **Start personal server…**. It is not offered for SSH authentication/transport failures, an already connected host, or a missing explicitly named socket.
+
+The dialog names the host and full `ssh://` endpoint, previews the command and explains what changes: Rex starts a personal server as that SSH login, may create its user config/state, and leaves it running after the client closes. It creates no sessions, installs no packages and creates no system services. **Not now** is the default (including Enter); only **Start personal server** authorizes a single attempt. Closing the busy dialog does not cancel that already-authorized start.
+
+Setup requires a local and remote `rex` reporting API 12 or newer (preview.14). Version checks run before starting. A missing or old executable, SSH refusal or failed start is shown with the command's error and never retried automatically. After success, the client reconnects through the original `ssh -L` path; aliases, optional users/ports and SSH configuration still apply. No persistent auto-start preference is saved.
+
+The native command is `rex --autostart=true --server ssh://host --timeout 20s api call server.status '{}'`. Using `api call server.status`, rather than `rex server status`, matters: the latter deliberately does not auto-start even with the flag. This read-only API call creates no session.
+
+Installation is deliberately not automated: if Rex is missing, run `rex server install 'ssh://host'` yourself in a terminal. Rex's installer asks before each change and adds the host; the app neither answers its prompts nor installs packages/services. You can instead edit the endpoint to an existing custom socket and remain attachment-only.
+
 ## Keyboard shortcuts
 
-| Shortcut | Action |
-| --- | --- |
-| Ctrl K | Search sessions across saved hosts |
-| Ctrl Shift P | Search commands, sessions and current-session tabs |
-| Ctrl Shift N / T | New session on the active host / new tab |
-| Ctrl Shift D / Ctrl Alt D | Split right / down; in a scrolling tab, split right creates a new column after the focused column |
-| Ctrl PageUp / PageDown | Previous / next tab |
-| Ctrl Alt arrows | Focus an adjacent pane (Alt arrows reach terminal programs) |
-| Ctrl Shift Enter | Zoom / restore the focused pane |
-| Ctrl Shift Space | Focused-pane actions |
-| Ctrl Shift W | Close the focused pane, or the tab when it has one pane (asks first) |
-| Ctrl Shift S | Cycle the focused scrolling column through 1/3, 1/2 and 2/3 window widths |
-| Ctrl Shift M | Maximize / restore the focused scrolling column |
-| Ctrl Alt Shift Left / Right | Move a single-pane scrolling column |
-| Ctrl , | Settings |
-| Ctrl Shift B | Collapse / restore the sidebar |
-| Ctrl Shift C / V | Copy selection / paste text (bracketed-paste aware), or upload copied files or an image |
-| Ctrl Shift F | Search the focused terminal's screen and scrollback |
-| Ctrl Shift R | Resume the focused terminal's data stream |
-| Shift PageUp / PageDown, wheel | Scroll local history |
-| Ctrl + / Ctrl − / Ctrl 0 | Enlarge / shrink / reset the whole interface |
+Global tab navigation uses cached tab order without enabling extra prefetch: a session whose view is not loaded is one stop, and selecting it loads its tabs. Crossing sessions or hosts settles after 150 ms without another cycle, coalescing fast repeats rather than attaching each intermediate session. The first stop can attach before key repeat begins. During settling there is no target preview, and typing still goes to the displayed pane. Back/Forward history is local to this window and survives reconnects; unavailable targets are skipped. Commands also exposes these navigation actions. Ctrl Tab is a client default; remove it (see recipes) to pass it to editors such as Neovim.
 
-These chords are reserved by the client and do not reach terminal programs; every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work.
+| Shortcut | Behavior | Action (and args where required) |
+| --- | --- | --- |
+| Ctrl K | Search sessions across saved hosts | `session.switch` |
+| Ctrl Shift P | Search commands, sessions and current-session tabs | `client.palette.toggle` |
+| Ctrl Shift N / T | New session on the active host / new tab | `session.new` / `client.tab.new` |
+| Ctrl Shift D / Ctrl Alt D | Split right / down; in a scrolling tab, split right creates a new column after the focused column | `pane.split`, `{"direction":"right"}` / `{"direction":"down"}` |
+| Ctrl Tab / Ctrl Shift Tab | Next / previous tab across connected hosts and sessions, in sidebar order (wraps) | `client.tab.next_global` / `client.tab.previous_global` |
+| Ctrl PageUp / PageDown | Previous / next tab within the current session (server-controlled, no wrap) | `client.tab.previous` / `client.tab.next` |
+| Mouse Back / Forward | Revisit tabs, sessions and hosts in navigation history | `client.history.back` / `client.history.forward` |
+| Ctrl Alt arrows | Focus an adjacent pane (Alt arrows reach terminal programs) | `pane.focus`, `{"direction":"left"}` (or `right`, `up`, `down`) |
+| Ctrl Shift Enter | Zoom / restore the focused pane | `pane.zoom` |
+| Ctrl Shift Space | Focused-pane actions | `pane.actions` |
+| Ctrl Shift W | Close the focused pane, or the tab when it has one pane (asks first) | `client.close` |
+| Ctrl Shift S | Cycle the focused scrolling column through 1/3, 1/2 and 2/3 window widths | `client.column.cycle_width` |
+| Ctrl Shift M | Maximize / restore the focused scrolling column | `client.column.maximize` |
+| Ctrl Alt Shift Left / Right | Move a single-pane scrolling column | `client.column.move`, `{"direction":"left"}` / `{"direction":"right"}` |
+| Ctrl , | Settings | `client.settings` |
+| Ctrl Shift B | Collapse / restore the sidebar | `client.sidebar.toggle` |
+| Ctrl Shift C / V | Copy selection / paste text (bracketed-paste aware), or upload copied files or an image | `pane.copy` / `pane.paste` |
+| Ctrl Shift F | Search the focused terminal's screen and scrollback | `client.search` |
+| Ctrl Shift R | Resume the focused terminal's data stream | `pane.reconnect` |
+| Shift PageUp / PageDown, wheel | Scroll local history | `pane.scroll`, `{"lines":-20}` / `{"lines":20}` (wheel is pointer input) |
+| Ctrl + / Ctrl − / Ctrl 0 | Enlarge / shrink / reset the whole interface | `client.zoom.in` / `client.zoom.out` / `client.zoom.reset` |
+
+These are the client defaults; bound chords do not reach terminal programs, and every other key goes to the focused pane. Interface zoom changes in 10% steps (70–150%), is saved as `ui_scale`, and is independent of the terminal font size. `Ctrl =` and the numpad `+`/`−` also work.
+
+The following actions have no default key binding:
+
+| Action | Args schema | Behavior |
+| --- | --- | --- |
+| `client.tab.goto` | `{"index": integer >= 1}` | Focus the 1-based tab in the current session |
+| `client.tab.close` | None | Confirm closing the current tab |
+| `client.tab.rename` | None | Open the current tab's rename dialog |
+| `session.rename` | None | Open the current session's rename dialog |
+| `pane.close` | None | Confirm closing the focused pane |
+| `pane.send_key` | `{"key": "single chord"}` | Send a synthesizable key directly to the PTY, bypassing Lua bindings |
+
+Omit `args` for actions with no arguments (an empty object also works).
+For argument-taking actions, supply exactly the required field: `pane.split`
+accepts `direction` = `right` or `down`; `pane.focus` also accepts `left` and
+`up`; `pane.scroll` takes a signed 32-bit integer `lines` (negative scrolls up).
+`pane.send_key` takes a single supported chord, not a sequence; for example
+`{"key":"ctrl+b"}`.
+
+### Configuring shortcuts
+
+For the default workspace, edit `$XDG_CONFIG_HOME/rex-linux/shortcuts.json` (normally
+`~/.config/rex-linux/shortcuts.json`). With a custom `--config /path/demo.json`,
+edit `/path/demo.shortcuts.json`. The app never writes this file, except for the
+one-time import of custom bindings from nivox's legacy `keybindings` field.
+
+The preferred format is an object; a bare array also works. A missing, empty or
+whitespace-only file means no overrides. Bad entries are skipped; invalid JSON
+uses defaults and appears in Settings → Shortcuts → Problems.
+
+```json
+{
+  "shortcuts": [
+    {"keys": "ctrl+b>c", "action": "client.tab.new"},
+    {"keys": "ctrl+tab", "action": null},
+    {"keys": "ctrl+shift+tab", "action": null}
+  ]
+}
+```
+
+Layers run lowest to highest: **Linux defaults → each server’s Rex config → client overrides**.
+The app sends its defaults, override layer and action registry to `client.keymap`;
+`rex.bind`, `rex.unbind`, Lua-function sequences and config-file actions participate
+in the same resolution. The active host’s map is used—not a union of hosts.
+When that host is offline, has not answered, or rejects the keymap request, local
+defaults plus overrides work instead. A keymap error never disconnects the host;
+Settings → Shortcuts retains its explanation. Config changes refresh by hash and
+server instance, and every reconnect registers again.
+
+### Remote control
+
+Settings → Remote Hosts has a **Remote control** switch for each saved host,
+**off by default, including local hosts**. Changing an endpoint turns it off again.
+Commands can turn it on or off for the host on screen. With it on, `rex do` and
+`client.perform` can run exactly eight actions: `session.select`, `client.tab.goto`,
+`client.tab.next`, `client.tab.previous`, `pane.focus`, `pane.zoom`, `pane.scroll`,
+and `client.sidebar.toggle` on that host.
+These requests cannot create or close terminals, type, access the clipboard, open
+dialogs, change interface zoom, or affect any host other than the requesting host. Refusals name the
+server command to use instead where one exists (`rex window new`, `rex send-key`,
+`rex capture`, etc.). Actions remain listed even with the switch off.
+
+`session.select` shows a session on the requesting host, switching to that host if
+needed; an optional `window_id` selects a tab. It replies only after navigation is
+acknowledged, or fails after five seconds. Unknown sessions/tabs return `not_found`.
+All other requests must match the host, session and pane on screen. Navigation runs only
+after a pause in typing, and never while a text field has focus. The pause must
+last at least 1.5 seconds. All remote actions are refused while a text field has
+focus, a panel is open or a key sequence is pending. Requests not acted on within
+five seconds are discarded, including time buffered during a busy connection
+step (counted conservatively from that step's start). Replies never cross a reconnect.
+Every performed request gets a six-second in-app notice naming host, requester
+and action; nothing raises the window or sends a desktop notification. The first
+request refused because control is off shows one explanatory notice per host per
+launch. Requester identity is displayed, not used as a second permission filter.
+
+The **Client label**, also in Remote Hosts, defaults to this computer's current
+hostname (or “Rex Linux” if empty), without saving that default as an override.
+It is visible to clients on every connected server and can be edited (reopen the
+app to apply it). Use `rex -C LABEL actions` to list actions, then, for example,
+`rex -C LABEL do client.sidebar.toggle`. Local shortcuts and queued actions from
+this client's own `client.action` are independent of Remote control.
+
+```sh
+rex -C LABEL do session.select session_id="$REX_SESSION"
+rex -C LABEL do session.select session_id=SESSION window_id=WINDOW
+rex -C LABEL do client.tab.goto index=2
+rex -C LABEL do client.tab.goto index=-1  # last tab
+```
+
+`session.select` can also be bound with fixed arguments in `shortcuts.json` or
+queued by Lua; it does not add an argument-free Commands entry. Cross-host remote
+control was checked against two private preview.14 servers, with the second
+reached through a real `ssh://` socket forward and disposable SSH keys. Run
+`scripts/remote-control-acceptance.py` with `REX_BIN` pointing to a built client
+and preview.14's `rex` on `PATH`; it owns its servers, sockets, HOME/XDG state and
+Xvfb display under `~/.cache/agent-ws/`, and stops all its processes by PID. It also
+captures Settings → Remote Hosts and the performed-request notice. If a private
+`sshd` cannot run, it reports that and checks two local sockets instead.
+
+Later entries win; `null` frees those exact keys for the terminal. Hand edits reload
+when the window regains focus or Settings opens, gated by file mtime and length.
+`cmd`/`super` means Super, not Ctrl. Physical keys use W3C names such as
+`ctrl+[KeyT]`; sequences use `>`, Escape cancels, and a failed tail goes to the
+terminal without retrying it as a new shortcut. Non-ASCII bindings such as
+`ctrl+é` work in the client but are not readable by the server's parser, like the
+client-only `ctrl++` extension. Ordinary terminal keys still use `client.key`.
+
+Server action calls use a dedicated 35-second timeout (Rex allows an action 30 seconds).
+The host's control loop is serial: later input and control commands queue behind a
+running action. Failed or timed-out input is never replayed automatically. Known
+returned client actions are performed once, in order; unknown names are ignored.
+No cross-server `servers` list is advertised. A returned action whose original
+host, session, pane or local keymap generation is no longer current is skipped
+with an informational notice rather than applied to a different target.
+
+Settings → Shortcuts shows effective keycaps, “then” between sequence steps,
+sources, persistent Problems and both config paths. Commands shows the highest
+binding for each action and argument set, or no shortcut when unbound. Only
+settings-source diagnostic sets toast, once per distinct set per host; file and
+default-layer diagnostics stay in Problems. A pending sequence shows `Ctrl B …`
+in the toolbar. Host/pane/session/focus/map changes and opening a dialog cancel it.
+
+Only popup navigation/editing keys and Escape cancelling a sequence stay reserved;
+zoom is global (including fields), but it is still rebindable. Hold-to-repeat works
+for zoom, pane focus/scroll, within-session tab navigation (Ctrl PageUp/PageDown)
+and global tab cycling. Other completed shortcuts and
+prefix repeats are suppressed, and releases only reach terminals when presses did.
+
+#### More recipes
+
+```json
+{
+  "shortcuts": [
+    {"keys":"ctrl+shift+t", "action":null},
+    {"keys":"ctrl+b>c", "action":"client.tab.new"},
+    {"keys":"ctrl+b>shift+5", "action":"pane.split", "args":{"direction":"right"}},
+    {"keys":"ctrl+b>ctrl+b", "action":"pane.send_key", "args":{"key":"ctrl+b"}},
+    {"keys":"ctrl+1", "action":"client.tab.goto", "args":{"index":1}}
+  ]
+}
+```
+
+`pane.send_key` is the explicit escape hatch through `block.event` (press and
+release); normal keys and forwarded Lua sequences use `client.key`, with the
+server’s original prefix spellings. Action arguments are checked before dispatch.
+Keys accept modifier aliases, named keys, F1–F12, W3C physical codes and `>` sequences.
+Letters follow the keyboard layout, with physical US-position fallbacks on
+non-Latin layouts; Shift stays a modifier instead of being folded into the key.
+Key modes, a recording editor, server actions in Commands and pane-resize bindings
+are not implemented. Cross-server `client_call_requested` relaying is also not
+implemented ([#20](https://github.com/shuv1337/rex-rune/issues/20)). Agents should use
+Rex's session, window and block commands for server state, and show refusal messages.
+
+The parser, sequence machine, action-registry structure and repeat suppression
+adapt Andrea Zito ([nivox](https://github.com/nivox))’s `8037d78` work. Importing a
+legacy `keybindings` field drops copied defaults, writes only custom entries once,
+and reports a move only when at least one custom entry remains.
 
 Double-click selects a word (including shell paths), and triple-click selects a line. Selection stays attached to terminal content as history or output scrolls; dragging above or below the grid autoscrolls. Hold Shift to select locally or scroll local history when a fullscreen TUI owns the mouse. Without Shift, ordinary TUI mouse reporting is unchanged.
 
@@ -195,10 +414,19 @@ cargo run --locked --no-default-features --bin rex-workspace-probe
 
 With mise, `mise run test`, `fmt`, `clippy` and `test-rexrs` run the first three commands and the vendored SDK tests; `mise run check` runs them all.
 
+`python3 scripts/keymap-acceptance.py` checks layered bindings, native sequences,
+Lua forwarding, queued client actions, file/server reload, removals and the
+send-key escape hatch and explicit remote-action refusal on its own disposable Rex server and Xvfb display. It uses
+`target/release/rex-linux` unless `REX_BIN` selects another build, and preserves
+logs/captures in the printed temporary directory.
+
 The `scripts/` directory holds integration checks; each script's docstring lists its requirements (Xvfb, xdotool, a `rex` binary, `wayland-info`, …). Some use the configured Rex server rather than starting their own: point them at a disposable server you control. Wayland checks use the running compositor; X11 checks use an isolated display.
 
 - `connection-only-smoke.py`: a missing or stale socket must never execute the Rex CLI.
-- `x11-smoke.py`: real X11 events (forms, clipboard, pointer selection, key isolation).
+- `ssh-setup-smoke.py`: the real opt-in setup UI against a private localhost sshd and preview.14 executable, with isolated HOME/XDG state and SSH config. Checks attachment-only, Not now, confirmed native start, zero created sessions and subsequent `ssh -L` attachment; stops its server and sshd by PID. Requires explicit `REX_CLI` and `REX_BIN`; no installation or real host setup is performed.
+- `navigation-x11.py`: isolated single-host private-server checks for global tab shortcuts, reverse wrapping and mouse Back/Forward across sessions; also exercises named history Commands. Cross-host navigation and reconnect behavior are covered by headless/protocol tests, not this script.
+- `process-cwd-contract.py`: private-server process-directory and missing-directory fallback checks without OSC 7; set `REX_BIN` to also check keyboard/pane-menu splits and new tabs through the real client on X11. Keeps logs/captures under `~/.cache/agent-ws/`.
+- `x11-smoke.py`: real X11 events (forms, clipboard, exact pointer copy and raw Kitty key isolation). Requires `REX_SERVER` explicitly set to a disposable server (no autostart); `REX_BIN` selects a debug or release client.
 - `scroll-selection-x11.py`: private-server Unicode copy checks after scrolling, drag autoscroll, and Shift selection in a fullscreen mouse-tracking TUI without breaking ordinary mouse reports.
 - `kitty-graphics-x11.py`: private-server pixel checks for live RGBA, chunked PNG, image restoration after reattach and deletion.
 - `clipboard-x11.py`: isolated private-server acceptance check for this feature; see its docstring.
@@ -218,7 +446,7 @@ See [AGENTS.md](AGENTS.md) for the code layout and contributor conventions, and 
 Three dependencies are vendored with small, documented patches and wired in through `[patch]` in `Cargo.toml`:
 
 - [`vendor/rune/`](vendor/rune/README.md): the `rune`, `rune-motion`, `rune-staging` and `procwatch` crates from `anomalyco/rune` at `100b7d9` (MIT), with dead-key forwarding and window-chrome additions for a borderless Linux window (maximize/restore, minimize, edge resize, window menu, native window icon).
-- [`vendor/rexrs/`](vendor/rexrs/REX-LINUX.md): `a10y/rexrs` at `780be3f` (MIT OR Apache-2.0), plus revision-11 generated types, explicit API-revision range negotiation and preservation of an empty `attach_session_ids`.
+- [`vendor/rexrs/`](vendor/rexrs/REX-LINUX.md): `a10y/rexrs` at `780be3f` (MIT OR Apache-2.0), plus revision-12 generated types, explicit API-revision range negotiation and preservation of an empty `attach_session_ids`.
 - [`vendor/ghostty-vt/`](vendor/ghostty-vt/REX-LINUX.md): the crates.io `ghostty-vt` 0.8.0 source (Apache-2.0; Ghostty itself is MIT), plus a safe wrapper for Ghostty's render-state image iterator, image-aware snapshot decoding, a fixed temporary-file medium setting and grayscale PNG normalization.
 
 Each patch is meant to be dropped once the corresponding upstream release has equivalent APIs.
@@ -244,7 +472,7 @@ Other crates are used under their own licenses; see `Cargo.lock`.
 
 ## Acknowledgements
 
-- [Superlogical Rex](https://www.superlogical.com/rex), the server and protocol this client speaks. The implementation follows the server's `/llms.txt` API revision 11 contract; revision 10 is also supported.
+- [Superlogical Rex](https://www.superlogical.com/rex), the server and protocol this client speaks. The implementation follows the server's `/llms.txt` API revision 12 contract; revisions 10 and 11 are also supported.
 - [anomalyco/rune](https://github.com/anomalyco/rune) and [a10y/rexrs](https://github.com/a10y/rexrs).
 - [Ghostty](https://github.com/ghostty-org/ghostty) for the terminal core.
 - [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux-client) and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx), whose protocol work served as references.

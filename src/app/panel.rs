@@ -12,11 +12,15 @@ use serde_json::Value;
 pub enum Intent {
     Select(usize, String),
     Tab(String),
+    /// A named client action shared with the shortcut dispatcher.
+    ClientAction(&'static str, Value),
     Switcher,
     /// Create a session on a host at once, named when a switcher query gave a name.
     CreateOn(usize, Option<String>),
     ChooseHost(String),
     RetryHost(usize),
+    /// Review an opt-in, one-time personal server start.
+    StartSsh(usize),
     /// The default shell form for a host.
     HostShell(usize),
     Pane(PaneTarget, PaneAction),
@@ -41,6 +45,8 @@ pub enum Intent {
     Activity,
     Settings,
     Fonts,
+    ClientLabel,
+    RemoteControl(usize),
     /// The Add host list: the tailnet's machines, or an endpoint by hand.
     AddHost,
     /// Attach to the Rex server with built-in Tailscale on a listed machine at once.
@@ -62,19 +68,54 @@ pub enum Intent {
     Chrome(ChromeTheme),
 }
 impl Intent {
+    fn shortcut(&self) -> Option<(&'static str, Value)> {
+        use serde_json::json;
+        Some(match self {
+            Self::ClientAction(name, args) => (*name, args.clone()),
+            Self::Switcher => ("session.switch", Value::Null),
+            Self::NewSession => ("session.new", Value::Null),
+            Self::NewWindow => ("client.tab.new", Value::Null),
+            Self::RenameSession => ("session.rename", Value::Null),
+            Self::RenameWindow(_) => ("client.tab.rename", Value::Null),
+            Self::CloseWindow(_) => ("client.tab.close", Value::Null),
+            Self::Sidebar => ("client.sidebar.toggle", Value::Null),
+            Self::Settings => ("client.settings", Value::Null),
+            Self::Pane(_, pane) => match pane {
+                PaneAction::Split(direction) => (
+                    "pane.split",
+                    json!({"direction":if *direction=="horizontal" {"right"} else {"down"}}),
+                ),
+                PaneAction::Zoom => ("pane.zoom", Value::Null),
+                PaneAction::Reconnect => ("pane.reconnect", Value::Null),
+                PaneAction::Close => ("pane.close", Value::Null),
+                _ => return None,
+            },
+            Self::CycleColumnWidth => (super::actions::CYCLE_COLUMN, Value::Null),
+            Self::MaximizeColumn => (super::actions::MAXIMIZE_COLUMN, Value::Null),
+            Self::MoveColumn(step) => (
+                super::actions::MOVE_COLUMN,
+                json!({"direction": if *step < 0 { "left" } else { "right" }}),
+            ),
+            _ => return None,
+        })
+    }
+
     /// Actions that open another panel instead of closing the current one, or close it
     /// themselves.
     pub fn opens_followup(&self) -> bool {
         matches!(
             self,
             Intent::Switcher
+                | Intent::ClientAction("client.settings" | "session.switch", _)
                 | Intent::ChooseHost(_)
                 | Intent::HostShell(_)
+                | Intent::StartSsh(_)
                 | Intent::RenameSession
                 | Intent::RenameWindow(_)
                 | Intent::CloseWindow(_)
                 | Intent::Settings
                 | Intent::Fonts
+                | Intent::ClientLabel
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
                 | Intent::AddHost
@@ -131,6 +172,7 @@ pub enum PaneAction {
 #[derive(Clone, Debug)]
 pub enum Form {
     Fonts,
+    ClientLabel,
     /// A host's default shell for new terminals.
     HostShell(usize),
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
@@ -138,6 +180,8 @@ pub enum Form {
     RenameWindow(String),
     RenamePane(String),
     AddHost,
+    /// A reachable endpoint and the server's listener facts.
+    Discovered(String),
     /// A listed machine's name and SSH user, from the Add host list.
     AddSsh(usize),
     /// A host's name, endpoint and default shell, from Settings.
@@ -211,6 +255,10 @@ pub enum PanelKind {
         method: String,
         payload: Value,
         description: String,
+    },
+    /// Captures the endpoint, not a mutable host index.
+    StartSsh {
+        endpoint: String,
     },
     /// The preview of a `rex skill` change, waiting for Keep or Apply.
     AgentChange {
@@ -377,19 +425,14 @@ impl Workspace {
         };
         let actions = self.column_actions();
         let mut entries = vec![
-            Entry::new(
-                "Cycle column width",
-                "Ctrl Shift S",
-                group,
-                Intent::CycleColumnWidth,
-            ),
+            Entry::new("Cycle column width", "", group, Intent::CycleColumnWidth),
             Entry::new(
                 if width >= 0.99 {
                     "Restore column width"
                 } else {
                     "Maximize column"
                 },
-                "Ctrl Shift M",
+                "",
                 group,
                 Intent::MaximizeColumn,
             ),
@@ -398,13 +441,13 @@ impl Workspace {
         for (label, key, action, enabled) in [
             (
                 "Move column left",
-                "Ctrl Alt Shift Left",
+                "",
                 Intent::MoveColumn(-1),
                 actions.move_left,
             ),
             (
                 "Move column right",
-                "Ctrl Alt Shift Right",
+                "",
                 Intent::MoveColumn(1),
                 actions.move_right,
             ),
@@ -459,6 +502,14 @@ impl Workspace {
                 "",
                 "",
                 Intent::RetryHost(host),
+            ));
+        }
+        if self.can_start_ssh(host) {
+            entries.push(Entry::new(
+                "Start personal server…",
+                "Review first",
+                "",
+                Intent::StartSsh(host),
             ));
         }
         entries.push(Entry::new("Edit host…", "", "", Intent::EditHost(host)));
@@ -602,11 +653,12 @@ impl Workspace {
             }
             entries.extend([
                 Entry::new("Close tab…", "", "", Intent::CloseWindow(id.clone())),
-                Entry::new("New tab", "Ctrl Shift T", "", Intent::NewWindow),
+                Entry::new("New tab", "", "", Intent::NewWindow),
             ]);
             for e in &mut entries {
                 e.enabled = connected;
             }
+            self.shortcut_details(&mut entries);
             return entries;
         }
         let sessions_only = matches!(panel.kind, PanelKind::Picker(true));
@@ -619,9 +671,34 @@ impl Workspace {
         let host_name = &self.settings.hosts[self.active].label;
         if !sessions_only && !pane_only {
             for (label, detail, action) in [
-                ("Switch session…", "Ctrl K", Intent::Switcher),
-                ("New session", "Ctrl Shift N", Intent::NewSession),
-                ("New tab", "Ctrl Shift T", Intent::NewWindow),
+                ("Switch session…", "", Intent::Switcher),
+                (
+                    "Next tab across hosts",
+                    "",
+                    Intent::ClientAction(super::actions::NEXT_GLOBAL, Value::Null),
+                ),
+                (
+                    "Previous tab across hosts",
+                    "",
+                    Intent::ClientAction(super::actions::PREVIOUS_GLOBAL, Value::Null),
+                ),
+                (
+                    "Back in history",
+                    "Mouse Back",
+                    Intent::ClientAction(super::actions::HISTORY_BACK, Value::Null),
+                ),
+                (
+                    "Forward in history",
+                    "Mouse Forward",
+                    Intent::ClientAction(super::actions::HISTORY_FORWARD, Value::Null),
+                ),
+                (
+                    "Search terminal…",
+                    "",
+                    Intent::ClientAction(super::actions::SEARCH, Value::Null),
+                ),
+                ("New session", "", Intent::NewSession),
+                ("New tab", "", Intent::NewWindow),
                 ("Rename session…", "", Intent::RenameSession),
                 (
                     if self.sidebar.is_open() {
@@ -629,12 +706,13 @@ impl Workspace {
                     } else {
                         "Show sidebar"
                     },
-                    "Ctrl Shift B",
+                    "",
                     Intent::Sidebar,
                 ),
                 ("Activity", "", Intent::Activity),
+                ("Remote control", "", Intent::RemoteControl(self.active)),
                 ("Default shell…", "", Intent::HostShell(self.active)),
-                ("Settings…", "Ctrl ,", Intent::Settings),
+                ("Settings…", "", Intent::Settings),
                 ("Add host…", "", Intent::AddHost),
                 ("Edit host…", "", Intent::EditHost(self.active)),
                 ("Reconnect host", "", Intent::Retry),
@@ -647,6 +725,17 @@ impl Workspace {
                 if matches!(entry.action, Intent::EditHost(_)) {
                     entry.label = format!("Edit host {host_name}…");
                 }
+                if matches!(entry.action, Intent::RemoteControl(_)) {
+                    entry.label = format!(
+                        "Turn {} remote control for {}",
+                        if self.settings.hosts[self.active].remote_control {
+                            "off"
+                        } else {
+                            "on"
+                        },
+                        self.settings.hosts[self.active].label
+                    );
+                }
                 if matches!(entry.action, Intent::HostShell(_)) {
                     entry.label = format!("Default shell for {host_name}…");
                     entry.detail = self.shell(self.active).unwrap_or_default().to_owned();
@@ -654,7 +743,26 @@ impl Workspace {
                 if matches!(entry.action, Intent::NewWindow | Intent::RenameSession) {
                     entry.enabled = model.connected && model.view().is_some();
                 }
+                if matches!(
+                    entry.action,
+                    Intent::Switcher
+                        | Intent::NewSession
+                        | Intent::NewWindow
+                        | Intent::Sidebar
+                        | Intent::Settings
+                ) && let Some((name, args)) = entry.action.shortcut()
+                {
+                    entry.action = Intent::ClientAction(name, args);
+                }
                 entries.push(entry);
+            }
+            if self.can_start_ssh(self.active) {
+                entries.push(Entry::new(
+                    "Start personal server…",
+                    host_name,
+                    "Workspace",
+                    Intent::StartSsh(self.active),
+                ));
             }
             if let Some(id) = model.window().and_then(|w| w.window_id.clone()) {
                 entries.push(Entry::new(
@@ -696,17 +804,17 @@ impl Workspace {
                     } else {
                         "Split right"
                     },
-                    "Ctrl Shift D",
+                    "",
                     PaneAction::Split("horizontal"),
                 ),
-                ("Split down", "Ctrl Alt D", PaneAction::Split("vertical")),
+                ("Split down", "", PaneAction::Split("vertical")),
                 (
                     if zoomed { "Restore pane" } else { "Zoom pane" },
-                    "Ctrl Shift Enter",
+                    "",
                     PaneAction::Zoom,
                 ),
                 ("Rename pane…", "", PaneAction::Rename),
-                ("Reconnect terminal", "Ctrl Shift R", PaneAction::Reconnect),
+                ("Reconnect terminal", "", PaneAction::Reconnect),
                 ("Close pane…", "", PaneAction::Close),
             ] {
                 entries.push(Entry::new(
@@ -821,6 +929,7 @@ impl Workspace {
                 }
             }
         }
+        self.shortcut_details(&mut entries);
         if !sessions_only {
             entries.retain(|e| {
                 format!("{} {} {}", e.label, e.detail, e.group)
@@ -838,7 +947,7 @@ impl Workspace {
                 None => (
                     format!("New session on {host_name}"),
                     "Create on another host…".into(),
-                    "Ctrl Shift N",
+                    "",
                 ),
             };
             for (label, key, action) in [
@@ -854,6 +963,21 @@ impl Workspace {
                 entries.push(e);
             }
         }
+        self.shortcut_details(&mut entries);
         entries
+    }
+
+    fn shortcut_details(&self, entries: &mut [Entry]) {
+        for entry in entries {
+            if entry.detail.starts_with("Mouse ") {
+                continue;
+            }
+            if matches!(&entry.action, Intent::CreateOn(host,None) if *host==self.active) {
+                entry.detail = self.shortcut_detail("session.new", &Value::Null);
+            }
+            if let Some((name, args)) = entry.action.shortcut() {
+                entry.detail = self.shortcut_detail(name, &args);
+            }
+        }
     }
 }

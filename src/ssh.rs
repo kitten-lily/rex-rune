@@ -13,6 +13,19 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 
+pub mod setup;
+
+/// Socket discovery succeeded over SSH, but found no server. Authentication and
+/// transport failures deliberately do not carry this opt-in setup signal.
+#[derive(Debug)]
+pub struct MissingServer(pub String);
+impl std::fmt::Display for MissingServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for MissingServer {}
+
 /// Where an `ssh://` endpoint points.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
@@ -72,9 +85,9 @@ impl Target {
                 None
             }
         };
-        ensure!(!host.is_empty(), "{USAGE}");
+        ensure!(!host.is_empty() && !host.starts_with('-'), "{USAGE}");
         ensure!(
-            user.is_none_or(|u| !u.is_empty() && !u.contains(':')),
+            user.is_none_or(|u| !u.is_empty() && !u.starts_with('-') && !u.contains(':')),
             "{USAGE}"
         );
         Ok(Some(Target {
@@ -100,6 +113,19 @@ impl Target {
             out.push_str(socket);
         }
         out
+    }
+
+    fn missing_server_message(&self, user: &str) -> String {
+        let install_target = Target {
+            socket: None,
+            ..self.clone()
+        }
+        .endpoint()
+        .replace('\'', "'\\''");
+        format!(
+            "No Rex server found on {} for {user}: nothing in {user}'s runtime directory, /run/rex or /var/run/rex. Attachment never starts a server. Choose Start personal server… to review a one-time start, or run rex server install '{install_target}' yourself (Rex preview.14 or newer; asks before changes). If a server already runs elsewhere, name its socket in the SSH endpoint.",
+            self.host
+        )
     }
 
     /// The host as a URL writes it: an IPv6 address in brackets.
@@ -210,7 +236,7 @@ fn uid() -> String {
 /// Application Support (macOS), then a shared server's `/run/rex/server.sock` or FreeBSD's
 /// `/var/run/rex/server.sock`. Prints `sock <path>` for the first that is a socket, else
 /// `none <user>`. It is wrapped in `sh -c '…'`, so it holds no single quote.
-const RESOLVE: &str = "p=\"\"; for c in \"$(rex server status 2>/dev/null | grep -o \"unix:///[^[:space:]]*\\.sock\" | head -n 1 | sed \"s#^unix://##\")\" \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rex/server.sock\" \"$HOME/Library/Application Support/rex/server.sock\" /run/rex/server.sock /var/run/rex/server.sock; do if [ -n \"$c\" ] && [ -S \"$c\" ]; then p=\"$c\"; break; fi; done; if [ -n \"$p\" ]; then printf \"sock %s\\n\" \"$p\"; else printf \"none %s\\n\" \"$(id -un)\"; fi";
+const RESOLVE: &str = "p=\"\"; for c in \"$(rex server status --autostart=false 2>/dev/null | grep -o \"unix:///[^[:space:]]*\\.sock\" | head -n 1 | sed \"s#^unix://##\")\" \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rex/server.sock\" \"$HOME/Library/Application Support/rex/server.sock\" /run/rex/server.sock /var/run/rex/server.sock; do if [ -n \"$c\" ] && [ -S \"$c\" ]; then p=\"$c\"; break; fi; done; if [ -n \"$p\" ]; then printf \"sock %s\\n\" \"$p\"; else printf \"none %s\\n\" \"$(id -un)\"; fi";
 
 /// The check for a socket the user named: `sock <path>` when it is one, else `missing <path>`.
 fn check_script(socket: &str) -> String {
@@ -461,11 +487,7 @@ async fn resolve(target: &Target) -> Result<String> {
     });
     match answer {
         Some(Answer::Sock(path)) => Ok(path),
-        Some(Answer::None(user)) => bail!(
-            "No Rex server found on {} for {user}: nothing in {user}'s runtime directory, /run/rex or /var/run/rex. Name its socket in the endpoint, as ssh://{user}@{}/path/to/server.sock",
-            target.host,
-            target.host
-        ),
+        Some(Answer::None(user)) => Err(MissingServer(target.missing_server_message(&user)).into()),
         Some(Answer::Missing(path)) => bail!(
             "{path} on {} is not a socket. Is Rex running there?",
             target.host
@@ -525,6 +547,10 @@ mod tests {
         for bad in [
             "ssh://",
             "ssh://@box",
+            "ssh://-box",
+            "ssh://me@-box",
+            "ssh://-user@box",
+            "ssh://[-box]",
             "ssh://box:x",
             "ssh://box:0",
             "ssh://box/",
@@ -536,6 +562,29 @@ mod tests {
         ] {
             assert!(Target::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn missing_server_hint_preserves_ssh_config_user_port_and_ipv6() {
+        for endpoint in [
+            "ssh://work-alias",
+            "ssh://ops@box:2222",
+            "ssh://me@[fd7a::1]:22",
+        ] {
+            let target = Target::parse(endpoint).unwrap().unwrap();
+            let message = target.missing_server_message("remote-user");
+            assert!(message.contains(&format!("rex server install '{endpoint}'")));
+            assert!(message.contains("Attachment never starts a server"));
+            assert!(message.contains("asks before changes"));
+        }
+        let target = Target::parse("ssh://box/path/to/server.sock")
+            .unwrap()
+            .unwrap();
+        assert!(
+            target
+                .missing_server_message("me")
+                .contains("rex server install 'ssh://box'")
+        );
     }
 
     #[test]

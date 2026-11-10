@@ -584,7 +584,10 @@ fn search_field(block: &str, key: &(HostId, String), edit: &TextEdit, t: &term::
                 .plain()
                 .trailing(text(status).font(medium(10.5)).color(rgb(muted())))
                 .on_edit(move |s: &mut Workspace| s.search_input(&k1))
-                .on_change(move |s: &mut Workspace, _: &mut Tx| s.search_changed(&k2))
+                .on_change(move |s: &mut Workspace, _: &mut Tx| {
+                    s.last_keypress = Some(std::time::Instant::now());
+                    s.search_changed(&k2);
+                })
                 .on_key(move |s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| {
                     search_key(s, &k3, ev, tx)
                 })
@@ -626,6 +629,18 @@ fn empty(s: &Workspace) -> El {
             Intent::NewSession,
         )
     };
+    let setup = if s.can_start_ssh(s.active) {
+        let host = s.active;
+        pill(
+            "offer-ssh-start",
+            "Start personal server…",
+            Pill::Neutral,
+            32.,
+            move |s, tx| s.perform(Intent::StartSsh(host), tx),
+        )
+    } else {
+        el()
+    };
     col().key("empty").w_full().h_full().center().child(
         glass(
             col().w(420.).padding(28.).gap(12.).items_center(),
@@ -655,7 +670,8 @@ fn empty(s: &Workspace) -> El {
                 },
             )
             .preserve_focus_on_press(true),
-        ),
+        )
+        .child(setup),
     )
 }
 

@@ -2,18 +2,82 @@
 
 ## Unreleased
 
-Several of these come from [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https://github.com/kitten-lily/rex-rune)); thank you.
+From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https://github.com/kitten-lily/rex-rune)):
 
-- Terminal fidelity: the cursor takes the shape programs ask for (DECSCUSR block, bar or underline); curly, dotted, dashed and double underlines in their own colours and overlines (SGR 4:x, 58, 53); box-drawing and block characters are drawn on whole pixels, so borders meet and meters have no seams. (@kitten-lily)
-- A server that dropped this client while the network was gone (a laptop asleep) is noticed within about 30 seconds through TCP keepalives, and the host and its terminals reconnect. (@kitten-lily)
-- Progress that programs report with OSC 9;4 draws as a thin bar under their tab's label and their pane's name, "Paused" and "Error" as words; the bar goes when the program clears it or leaves the foreground. A terminal bell that rings out of sight marks its tab "Bell" until you see it. In a split, each pane's header carries its own activity word, and an unrenamed pane shows its program's terminal title. (@kitten-lily)
-- Ctrl Shift F searches the focused terminal's screen and scrollback with Ghostty's search: matches are highlighted, Enter and Shift+Enter step through them, Escape gives the keyboard back to the terminal, and nothing typed in the field reaches the program. (@kitten-lily)
-- A pane this client owns waits up to half a second for a frame at its own size before drawing, so the previous client's size no longer flashes on attach. (@kitten-lily)
-- Add host lists the machines on your tailnet (`tailscale status --json`), searchable by name, by Tailscale IP when the tailnet has no MagicDNS. Each online machine is checked for a Rex server at the addresses the official clients try for a bare host (HTTPS 443, HTTPS 7297, HTTP 7297); one that answers is added and connected with one press. Any other machine takes an SSH user name and an optional Rex socket path and connects as `ssh://user@host[/socket]`; the form says whether the check found nothing listening or couldn't tell. A machine already added stays listed, so another login to it can be added. Entering an endpoint by hand remains.
-- `ssh://[user@]host[:port][/socket]` endpoints: the Rex server's Unix socket on that machine is forwarded over `ssh -L`, so a machine with Tailscale SSH, or any SSH login you already have, works with nothing configured on its Rex. Without a `/socket`, the machine is asked where its server listens (`rex server status`, the user's runtime directory, `/run/rex`, `/var/run/rex`). Each instance keeps its forwards in a directory of its own, so two clients or a probe reaching the same machine don't disturb each other. The forward's end is a disconnect like any other, and `ssh`'s reason is shown next to Retry.
-- Settings > Terminal now says when a saved font family waits for the client to be reopened, and when the saved family isn't installed. Saving a font change shows a notice to reopen the client. Applying fonts without a restart is tracked in [#6](https://github.com/kitten-lily/rex-rune/issues/6).
 - Activity view: the sidebar's Sessions / Activity switch (or Activity in Commands) lists every pane that reports activity across all connected hosts, grouped by priority or by session, with its message, location, working directory and reported subtasks; idle agents can be shown. Pressing a row focuses that exact pane. Sessions in the sidebar and switcher now show their activity word and, for two or more panes needing you, a count. To do this, the client reads every connected session's layout (read-only `session.view`, paced, one at a time) while activity in tabs is shown, or while the sidebar shows Activity or lists tabs, and each known terminal's status, title, directory and process once per connection. New settings: `sidebar_mode`, `activity_grouping`, `activity_show_idle`. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
-- Shift+Space, Shift+Tab and Shift+Enter now reach terminal programs that use the Kitty keyboard protocol, such as Claude Code, as distinct keys instead of plain Space, Tab and Enter. Shift is reported unless the keyboard layout used it to type the character. ([#4](https://github.com/kitten-lily/rex-rune/issues/4))
+
+## 0.5.0 - 2026-11-10
+
+### Added
+
+- Opt-in Remote control per saved host (off even locally), eight view-only client actions, explicit refusals with server-command alternatives, host/target/panel/typing guards, five-second stale-request limits and reconnect-scoped replies. Every performed request names its host and requester in a six-second in-app notice.
+- `session.select session_id=… [window_id=…]` shows a session on the requesting host, with acknowledgement, a five-second deadline and history integration. `client.tab.goto index=-1` selects the last tab. Checked live against private preview.14 servers, including a real SSH host.
+- A client label in Settings → Remote Hosts, defaulting to the hostname and sent in HELLO; edits apply after reopening.
+
+- Signed releases with minisign signatures for `SHA256SUMS` and `latest.json`, protected release approval, package provenance attestations, and committed CI and offline recovery public keys (#21, #28). No client auto-update is included.
+
+### Changed
+
+- Update GitHub Actions checkout to 7.0.1, upload-artifact to 7.0.2, and mise-action to 5.2.7 (Dependabot #22–#24).
+
+### Verifying downloads
+
+Verify the metadata signatures before checking package hashes. See the [README's minisign public keys and verification instructions](https://github.com/shuv1337/rex-rune/blob/v0.5.0/README.md#verify-a-download). Releases through 0.4.2 remain unsigned.
+
+## 0.4.2 - 2026-11-09
+
+### Added
+
+- Offer a separately confirmed, one-time personal-server start when SSH finds no default Rex server. Preview the target and command, default to Not now, check local/remote API-12 support, report failures without retrying, and reconnect through the unchanged `ssh -L` transport. Ordinary attachment never starts servers; installation remains manual.
+- Add host reads API-12 `server.status` listeners, showing the verified endpoint and a review of bound addresses and admission rules. Older servers and unavailable metadata retain attachment without guessed access rules.
+- New tabs and splits start in the source pane's shell directory on its server, including shells that do not report OSC 7; a pane-menu split inherits from the pane the menu names. Missing or slow directory reads fall back to the server's default; new sessions are unchanged. (@kitten-lily)
+
+### Fixed
+
+- Clicking a disabled control, divider or padding inside a dialog no longer dismisses it. Empty space preserves field focus; clicking outside still closes the dialog. (@kitten-lily)
+
+## 0.4.1 - 2026-11-09
+
+### Changed
+
+- Support Rex server 0.1.0-preview.14 (Linux build `7e460d0`), negotiating API revisions **10–12**. Refresh the vendored SDK capture and generated types for optional listener metadata in `server.status` and `session.bootstrap`; uploads still require revision 11.
+- When SSH finds no Rex socket, explain attachment-only behavior and suggest the manual `rex server install ssh://host` setup. Socket lookup explicitly disables autostart; existing OpenSSH forwarding, aliases and custom sockets remain supported.
+
+### Fixed
+
+- Answer remote `client_perform_requested` actions with `not_supported` and an explanation instead of leaving agents waiting for a timeout. Remote interface control remains unimplemented; local shortcuts and their queued actions are unchanged.
+
+See [preview.14 compatibility notes](docs/server-preview14.md) for the exact protocol diff, test results and deferred features.
+
+## 0.4.0 — 2026-11-09
+
+Changes since 0.3.2, including work adapted from [Joe Goldin](https://github.com/joegoldin) ([joegoldin/rex-rune](https://github.com/joegoldin/rex-rune)), [Lily](https://github.com/kitten-lily) ([kitten-lily/rex-rune](https://github.com/kitten-lily/rex-rune)) and [Andrea Zito (nivox)](https://github.com/nivox). Thank you; their contributions are credited below and in the commits.
+
+### Added
+
+- **Tailnet host discovery:** Add host lists and searches your Tailscale machines, using Tailscale IPs when MagicDNS is unavailable. Online machines are checked for Rex at the addresses the official clients use; connect to a detected server with one press, or enter an SSH login and optional socket path. Manual endpoints and multiple logins to the same machine remain supported.
+- **SSH socket forwarding:** connect with `ssh://[user@]host[:port][/socket]` using an existing SSH login, including Tailscale SSH, without reconfiguring Rex. The client discovers the remote Rex socket when no path is given and forwards it with `ssh -L`. Each client instance keeps its own forwards; disconnects show SSH's reason next to Retry.
+- **Global navigation and visit history:** Ctrl Tab and Ctrl Shift Tab cycle through tabs across connected hosts and sessions in sidebar order. Mouse Back/Forward and Commands revisit this window's history, including across reconnects, skipping unavailable targets. Rapid cross-session cycling briefly settles before attachment without enabling extra prefetch; Ctrl PageUp/PageDown still use the server's current-session navigation. (@joegoldin)
+- **Configurable shortcuts through Rex's `client.keymap`:** bindings in a host's Rex config now apply, layered with Linux defaults and user overrides in `~/.config/rex-linux/shortcuts.json`. Rebind or remove any workspace shortcut, including Ctrl Tab, to let it reach terminal programs. Supports multi-key sequences, layout-aware logical and physical keys, Lua forwarding and server actions, plus explicit `pane.send_key`, tab selection and pane resizing. (@nivox)
+- Settings → Shortcuts shows effective bindings, their sources, file paths and Problems; Commands follows rebinding and a toolbar chip shows pending sequences. Override files reload on window focus or opening Settings and are not rewritten by workspace saves. Invalid files leave defaults working, and unavailable server keymaps use local defaults plus overrides. Custom bindings from nivox's format import once without copying defaults or replacing an existing override file. (@nivox)
+- **Terminal search:** Ctrl Shift F searches the focused pane's screen and scrollback with Ghostty's search. Matches are highlighted; Enter and Shift Enter step through them, and Escape returns the keyboard to the terminal. Search-field typing and clicks stay out of the running program. (@kitten-lily)
+- **Activity, progress and bells:** OSC 9;4 progress appears beneath tab labels and split-pane names, with OSC 7501 percentages as a fallback and words for Paused or Error. Each split pane shows its own activity and, unless renamed, its program's terminal title. An unseen terminal bell marks its tab Bell until viewed. Progress clears with its reporting program but survives while a child holds the foreground. (@kitten-lily)
+
+### Changed
+
+- **Terminal fidelity:** programs can select block, bar or underline cursors; curly, dotted, dashed and double underlines use their requested colours, and overlines are supported. Box-drawing and block characters meet on whole device pixels without seams, and decoration thickness respects fractional display scaling. (@kitten-lily)
+- A pane owned by this client waits up to half a second for a frame at its own size before drawing, avoiding a flash of the previous client's dimensions without waiting indefinitely. (@kitten-lily)
+- Settings → Terminal identifies saved font changes that need a client restart and font families that are not installed; saving a family change also shows a restart notice.
+
+### Fixed
+
+- SSH connections no longer get stuck reconnecting when SSH config enables `ControlMaster auto`. Forwards stay off shared control masters and keep their login open for the connection's lifetime.
+- Silently dropped server connections, such as after laptop sleep, are detected within about 30 seconds using TCP keepalives so hosts and terminals can reconnect. (@kitten-lily)
+- Shift Space, Shift Tab and Shift Enter reach Kitty-keyboard programs such as Claude Code as distinct keys. Shift is retained unless the keyboard layout used it to produce the character. Held within-session navigation works again, stale consumed-key state no longer swallows fresh presses, and forwarded terminal input releases focus from UI controls. (@kitten-lily for modified-key handling)
+- Search highlights and selected matches stay correctly positioned in clipped or scrolled panes. Closing search during a host reconnect clears its highlights, and a failed search reports a notice instead of dropping the terminal stream. (@kitten-lily)
+- Back/Forward retains the right history position after failed or superseded navigation; expired queued visits no longer attach later, and selecting a reconnecting host's session no longer bounces back. (@joegoldin for the navigation foundation)
+- Terminal sizes, themes and activity are restored before refreshing shortcuts after reconnect. Local action-request errors no longer disconnect the host, returned actions can finish after pane-focus updates, and changed overrides also reach hosts that were offline.
+- The X11 smoke test now holds modifiers through key releases and checks pointer selection at the correct cell boundary. It requires an explicit disposable server and stubs tailnet discovery rather than contacting real tailnet machines.
 
 ## 0.3.2 — 2026-11-06
 

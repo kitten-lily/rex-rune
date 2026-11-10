@@ -1,5 +1,13 @@
 //! Headless focus and key-routing checks on Rune's runtime (no server: the one host is a
 //! socket that does not exist).
+#[path = "bindings_integration_tests.rs"]
+mod bindings_integration_tests;
+#[path = "navigation_tests.rs"]
+mod navigation_tests;
+#[path = "remote_session_tests.rs"]
+mod remote_session_tests;
+#[path = "remote_tests.rs"]
+mod remote_tests;
 use super::{
     panel::{Form, Intent, PanelKind, SessionAction},
     placeholder, view,
@@ -29,6 +37,7 @@ fn workspace_hosts(count: usize) -> Workspace {
                 } else {
                     format!("unix:///nonexistent/rex-test-{i}.sock")
                 },
+                remote_control: false,
                 collapsed: false,
                 shell: None,
             })
@@ -405,12 +414,11 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     ws.hosts[0].model.views.insert(
         "cur".into(),
         serde_json::from_value(serde_json::json!({
-            "revision": 1,
-            "session_id": "cur",
+            "revision": 1, "session_id": "cur", "active_window_id": "w",
             "windows": [{"window_id": "w", "focused_block_id": "block:f",
                 "layers": [{"kind": "tiled", "blocks": [{"block_id": "block:f"}]}]}]
         }))
-        .expect("a view"),
+        .unwrap(),
     );
     ws.settings.hosts[0].shell = Some("zsh".into());
     ws.settings.hosts[1].shell = Some("fish".into());
@@ -421,7 +429,7 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     assert_eq!(sent[0].1, "cur");
     assert_eq!(
         sent[0].2["cwd_from"], "block:f",
-        "a new tab starts where the focused pane is"
+        "new tab uses the focused pane"
     );
     assert_eq!(
         sent[0].2["layout"]["block"]["options"],
@@ -453,6 +461,11 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     );
     let sent = requests(&other);
     assert_eq!(sent[0].0, "session.new_split");
+    assert_eq!(sent[0].1, "b", "pane menu keeps its captured session");
+    assert_eq!(
+        sent[0].2["cwd_from"], "block:1",
+        "pane menu uses its target, not focus"
+    );
     assert_eq!(
         (sent[0].1.as_str(), &sent[0].2["cwd_from"]),
         ("b", &"block:1".into())
@@ -474,31 +487,38 @@ fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     model.connected = true;
     model.sessions = vec![session("s")];
     model.selected = Some("s".into());
+    let mut windows = serde_json::json!([
+        {"window_id": "single", "label": "server", "focused_block_id": "block:a",
+         "layers": [{"kind": "tiled", "layout": {"block_id": "block:a"},
+            "blocks": [{"block_id": "block:a"}]}]},
+        {"window_id": "split", "label": "dev", "focused_block_id": "block:b",
+         "layers": [{"kind": "tiled", "layout": {"split": {"direction": "horizontal", "ratio": 0.5,
+            "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}},
+            "blocks": [{"block_id": "block:b"}, {"block_id": "block:c"}]}]}
+    ]);
+    // A wide nested tab for the scrolling view, present only in tests that select it, so
+    // tab-cycling tests see the two tabs above.
+    if active == "strip" {
+        windows.as_array_mut().unwrap().push(serde_json::json!(
+            {"window_id": "strip", "label": "wide", "focused_block_id": "block:f",
+             "layers": [{"kind": "tiled", "layout": {"split": {"split_id": "strip:root",
+                "direction": "horizontal", "ratio": 0.7,
+                "before": {"split": {"split_id": "strip:left", "direction": "horizontal", "ratio": 0.3,
+                    "before": {"block_id": "block:d"},
+                    "after": {"split": {"split_id": "column:eg", "direction": "vertical", "ratio": 0.5,
+                        "before": {"block_id": "block:e"}, "after": {"block_id": "block:g"}}}}},
+                "after": {"block_id": "block:f"}}},
+                "blocks": [{"block_id": "block:d"}, {"block_id": "block:e"},
+                    {"block_id": "block:g"}, {"block_id": "block:f"}]}]}
+        ));
+    }
     model.views.insert(
         "s".into(),
         serde_json::from_value(serde_json::json!({
             "revision": 1,
             "session_id": "s",
             "active_window_id": active,
-            "windows": [
-                {"window_id": "single", "label": "server", "focused_block_id": "block:a",
-                 "layers": [{"kind": "tiled", "layout": {"block_id": "block:a"},
-                    "blocks": [{"block_id": "block:a"}]}]},
-                {"window_id": "split", "label": "dev", "focused_block_id": "block:b",
-                 "layers": [{"kind": "tiled", "layout": {"split": {"direction": "horizontal", "ratio": 0.5,
-                    "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}},
-                    "blocks": [{"block_id": "block:b"}, {"block_id": "block:c"}]}]},
-                {"window_id": "strip", "label": "wide", "focused_block_id": "block:f",
-                 "layers": [{"kind": "tiled", "layout": {"split": {"split_id": "strip:root",
-                    "direction": "horizontal", "ratio": 0.7,
-                    "before": {"split": {"split_id": "strip:left", "direction": "horizontal", "ratio": 0.3,
-                        "before": {"block_id": "block:d"},
-                        "after": {"split": {"split_id": "column:eg", "direction": "vertical", "ratio": 0.5,
-                            "before": {"block_id": "block:e"}, "after": {"block_id": "block:g"}}}}},
-                    "after": {"block_id": "block:f"}}},
-                    "blocks": [{"block_id": "block:d"}, {"block_id": "block:e"},
-                        {"block_id": "block:g"}, {"block_id": "block:f"}]}]}
-            ]
+            "windows": windows,
         }))
         .expect("a view"),
     );
@@ -1175,6 +1195,29 @@ fn scrolling_column_shortcuts_and_controls_act_on_the_focused_column() {
             .find(|entry| entry.label == "Expel pane to new column right")
             .is_some_and(|entry| !entry.enabled)
     );
+    let detail = |label: &str| {
+        entries
+            .iter()
+            .find(|entry| entry.label == label)
+            .map(|entry| entry.detail.clone())
+    };
+    // Column shortcuts are keymap actions, so Commands shows their effective keys.
+    assert_eq!(
+        detail("Cycle column width").as_deref(),
+        Some("Ctrl Shift S")
+    );
+    assert_eq!(
+        detail("Restore column width").as_deref(),
+        Some("Ctrl Shift M")
+    );
+    assert_eq!(
+        detail("Move column left").as_deref(),
+        Some("Ctrl Alt Shift Left")
+    );
+    assert_eq!(
+        detail("Move column right").as_deref(),
+        Some("Ctrl Alt Shift Right")
+    );
     let labels: Vec<String> = entries.into_iter().map(|entry| entry.label).collect();
     assert!(labels.contains(&"Cycle column width".into()));
     assert!(labels.contains(&"Restore column width".into()));
@@ -1302,29 +1345,41 @@ fn capture_host(ws: &mut Workspace, index: usize) -> flume::Receiver<HostCommand
 }
 
 #[test]
-fn a_new_tab_in_an_empty_window_asks_for_no_directory() {
-    let mut ws = workspace_hosts(1);
+fn split_uses_the_focused_pane_as_its_directory_source() {
+    let (mut ws, rx) = tabbed_workspace("split");
+    ws.perform(Intent::Split("vertical"), &mut rune::Tx::default());
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "session.new_split");
+    assert_eq!(sent[0].1, "s");
+    assert_eq!(sent[0].2["cwd_from"], sent[0].2["anchor_id"]);
+    assert_eq!(sent[0].2["cwd_from"], ws.model().focused().unwrap());
+}
+
+#[test]
+fn new_tabs_without_a_source_use_defaults_and_without_a_session_do_nothing() {
+    let mut ws = workspace();
     let rx = capture_host(&mut ws, 0);
-    ws.hosts[0].model.connected = true;
-    ws.hosts[0].model.selected = Some("cur".into());
-    ws.hosts[0].model.views.insert(
-        "cur".into(),
-        serde_json::from_value(serde_json::json!({
-            "revision": 1, "session_id": "cur", "windows": [{"window_id": "w"}]
-        }))
-        .expect("a view"),
+    ws.term_theme = Some(rex_linux::terminal_theme::TerminalTheme::midnight());
+    ws.perform(Intent::NewWindow, &mut rune::Tx::default());
+    assert!(rx.is_empty(), "no selected session, no creation");
+    assert!(
+        !ws.settings.terminal_theme_declared,
+        "no phantom theme declaration"
     );
+
+    ws.hosts[0].model.selected = Some("cur".into());
     ws.perform(Intent::NewWindow, &mut rune::Tx::default());
     let sent: Vec<_> = rx.try_iter().collect();
     assert!(
         matches!(&sent[..], [HostCommand::Request { method, payload }]
-            if method == "session.new_window" && payload["session_id"] == "cur"),
-        "a plain request, with no directory lookup"
+        if method == "session.new_window" && payload["session_id"] == "cur"),
+        "no focused block means no process query"
     );
+    std::fs::remove_file(&ws.settings_path).ok();
 }
 
-/// Every request a host was sent, as (method, session_id, payload); a new terminal's payload
-/// also gets the block its directory comes from as `cwd_from`.
+/// Every request as (method, session_id, payload), with a synthetic cwd_from for creation.
 fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_json::Value)> {
     rx.try_iter()
         .filter_map(|c| match c {
@@ -1348,6 +1403,15 @@ fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_jso
                 payload["cwd_from"] = cwd_from.into();
                 Some((method, session, payload))
             }
+            HostCommand::Navigate {
+                session,
+                window: Some(window),
+                ..
+            } => Some((
+                "session.focus_window".into(),
+                session.clone(),
+                serde_json::json!({"session_id":session,"window_id":window}),
+            )),
             _ => None,
         })
         .collect()
@@ -1850,6 +1914,45 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
 }
 
 #[test]
+fn invalid_shortcuts_start_with_one_notice_and_a_persistent_settings_problem() {
+    let mut ws = workspace();
+    let directory = ws.settings_path.with_extension("shortcuts-test");
+    std::fs::create_dir_all(&directory).unwrap();
+    ws.settings_path = directory.join("workspace.json");
+    ws.settings.save(&ws.settings_path).unwrap();
+    let shortcuts = rex_linux::settings::shortcuts::Shortcuts::path(&ws.settings_path);
+    std::fs::write(&shortcuts, "[broken").unwrap();
+    let mut ws = relaunch(&ws);
+    assert_eq!(
+        ws.notices
+            .iter()
+            .filter(|n| n.text.contains("using default shortcuts"))
+            .count(),
+        1
+    );
+    assert!(ws.settings.shortcut_file.notice.is_none());
+    ws.notices.clear();
+    ws.perform(Intent::Settings, &mut rune::Tx::default());
+    let mut rt = runtime(ws);
+    click(&mut rt, "settings-section:shortcuts");
+    assert!(has(&rt, "shortcut-problem-0"));
+    let elements = rt.elements();
+    let problem = elements
+        .iter()
+        .find(|e| e.key.as_deref() == Some("shortcut-problem-0"))
+        .unwrap();
+    assert!(problem.text.as_deref().unwrap().contains("Invalid JSON"));
+    let path = elements
+        .iter()
+        .find(|e| e.key.as_deref() == Some("shortcuts-path"))
+        .unwrap();
+    assert_eq!(path.text.as_deref(), Some(shortcuts.to_str().unwrap()));
+    rt.state.settings.save(&rt.state.settings_path).unwrap();
+    assert_eq!(std::fs::read_to_string(shortcuts).unwrap(), "[broken");
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn a_notification_switch_flips_and_settings_stay_open() {
     let mut ws = workspace();
     let mut tx = rune::Tx::default();
@@ -1917,6 +2020,42 @@ fn a_press_on_a_dialogs_padding_leaves_it_open() {
         ),
         "only a press outside the dialog closes it"
     );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn dialog_padding_preserves_field_focus_but_the_scrim_dismisses() {
+    let mut ws = workspace();
+    ws.open_panel(
+        PanelKind::Form(Form::AddHost),
+        "Add host",
+        &[
+            ("Name", "", "work"),
+            ("Endpoint", "", "unix:///tmp/rex.sock"),
+        ],
+    );
+    let mut rt = runtime(ws);
+    press(&mut rt, Key::Tab);
+    let before = focused(&rt).expect("the second field is focused");
+    assert!(before.contains("/field:1/"), "Tab reached {before}");
+    let r = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("dialog"))
+        .unwrap()
+        .rect;
+    rt.pointer_down(r[0] + 6., r[1] + 6.);
+    rt.pointer_up(r[0] + 6., r[1] + 6.);
+    rt.frame(1. / 60.);
+    assert!(rt.state.panel.is_some(), "padding is not the scrim");
+    assert_eq!(focused(&rt), Some(before), "typing stays in the field");
+
+    // Stay off the window's resize edges, which own their presses even with a panel open.
+    rt.pointer_down(40., 200.);
+    rt.pointer_up(40., 200.);
+    rt.frame(1. / 60.);
+    assert!(rt.state.panel.is_none(), "outside presses still dismiss");
+    assert_eq!(focused(&rt), None, "focus returns to the terminal");
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -3519,7 +3658,9 @@ fn a_sidebar_tab_selects_its_session_and_focuses_its_window() {
     let sent = |rx: &flume::Receiver<HostCommand>| -> Vec<String> {
         rx.try_iter()
             .filter_map(|c| match c {
-                HostCommand::Select(id) => Some(format!("select {id}")),
+                HostCommand::Navigate {
+                    session, window, ..
+                } => Some(format!("navigate {session} {}", window.unwrap_or_default())),
                 HostCommand::Request { method, payload } => Some(format!(
                     "{method} {} {}",
                     payload["session_id"].as_str()?,
@@ -3531,12 +3672,9 @@ fn a_sidebar_tab_selects_its_session_and_focuses_its_window() {
     };
     sent(&rx);
     click(&mut rt, "sidebar-tab:0:other:other-second");
-    assert_eq!(
-        sent(&rx),
-        ["select other", "session.focus_window other other-second"]
-    );
+    assert_eq!(sent(&rx), ["navigate other other-second"]);
     click(&mut rt, "sidebar-tab:0:s:split");
-    assert_eq!(sent(&rx), ["session.focus_window s split"]);
+    assert_eq!(sent(&rx), ["navigate s split"]);
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -3906,7 +4044,9 @@ fn activity_rows_focus_their_exact_pane_on_another_session() {
     let sent: Vec<_> = rx1
         .try_iter()
         .filter_map(|c| match c {
-            HostCommand::Select(id) => Some(format!("select {id}")),
+            HostCommand::Navigate {
+                session, window, ..
+            } => Some(format!("navigate {session} {}", window.unwrap_or_default())),
             HostCommand::Request { method, payload } => Some(format!("{method} {payload}")),
             _ => None,
         })
@@ -3914,7 +4054,7 @@ fn activity_rows_focus_their_exact_pane_on_another_session() {
     assert_eq!(
         sent,
         [
-            "select b".to_owned(),
+            "navigate b w".to_owned(),
             r#"session.focus_block {"block_id":"block:z","session_id":"b"}"#.to_owned()
         ]
     );
@@ -4285,7 +4425,11 @@ fn tailnet() -> Vec<rex_linux::tailnet::Machine> {
 }
 
 fn rex_at(address: &str) -> rex_linux::tailnet::Probe {
-    rex_linux::tailnet::Probe::Rex(format!("https://{address}"))
+    rex_linux::tailnet::Probe::Rex {
+        endpoint: format!("https://{address}"),
+        listeners: vec![],
+        reason: None,
+    }
 }
 
 fn open_add_host(rt: &mut Runtime<Workspace>) {
@@ -4323,6 +4467,216 @@ fn open_add_host(rt: &mut Runtime<Workspace>) {
     for _ in 0..4 {
         rt.frame(1. / 60.);
     }
+}
+
+#[test]
+fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = "ssh://work-alias".into();
+    ws.hosts[0].model.ssh_server_missing = true;
+    let commands = capture_host(&mut ws, 0);
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "offer-ssh-start"));
+    assert!(rt.state.ssh_setup.ran.is_empty());
+    click(&mut rt, "offer-ssh-start");
+    assert!(matches!(
+        rt.state.panel.as_ref().unwrap().kind,
+        PanelKind::StartSsh { .. }
+    ));
+    assert!(
+        rt.state.ssh_setup.ran.is_empty(),
+        "opening a preview cannot execute"
+    );
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none(), "Enter defaults to Not now");
+    assert!(rt.state.ssh_setup.ran.is_empty());
+    click(&mut rt, "offer-ssh-start");
+    click(&mut rt, "confirm-ssh-start");
+    assert_eq!(rt.state.ssh_setup.ran, ["ssh://work-alias"]);
+    rt.state.submit(&mut rune::Tx::default());
+    assert_eq!(rt.state.ssh_setup.ran.len(), 1, "no duplicate while busy");
+    rt.update(|s, tx| {
+        s.ssh_start_finished(
+            "ssh://work-alias",
+            Err(anyhow::anyhow!("remote Rex is too old").into()),
+            tx,
+        )
+    });
+    assert!(
+        rt.state
+            .panel
+            .as_ref()
+            .unwrap()
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("too old")
+    );
+    assert!(rt.state.ssh_setup.running.is_none());
+    assert_eq!(rt.state.ssh_setup.ran.len(), 1, "errors never retry");
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+    click(&mut rt, "confirm-ssh-start");
+    assert_eq!(rt.state.ssh_setup.ran.len(), 2);
+    rt.update(|s, tx| {
+        s.ssh_start_finished(
+            "ssh://work-alias",
+            Ok(rex_linux::ssh::setup::Attachment::Automatic),
+            tx,
+        )
+    });
+    assert!(rt.state.panel.is_none());
+    let sent: Vec<_> = commands.try_iter().collect();
+    assert!(sent.iter().any(|c| matches!(c, HostCommand::Reconnect)));
+    assert!(
+        !sent
+            .iter()
+            .any(|c| matches!(c, HostCommand::CreateSession { .. }))
+    );
+}
+
+#[test]
+fn ssh_setup_offers_explicit_socket_without_reconnecting_or_starting_again() {
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = "ssh://box".into();
+    ws.hosts[0].model.ssh_server_missing = true;
+    ws.preview_ssh_start(0);
+    ws.ssh_setup.running = Some("ssh://box".into());
+    let commands = capture_host(&mut ws, 0);
+    ws.ssh_start_finished(
+        "ssh://box",
+        Ok(rex_linux::ssh::setup::Attachment::Review {
+            reason: "Automatic lookup cannot find this socket".into(),
+            endpoint: Some("ssh://box/custom/socket".into()),
+        }),
+        &mut rune::Tx::default(),
+    );
+    assert!(
+        !commands
+            .try_iter()
+            .any(|c| matches!(c, HostCommand::Reconnect))
+    );
+    assert_eq!(ws.settings.hosts[0].endpoint, "ssh://box");
+    ws.start_ssh("ssh://box".into());
+    assert!(ws.ssh_setup.ran.is_empty());
+    ws.save_ssh_socket("ssh://box", &mut rune::Tx::default());
+    assert_eq!(ws.settings.hosts[0].endpoint, "ssh://box/custom/socket");
+    assert!(ws.panel.is_none());
+}
+
+#[test]
+fn uncertain_ssh_setup_reconnects_once_without_retrying_setup() {
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = "ssh://box".into();
+    ws.ssh_setup.running = Some("ssh://box".into());
+    let commands = capture_host(&mut ws, 0);
+    for _ in 0..2 {
+        ws.ssh_start_finished(
+            "ssh://box",
+            Err(rex_linux::ssh::setup::Failure {
+                message: "Server may have started: timeout".into(),
+                may_have_started: true,
+            }),
+            &mut rune::Tx::default(),
+        );
+    }
+    assert_eq!(
+        commands
+            .try_iter()
+            .filter(|c| matches!(c, HostCommand::Reconnect))
+            .count(),
+        1
+    );
+    assert!(ws.ssh_setup.ran.is_empty());
+}
+
+#[test]
+fn ssh_setup_completion_does_not_reconnect_removed_or_connected_hosts() {
+    for connected in [false, true] {
+        let mut ws = workspace();
+        ws.settings.hosts[0].endpoint = "ssh://box".into();
+        ws.ssh_setup.running = Some("ssh://box".into());
+        let commands = capture_host(&mut ws, 0);
+        if connected {
+            ws.hosts[0].model.connected = true;
+        } else {
+            ws.settings.hosts[0].endpoint = "ssh://different".into();
+        }
+        ws.ssh_start_finished(
+            "ssh://box",
+            Ok(rex_linux::ssh::setup::Attachment::Automatic),
+            &mut rune::Tx::default(),
+        );
+        assert!(
+            !commands
+                .try_iter()
+                .any(|c| matches!(c, HostCommand::Reconnect))
+        );
+    }
+}
+
+#[test]
+fn ssh_setup_does_not_offer_for_auth_errors_custom_sockets_or_stale_hosts() {
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = "ssh://box".into();
+    assert!(
+        !ws.can_start_ssh(0),
+        "a generic disconnected host is not a missing server"
+    );
+    ws.hosts[0].model.ssh_server_missing = true;
+    assert!(ws.can_start_ssh(0));
+    ws.preview_ssh_start(0);
+    ws.settings.hosts[0].endpoint = "ssh://different".into();
+    ws.submit(&mut rune::Tx::default());
+    assert!(ws.ssh_setup.ran.is_empty());
+    assert!(ws.panel.as_ref().unwrap().error.is_some());
+    ws.settings.hosts[0].endpoint = "ssh://box/custom.sock".into();
+    assert!(!ws.can_start_ssh(0));
+    ws.settings.hosts[0].endpoint = "ssh://box".into();
+    ws.hosts[0].model.connected = true;
+    assert!(!ws.can_start_ssh(0));
+}
+
+#[test]
+fn discovered_listeners_are_reviewed_before_connecting() {
+    let mut ws = workspace();
+    ws.apply_scan(0, Ok(tailnet()));
+    ws.apply_probe(
+        0,
+        "box.tail1234.ts.net",
+        rex_linux::tailnet::Probe::Rex {
+            endpoint: "https://box.tail1234.ts.net".into(),
+            reason: None,
+            listeners: vec![rex_linux::tailnet::Listener {
+                endpoint: "0.0.0.0:7297".into(),
+                addresses: vec!["[::]:7297".into()],
+                transport: "tcp".into(),
+                admission: Some("anonymous".into()),
+                primary: Some(true),
+            }],
+        },
+    );
+    assert!(
+        ws.machine_form_note(2)
+            .contains("not reachability or permission checks")
+    );
+    let before = ws.settings.hosts.len();
+    ws.add_machine(2, &mut rune::Tx::default());
+    assert_eq!(ws.settings.hosts.len(), before);
+    let panel = ws.panel.as_ref().unwrap();
+    let PanelKind::Form(Form::Discovered(note)) = &panel.kind else {
+        panic!("listener review")
+    };
+    assert!(note.contains("Reachable from this device: https://box"));
+    assert!(note.contains("[::]:7297"));
+    assert!(note.contains("anonymous"));
+    assert!(note.contains("not reachability or permission checks"));
+    ws.submit(&mut rune::Tx::default());
+    assert_eq!(
+        ws.settings.hosts.last().unwrap().endpoint,
+        "https://box.tail1234.ts.net"
+    );
 }
 
 #[test]
@@ -4382,7 +4736,7 @@ fn add_host_lists_the_tailnet_by_kind_and_hides_iphones_and_this_machine() {
             (
                 "Rex servers".into(),
                 "studio-rex".into(),
-                "Rex over Tailscale · macOS".into()
+                "https://studio-rex.tail1234.ts.net · listener details unavailable · macOS".into()
             ),
             (
                 "Tailnet".into(),
@@ -4423,12 +4777,20 @@ fn add_host_lists_the_tailnet_by_kind_and_hides_iphones_and_this_machine() {
     rt.state.apply_probe(
         generation,
         "box.tail1234.ts.net",
-        rex_linux::tailnet::Probe::Rex("https://box.tail1234.ts.net:7297".into()),
+        rex_linux::tailnet::Probe::Rex {
+            endpoint: "https://box.tail1234.ts.net:7297".into(),
+            listeners: vec![],
+            reason: None,
+        },
     );
     let entries = rt.state.entries();
     assert_eq!(entries[1].label, "box");
     assert_eq!(entries[1].group, "Rex servers");
-    assert!(entries[1].detail.starts_with("Rex on port 7297"));
+    assert!(
+        entries[1]
+            .detail
+            .starts_with("https://box.tail1234.ts.net:7297")
+    );
     assert!(matches!(entries[1].action, Intent::AddMachine(2)));
 
     rt.state.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("bo");
@@ -4485,7 +4847,7 @@ fn a_rex_server_on_the_tailnet_is_added_with_one_press() {
     assert!(
         entries[0]
             .detail
-            .starts_with("Added as studio-rex · Rex over Tailscale")
+            .starts_with("Added as studio-rex · https://studio-rex.tail1234.ts.net")
     );
     assert!(matches!(entries[0].action, Intent::MachineForm(1)));
     press(&mut rt, Key::Enter);
@@ -4857,10 +5219,20 @@ fn ctrl_shift_f_searches_the_focused_terminal_without_typing_into_it() {
     assert_eq!(sent(), ["key"]);
 
     // The shortcut runs a named action, which bindings can run by its name.
-    assert_eq!(super::input::SEARCH, "client.search");
-    rt.update(|s, _| {
-        assert!(!super::input::run_action(s, "client.nothing"));
-        assert!(super::input::run_action(s, super::input::SEARCH));
+    assert_eq!(super::actions::SEARCH, "client.search");
+    rt.update(|s, tx| {
+        assert!(!super::actions::run(
+            s,
+            "client.nothing",
+            &serde_json::Value::Null,
+            tx
+        ));
+        assert!(super::actions::run(
+            s,
+            super::actions::SEARCH,
+            &serde_json::Value::Null,
+            tx
+        ));
     });
     rt.frame(1. / 60.);
     assert!(

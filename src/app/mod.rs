@@ -1,19 +1,24 @@
 //! The Rune front end.
+mod actions;
 mod activity;
 mod activity_list;
+mod bindings;
 mod dialogs;
 mod discover;
 mod fonts;
 mod input;
 mod integrations;
 mod keys;
+mod navigation;
 mod notify;
 mod panel;
 mod panes;
 mod popups;
+mod remote;
 mod settings_view;
 mod sidebar;
 mod sprites;
+mod ssh_setup;
 mod stats;
 mod term;
 mod theme;
@@ -89,6 +94,18 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     root = root.child(open.unwrap_or_else(popups::overlay));
     let mut window = el()
         .key("window")
+        .pointer_buttons([rune::PointerButton::Back, rune::PointerButton::Forward])
+        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+            if s.panel.is_some() || s.drag.is_some() {
+                return;
+            }
+            let action = match tx.button() {
+                rune::PointerButton::Back => actions::HISTORY_BACK,
+                rune::PointerButton::Forward => actions::HISTORY_FORWARD,
+                _ => return,
+            };
+            actions::run(s, action, &serde_json::Value::Null, tx);
+        })
         // With no focused control, Rune sends releases only to the outermost node.
         .on_key_up(input::on_key_up)
         .w_full()
@@ -115,7 +132,9 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
 }
 
 fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
-    let mut changed = false;
+    let now = std::time::Instant::now();
+    let remote_changed = s.poll_remote_navigation(now);
+    let mut changed = s.poll_navigation(now, tx) || remote_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {
@@ -162,6 +181,8 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     changed
 }
 
+#[cfg(test)]
+mod physical_input_tests;
 #[cfg(test)]
 mod tests;
 

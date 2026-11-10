@@ -472,24 +472,10 @@ impl Workspace {
         let Some(index) = self.host_index(target.host) else {
             return;
         };
-        self.show_session(index, &target.session, tx);
         if let Some(window) = target.window {
-            self.send(
-                index,
-                rex_linux::connection::HostCommand::Request {
-                    method: "session.focus_window".into(),
-                    payload: serde_json::json!({"session_id": target.session, "window_id": window}),
-                },
-            );
-        }
-    }
-
-    /// Bring `session` on host `index` to the front: select it, or just raise its host.
-    fn show_session(&mut self, index: usize, session: &str, tx: &mut Tx) {
-        if self.hosts[index].model.selected.as_deref() != Some(session) {
-            self.select(index, session.to_owned(), tx);
-        } else if index != self.active {
-            self.activate_host(index, tx);
+            self.select_window(index, target.session, window, tx);
+        } else {
+            self.select(index, target.session, tx);
         }
     }
 
@@ -513,7 +499,7 @@ impl Workspace {
             self.inform("That pane has closed.");
             return;
         };
-        self.show_session(index, &target.session, tx);
+        self.select_window(index, target.session.clone(), target.window.clone(), tx);
         self.send(
             index,
             rex_linux::connection::HostCommand::Request {

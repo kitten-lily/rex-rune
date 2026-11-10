@@ -22,9 +22,8 @@ fn modal(s: &Workspace, viewport: [f32; 2], body: El) -> El {
 
 /// A centered dialog surface over a dark scrim; `surface` sets its own size and padding.
 pub fn modal_frame(s: &Workspace, surface: El) -> El {
-    // The dialog takes every press inside it itself: a press goes to the topmost element that
-    // handles input, so one on padding, a divider or a disabled switch would otherwise fall
-    // through to the scrim and close the dialog.
+    // Padding, dividers and disabled controls must not pass a press to the dismiss scrim.
+    // Children still handle their own input; empty space leaves the keyboard focus alone.
     let surface = surface
         .key("dialog")
         .role("dialog")
@@ -63,7 +62,7 @@ fn form(s: &Workspace, form: &Form) -> El {
                 .placeholder(placeholder.clone())
                 .on_edit(move |s: &mut Workspace| s.edit_input(i))
                 .build(k)
-                .on_key(super::input::zoom_key)
+                .on_key(super::input::global_key)
                 .key(format!("field:{i}")),
         );
     }
@@ -91,6 +90,16 @@ fn form(s: &Workspace, form: &Form) -> El {
                 .wrap(),
         );
     }
+    if let Form::Discovered(note) = form {
+        body = body.child(
+            col()
+                .max_h(240.)
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(text(note.clone()).font(ui(12.)).color(rgb(muted())).wrap()),
+        );
+    }
     if let Form::AddHost = form {
         body = body.child(
             text("https:// reaches a Rex server over the network (a bare host name is tried on port 443, then 7297); ssh://user@host[/socket] forwards a server's socket over SSH; unix:// is a socket on this machine.")
@@ -115,7 +124,7 @@ fn form(s: &Workspace, form: &Form) -> El {
                 .wrap(),
         );
     }
-    let primary = if matches!(form, Form::AddHost | Form::AddSsh(_)) {
+    let primary = if matches!(form, Form::AddHost | Form::Discovered(_) | Form::AddSsh(_)) {
         "Connect"
     } else {
         "Save"
@@ -196,6 +205,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
                 "Remove host",
             )
         }
+        PanelKind::StartSsh { endpoint } => super::ssh_setup::dialog(s, endpoint),
         PanelKind::AgentChange { change, steps } => {
             super::integrations::confirm(s, &panel.title, change, steps)
         }
