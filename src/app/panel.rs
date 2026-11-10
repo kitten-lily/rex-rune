@@ -29,10 +29,10 @@ pub enum Intent {
     NewWindow,
     Split(&'static str),
     RenameSession,
-    RenameWindow(String),
-    CloseWindow(String),
-    /// Switch the tab with this Rex window ID between tiled and scrolling.
-    TabLayout(String),
+    RenameWindow(WindowTarget),
+    CloseWindow(WindowTarget),
+    /// Switch this tab between tiled and scrolling.
+    TabLayout(WindowTarget),
     CycleColumnWidth,
     MaximizeColumn,
     CenterColumn,
@@ -140,6 +140,15 @@ pub struct SessionTarget {
     pub label: String,
 }
 
+/// The tab a tab menu, its rename form or its close confirm acts on: any host's and
+/// session's, so a sidebar tab outside the selected session works like a toolbar tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowTarget {
+    pub host: usize,
+    pub session: String,
+    pub window: String,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum SessionAction {
     Rename,
@@ -180,7 +189,7 @@ pub enum Form {
     TailscaleName(usize),
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
     RenameSession(Option<SessionTarget>),
-    RenameWindow(String),
+    RenameWindow(WindowTarget),
     RenamePane(String),
     AddHost,
     /// A reachable endpoint and the server's listener facts.
@@ -246,8 +255,8 @@ pub enum PanelKind {
     Session,
     /// A sidebar host header's right-click menu.
     Host(usize),
-    /// A tab's right-click menu, by window id.
-    Window(String),
+    /// A tab's right-click menu.
+    Window(WindowTarget),
     Form(Form),
     Settings,
     /// The terminal themes, filtered by the search field.
@@ -290,6 +299,8 @@ pub struct Panel {
     pub error: Option<String>,
     pub target: Option<PaneTarget>,
     pub session: Option<SessionTarget>,
+    /// The tab a tab confirm acts on, when it isn't the selected session's.
+    pub window: Option<WindowTarget>,
     pub back: Option<Box<Panel>>,
     pub anchor: Option<(f32, f32)>,
     /// A switcher row being renamed in place, and its field.
@@ -318,6 +329,7 @@ impl Panel {
             error: None,
             target: None,
             session: None,
+            window: None,
             back: None,
             anchor: None,
             rename: None,
@@ -591,12 +603,12 @@ impl Workspace {
     }
 
     /// The entry that switches tab `window` to the other layout.
-    fn layout_entry(&self, window: &str, group: &str) -> Entry {
-        let label = match self.tab_layout(window) {
+    fn layout_entry(&self, window: &WindowTarget, group: &str) -> Entry {
+        let label = match self.tab_layout_of(window) {
             TabLayout::Tiled => "Use scrolling layout",
             TabLayout::Scrolling => "Use tiled layout",
         };
-        Entry::new(label, "", group, Intent::TabLayout(window.to_owned()))
+        Entry::new(label, "", group, Intent::TabLayout(window.clone()))
     }
 
     pub fn entries(&self) -> Vec<Entry> {
@@ -648,28 +660,39 @@ impl Workspace {
         if let PanelKind::Host(host) = panel.kind {
             return self.host_entries(host);
         }
-        if let PanelKind::Window(id) = &panel.kind {
-            let connected = self.model().connected;
-            let active = self
-                .model()
-                .window()
-                .and_then(|window| window.window_id.as_deref())
-                == Some(id.as_str());
+        if let PanelKind::Window(target) = &panel.kind {
+            let connected = self.hosts[target.host].model.connected;
+            // A sidebar tab outside the selected session: New tab, the column actions and
+            // the shortcuts would act on the selected session instead, so they're left out.
+            let current = self.is_current_session(target.host, &target.session);
+            let active = current
+                && self
+                    .model()
+                    .window()
+                    .and_then(|window| window.window_id.as_deref())
+                    == Some(target.window.as_str());
             let mut entries = vec![
-                Entry::new("Rename tab…", "", "", Intent::RenameWindow(id.clone())),
-                self.layout_entry(id, ""),
+                Entry::new("Rename tab…", "", "", Intent::RenameWindow(target.clone())),
+                self.layout_entry(target, ""),
             ];
-            if active && self.tab_layout(id) == TabLayout::Scrolling {
+            if active && self.tab_layout_of(target) == TabLayout::Scrolling {
                 entries.extend(self.column_entries(""));
             }
-            entries.extend([
-                Entry::new("Close tab…", "", "", Intent::CloseWindow(id.clone())),
-                Entry::new("New tab", "", "", Intent::NewWindow),
-            ]);
+            entries.push(Entry::new(
+                "Close tab…",
+                "",
+                "",
+                Intent::CloseWindow(target.clone()),
+            ));
+            if current {
+                entries.push(Entry::new("New tab", "", "", Intent::NewWindow));
+            }
             for e in &mut entries {
                 e.enabled = connected;
             }
-            self.shortcut_details(&mut entries);
+            if current {
+                self.shortcut_details(&mut entries);
+            }
             return entries;
         }
         let sessions_only = matches!(panel.kind, PanelKind::Picker(true));
@@ -796,22 +819,26 @@ impl Workspace {
                     Intent::StartSsh(self.active),
                 ));
             }
-            if let Some(id) = model.window().and_then(|w| w.window_id.clone()) {
+            if let Some(target) = model
+                .window()
+                .and_then(|w| w.window_id.clone())
+                .and_then(|id| self.window_target(id))
+            {
                 entries.push(Entry::new(
                     "Rename tab…",
                     "",
                     "Workspace",
-                    Intent::RenameWindow(id.clone()),
+                    Intent::RenameWindow(target.clone()),
                 ));
-                entries.push(self.layout_entry(&id, "Workspace"));
-                if self.tab_layout(&id) == TabLayout::Scrolling {
+                entries.push(self.layout_entry(&target, "Workspace"));
+                if self.tab_layout_of(&target) == TabLayout::Scrolling {
                     entries.extend(self.column_entries("Workspace"));
                 }
                 entries.push(Entry::new(
                     "Close tab…",
                     "",
                     "Workspace",
-                    Intent::CloseWindow(id),
+                    Intent::CloseWindow(target),
                 ));
             }
         }

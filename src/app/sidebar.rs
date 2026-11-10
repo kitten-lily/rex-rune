@@ -6,7 +6,7 @@ use super::{
         shown_working, tab_activity, tab_name, working_dots,
     },
     activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
-    panel::Intent,
+    panel::{Form, Intent, PanelKind, WindowTarget},
     panes::divider_handle,
     theme::*,
     widgets::{chrome_button, glyph},
@@ -313,6 +313,17 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
             .is_some_and(|v| v.active_window_id.as_deref() == Some(id));
     let activity = tab_activity(model, tab);
     let label = tab_name(model, tab);
+    let target = WindowTarget {
+        host: index,
+        session: session.to_owned(),
+        window: id.to_owned(),
+    };
+    // The tab a tab menu, its rename form or its close confirm acts on.
+    let targeted = s.panel.as_ref().is_some_and(|p| match &p.kind {
+        PanelKind::Window(t) | PanelKind::Form(Form::RenameWindow(t)) => *t == target,
+        PanelKind::Confirm { .. } => p.window.as_ref() == Some(&target),
+        _ => false,
+    });
     let (target_session, target_window) = (session.to_owned(), id.to_owned());
     let mut row = row()
         .key(format!("sidebar-tab:{index}:{session}:{id}"))
@@ -327,12 +338,7 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
         .radius(10.)
         .continuous_corners()
         .cursor(Cursor::Pointer)
-        .preserve_focus_on_press(true)
         .help_when_truncated(label.clone())
-        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-            s.select_window(index, target_session.clone(), target_window.clone(), tx);
-            tx.blur();
-        })
         .child(glyph(
             program_icon(activity.program.as_deref()),
             15.,
@@ -346,6 +352,9 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
                 .grow(1.)
                 .min_w(0.),
         );
+    row = super::toolbar::tab_actions(row, target, move |s, tx| {
+        s.select_window(index, target_session.clone(), target_window.clone(), tx);
+    });
     row = pill(row, active);
     let config = &s.settings.notifications;
     if let Some((word, tone)) = shown_word(
@@ -360,6 +369,16 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
     }
     if let Some(progress) = shown_progress(config, &activity) {
         row = row.child(progress_bar(format!("tab-progress:{id}"), progress, 10.));
+    }
+    if targeted {
+        // An overlay like a targeted session row's, so the outline never shifts the row.
+        row = row.child(
+            el().key(format!("sidebar-tab-target:{index}:{session}:{id}"))
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                .radius(10.)
+                .continuous_corners()
+                .border(1.5, rgb(accent())),
+        );
     }
     row
 }

@@ -458,12 +458,17 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             }
         }
         Handler::CloseTab | Handler::RenameTab => {
-            if let Some(id) = s.model().window().and_then(|w| w.window_id.clone()) {
+            if let Some(target) = s
+                .model()
+                .window()
+                .and_then(|w| w.window_id.clone())
+                .and_then(|id| s.window_target(id))
+            {
                 s.perform(
                     if matches!(spec.handler, Handler::CloseTab) {
-                        Intent::CloseWindow(id)
+                        Intent::CloseWindow(target)
                     } else {
-                        Intent::RenameWindow(id)
+                        Intent::RenameWindow(target)
                     },
                     tx,
                 );

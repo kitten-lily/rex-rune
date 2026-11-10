@@ -5,12 +5,37 @@ use super::{
         program_icon, progress_bar, shown_progress, shown_word, shown_working, tab_activity,
         tab_name, working_dots,
     },
-    panel::Intent,
+    panel::{Intent, WindowTarget},
     theme::*,
     widgets::{chrome_button, glyph},
     workspace::Workspace,
 };
 use rune::{Cursor, El, PointerButton, ScrollPos, Tx, col, el, row, text};
+
+/// A tab's pointer actions, the same on the toolbar and in the sidebar: a press selects it,
+/// a middle-click closes it behind the same confirmation as Close tab, a double-click
+/// renames it and a right-click opens its menu.
+pub(super) fn tab_actions(
+    e: El,
+    target: WindowTarget,
+    select: impl Fn(&mut Workspace, &mut Tx) + 'static,
+) -> El {
+    let (close, rename) = (target.clone(), target.clone());
+    e.preserve_focus_on_press(true)
+        .pointer_buttons([PointerButton::Middle])
+        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+            if tx.button() == PointerButton::Middle {
+                s.perform(Intent::CloseWindow(close.clone()), tx);
+            } else {
+                select(s, tx);
+                tx.blur();
+            }
+        })
+        .on_double_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+            s.perform(Intent::RenameWindow(rename.clone()), tx);
+        })
+        .on_secondary_press(move |s: &mut Workspace, p, _| s.tab_menu(target.clone(), (p.x, p.y)))
+}
 
 /// A chip's press: consume it (chips never drag the window) and keep the terminal focused.
 fn chip_press(e: El) -> El {
@@ -99,7 +124,12 @@ fn tab_track(s: &Workspace) -> El {
                 s.bell_on(s.active, &id),
             );
             let working = word.is_none() && shown_working(&s.settings.notifications, &activity);
-            let (press_id, rename_id, menu_id) = (id.clone(), id.clone(), id.clone());
+            let target = WindowTarget {
+                host: s.active,
+                session: session.clone(),
+                window: id.clone(),
+            };
+            let press_id = id.clone();
             let mut tab_el = row()
                 .key(format!("tab:{id}"))
                 .role("tab")
@@ -114,24 +144,10 @@ fn tab_track(s: &Workspace) -> El {
                 .px(14.)
                 .gap(8.)
                 .center_y()
-                .cursor(Cursor::Pointer)
-                .preserve_focus_on_press(true)
-                .pointer_buttons([PointerButton::Middle])
-                .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                    // Middle-click closes, behind the same confirmation as Close tab.
-                    if tx.button() == PointerButton::Middle {
-                        s.perform(Intent::CloseWindow(press_id.clone()), tx);
-                    } else {
-                        s.perform(Intent::Tab(press_id.clone()), tx);
-                        tx.blur();
-                    }
-                })
-                .on_double_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                    s.perform(Intent::RenameWindow(rename_id.clone()), tx);
-                })
-                .on_secondary_press(move |s: &mut Workspace, p, _| {
-                    s.tab_menu(menu_id.clone(), (p.x, p.y))
-                });
+                .cursor(Cursor::Pointer);
+            tab_el = tab_actions(tab_el, target, move |s, tx| {
+                s.perform(Intent::Tab(press_id.clone()), tx);
+            });
             if active {
                 tab_el = tab_el.child(
                     el().pin(Some(0.), Some(0.), Some(0.), Some(0.))

@@ -629,7 +629,8 @@ fn split_pane_headers_show_their_own_status_word() {
 fn a_scrolling_tab_uses_local_half_width_columns_and_pans_its_strip() {
     let (mut ws, _rx) = tabbed_workspace("strip");
     let mut tx = rune::Tx::default();
-    ws.perform(Intent::TabLayout("strip".into()), &mut tx);
+    let strip = ws.window_target("strip".into()).unwrap();
+    ws.perform(Intent::TabLayout(strip), &mut tx);
     assert_eq!(ws.tab_layout("strip"), TabLayout::Scrolling);
     let saved = relaunch(&ws);
     assert_eq!(
@@ -674,7 +675,7 @@ fn a_scrolling_tab_uses_local_half_width_columns_and_pans_its_strip() {
 #[test]
 fn a_precise_scroll_snaps_to_the_nearest_column_edge_when_it_ends() {
     let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     let path = ws.settings_path.clone();
     let mut rt = runtime(ws);
     for _ in 0..90 {
@@ -715,7 +716,7 @@ fn a_precise_scroll_snaps_to_the_nearest_column_edge_when_it_ends() {
 #[test]
 fn a_vertical_precise_gesture_never_snaps_a_scrolling_strip() {
     let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     let path = ws.settings_path.clone();
     let mut rt = runtime(ws);
     for _ in 0..90 {
@@ -776,7 +777,7 @@ fn focus_centering_policies_match_niri_overflow_rules() {
             columns.insert("column:eg".into(), 2. / 3.);
             columns.insert("block:f".into(), 2. / 3.);
         }
-        ws.toggle_tab_layout("strip".into());
+        ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
         ws.scroll_strip(-9.);
         ws.hosts[0]
             .model
@@ -853,7 +854,7 @@ fn server_topology_changes_prune_only_stale_column_state() {
 #[test]
 fn moving_single_pane_columns_uses_swap_and_keeps_block_widths() {
     let (mut ws, rx) = tabbed_workspace("split");
-    ws.toggle_tab_layout("split".into());
+    ws.toggle_tab_layout(ws.window_target("split".into()).unwrap());
     let columns = ws
         .settings
         .column_widths
@@ -896,7 +897,7 @@ fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
     let endpoint = "unix:///nonexistent/rex-test.sock";
 
     let (mut ws, rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     let widths = ws
         .settings
         .column_widths
@@ -954,7 +955,7 @@ fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
         .find(|window| window.window_id.as_deref() == Some("strip"))
         .unwrap()
         .focused_block_id = Some("block:e".into());
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     ws.settings
         .column_widths
         .entry(endpoint.into())
@@ -1004,7 +1005,7 @@ fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
 #[test]
 fn a_failed_column_move_discards_its_width_migration() {
     let (mut ws, rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     ws.consume_pane(-1);
     let reply = rx
         .try_iter()
@@ -1049,7 +1050,7 @@ fn a_failed_column_move_discards_its_width_migration() {
 fn a_lone_scrolling_column_keeps_its_saved_width_and_has_no_size_controls() {
     let endpoint = "unix:///nonexistent/rex-test.sock";
     let (mut ws, _rx) = tabbed_workspace("single");
-    ws.toggle_tab_layout("single".into());
+    ws.toggle_tab_layout(ws.window_target("single".into()).unwrap());
     ws.settings
         .column_widths
         .entry(endpoint.into())
@@ -1092,7 +1093,7 @@ fn a_lone_scrolling_column_keeps_its_saved_width_and_has_no_size_controls() {
 #[test]
 fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
     let (mut ws, rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     ws.cycle_column_width();
     let widths = &ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"];
     assert!((widths["block:f"] - 2. / 3.).abs() < 1e-9);
@@ -1165,7 +1166,7 @@ fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
 #[test]
 fn scrolling_column_shortcuts_and_controls_act_on_the_focused_column() {
     let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     let path = ws.settings_path.clone();
     let mut rt = runtime(ws);
     ctrl_shift(&mut rt, 's');
@@ -1246,7 +1247,7 @@ fn scrolling_column_shortcuts_and_controls_act_on_the_focused_column() {
 #[test]
 fn changing_the_default_layout_keeps_only_real_tab_overrides() {
     let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout("strip".into());
+    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
     assert_eq!(
         ws.settings.tab_layouts["unix:///nonexistent/rex-test.sock"]["s"].get("strip"),
         Some(&TabLayout::Scrolling)
@@ -1266,7 +1267,7 @@ fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     let mut rt = runtime(ws);
     secondary_click(&mut rt, "tab:split");
     let panel = rt.state.panel.as_ref().expect("a tab menu");
-    assert!(matches!(&panel.kind, PanelKind::Window(id) if id == "split"));
+    assert!(matches!(&panel.kind, PanelKind::Window(t) if t.window == "split" && t.session == "s"));
     assert_eq!(panel.title, "dev");
     let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
     assert_eq!(
@@ -1282,18 +1283,7 @@ fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     press(&mut rt, Key::Escape);
     assert!(rt.state.panel.is_none());
 
-    let r = rt
-        .elements()
-        .into_iter()
-        .find(|e| e.key.as_deref() == Some("tab:split"))
-        .unwrap()
-        .rect;
-    let (x, y) = (r[0] + r[2] / 2., r[1] + r[3] / 2.);
-    rt.button_down(x, y, rune::PointerButton::Middle);
-    rt.button_up(x, y, rune::PointerButton::Middle);
-    for _ in 0..4 {
-        rt.frame(1. / 60.);
-    }
+    middle_click(&mut rt, "tab:split");
     let panel = rt.state.panel.as_ref().expect("a close confirmation");
     assert!(
         matches!(&panel.kind, PanelKind::Confirm { method, payload, .. }
@@ -1304,6 +1294,21 @@ fn a_tabs_menu_and_middle_click_act_on_that_tab() {
         "a middle-click doesn't switch tabs"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+fn middle_click(rt: &mut Runtime<Workspace>, key: &str) {
+    let r = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some(key))
+        .unwrap()
+        .rect;
+    let (x, y) = (r[0] + r[2] / 2., r[1] + r[3] / 2.);
+    rt.button_down(x, y, rune::PointerButton::Middle);
+    rt.button_up(x, y, rune::PointerButton::Middle);
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
 }
 
 #[test]
@@ -4132,6 +4137,70 @@ fn a_sidebar_tab_selects_its_session_and_focuses_its_window() {
     assert_eq!(sent(&rx), ["navigate other other-second"]);
     click(&mut rt, "sidebar-tab:0:s:split");
     assert_eq!(sent(&rx), ["navigate s split"]);
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_sidebar_tabs_menu_rename_and_middle_click_act_on_its_own_session() {
+    let (ws, rx) = sidebar_tabs_workspace();
+    let mut rt = runtime(ws);
+    for _ in 0..60 {
+        rt.frame(1. / 60.);
+    }
+    let tab = "sidebar-tab:0:other:other-second";
+    // Every navigation and request, so a stray switch shows up too.
+    let sent = |rx: &flume::Receiver<HostCommand>| -> Vec<String> {
+        rx.try_iter()
+            .filter_map(|c| match c {
+                HostCommand::Navigate { session, .. } => Some(format!("navigate {session}")),
+                HostCommand::Request { method, payload } => Some(format!(
+                    "{method} {} {} {}",
+                    payload["session_id"].as_str()?,
+                    payload["window_id"].as_str()?,
+                    payload["label"].as_str().unwrap_or("-")
+                )),
+                _ => None,
+            })
+            .collect()
+    };
+    sent(&rx);
+
+    // Outside the selected session the menu leaves out what would act on that session.
+    secondary_click(&mut rt, tab);
+    let panel = rt.state.panel.as_ref().expect("a tab menu");
+    assert!(matches!(&panel.kind, PanelKind::Window(t)
+        if t.host == 0 && t.session == "other" && t.window == "other-second"));
+    let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
+    assert_eq!(
+        labels,
+        ["Rename tab…", "Use scrolling layout", "Close tab…"]
+    );
+    assert!(has(&rt, "sidebar-tab-target:0:other:other-second"));
+
+    // Rename tab… names its own session, not the selected one.
+    press(&mut rt, Key::Enter);
+    let panel = rt.state.panel.as_mut().expect("a rename form");
+    assert!(matches!(&panel.kind, PanelKind::Form(Form::RenameWindow(t)) if t.session == "other"));
+    panel.inputs[0] = rune::TextEdit::new("renamed");
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        sent(&rx),
+        ["session.set_window_label other other-second renamed"]
+    );
+
+    // A middle-click asks first, then closes it in its own session.
+    middle_click(&mut rt, tab);
+    let panel = rt.state.panel.as_ref().expect("a close confirmation");
+    assert!(
+        matches!(&panel.kind, PanelKind::Confirm { method, .. } if method == "session.close_window")
+    );
+    assert!(has(&rt, "sidebar-tab-target:0:other:other-second"));
+    rt.state.submit(&mut rune::Tx::default());
+    assert_eq!(
+        sent(&rx),
+        ["session.close_window other other-second -"],
+        "neither switches sessions or tabs"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
