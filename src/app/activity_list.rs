@@ -121,7 +121,7 @@ struct Draft {
 }
 
 /// Rows for every connected host's panes, grouped by urgency or by session. `hosts` is in
-/// host order; `unseen` is the workspace's unseen Done tabs.
+/// host order; `unseen` is the workspace's unseen Done panes, by host and block.
 pub fn activity_groups(
     hosts: &[(HostId, &str, &HostModel)],
     unseen: &HashSet<(HostId, String)>,
@@ -142,7 +142,6 @@ pub fn activity_groups(
                     continue;
                 };
                 let tab = activity::tab_name(model, window);
-                let done_unseen = unseen.contains(&(id, window_id.to_owned()));
                 for block in window.layers.iter().flat_map(|l| &l.blocks) {
                     let Some(block_id) = block.block_id.as_deref() else {
                         continue;
@@ -152,6 +151,7 @@ pub fn activity_groups(
                     }
                     let records = model.activity.get(block_id).filter(|r| !r.is_empty());
                     let a = activity::pane_activity(model, block_id);
+                    let done_unseen = unseen.contains(&(id, block_id.to_owned()));
                     let Some(rank) = activity_rank(&a, records.is_some(), done_unseen) else {
                         continue;
                     };
@@ -464,7 +464,7 @@ mod tests {
         report(&mut m, "busy", ProgramState::Working);
         let unseen = groups(
             &[("h", &m)],
-            &[(0, "t1")],
+            &[(0, "done")],
             ActivityGrouping::Priority,
             false,
         );

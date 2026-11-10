@@ -1,6 +1,6 @@
 //! Program activity per tab: one state folded from every record of every block in a Rex
-//! window, the program its pill shows, the word trouble carries, and which changes become
-//! desktop notifications.
+//! window, the program its pill shows and the word trouble carries; and per pane, which
+//! changes become desktop notifications and which panes finished out of sight.
 use super::{
     activity_list::PaneRef,
     notify::{Note, NoteTarget, Notifier},
@@ -285,57 +285,75 @@ impl Workspace {
                 .is_some_and(|v| v.active_window_id.as_deref() == Some(window))
     }
 
-    /// Compare each tab of host `index` with its last state: latch unseen Done, clear what
-    /// the user now sees, and notify about live changes in tabs they can't see.
+    /// Compare each pane of host `index` with its last state: latch unseen Done, clear what
+    /// the user now sees, and notify about live changes in panes they can't see.
     pub fn track_activity(&mut self, index: usize) {
         let id = self.hosts[index].id;
         let epoch = self.hosts[index].model.activity_epoch;
         if self.activity_epochs.insert(id, epoch) != Some(epoch) {
-            self.tab_states.retain(|(host, _), _| *host != id);
+            self.pane_states.retain(|(host, _), _| *host != id);
         }
-        let mut now = HashMap::new();
+        // Each pane present now: its track, whether its tab is in front, and its tab.
+        let mut now: HashMap<(HostId, String), (PaneTrack, bool, String)> = HashMap::new();
         let mut notes = Vec::new();
+        let mut latched = Vec::new();
+        // Every tab present now, and whether it is in front.
+        let mut tabs = HashMap::new();
         let model = &self.hosts[index].model;
         for (session, view) in &model.views {
             for window in &view.windows {
                 let Some(window_id) = window.window_id.clone() else {
                     continue;
                 };
-                let activity = tab_activity(model, window);
-                let key = (id, window_id.clone());
                 let seen = self.tab_seen(index, session, &window_id);
-                let before = self.tab_states.get(&key).copied();
-                let state = activity.state;
-                let done = before.is_some_and(|b| finished(b, state));
-                // Queries only restore what was already true; only live reports are news.
-                let news = before != Some(state)
-                    && (done || (activity.live && state != ProgramState::Idle));
-                let shown = if done { ProgramState::Done } else { state };
-                let latch = news && !seen && shown == ProgramState::Done;
-                now.insert(key.clone(), (state, seen, latch));
-                if news && !seen {
-                    notes.push((shown, session.clone(), window_id, activity));
+                tabs.insert(window_id.clone(), seen);
+                for block in blocks(window) {
+                    let key = (id, block.to_owned());
+                    let activity = pane_activity(model, block);
+                    let state = activity.state;
+                    let before = self.pane_states.get(&key).map(|t| t.state);
+                    let done = before.is_some_and(|b| finished(b, state));
+                    let shown = if done { ProgramState::Done } else { state };
+                    // Queries only restore what was already true; only live reports are news.
+                    let news = before != Some(state)
+                        && (done || (activity.live && state != ProgramState::Idle));
+                    if news && !seen && shown == ProgramState::Done {
+                        latched.push(key.clone());
+                    }
+                    if news && !seen {
+                        notes.push((
+                            shown,
+                            session.clone(),
+                            window_id.clone(),
+                            block.to_owned(),
+                            activity,
+                        ));
+                    }
+                    now.insert(key, (PaneTrack { state }, seen, window_id.clone()));
                 }
             }
         }
-        for (key, (state, seen, latch)) in &now {
-            if *latch {
-                self.unseen_done.insert(key.clone());
-            }
-            if *seen || matches!(state, ProgramState::Working | ProgramState::Blocked) {
-                self.unseen_done.remove(key);
+        self.unseen_panes.extend(latched);
+        self.unseen_panes.retain(|key| {
+            key.0 != id
+                || now.get(key).is_some_and(|(track, seen, _)| {
+                    !seen && !matches!(track.state, ProgramState::Working | ProgramState::Blocked)
+                })
+        });
+        self.unseen_done.retain(|key| key.0 != id);
+        for (key, (.., window)) in &now {
+            if self.unseen_panes.contains(key) {
+                self.unseen_done.insert((id, window.clone()));
             }
         }
-        self.unseen_done
-            .retain(|key| key.0 != id || now.contains_key(key));
         // A bell shows until its tab is in front, and goes with its tab.
         self.unseen_bells
-            .retain(|key| key.0 != id || now.get(key).is_some_and(|(_, seen, _)| !seen));
-        self.tab_states.retain(|(host, _), _| *host != id);
-        self.tab_states
-            .extend(now.into_iter().map(|(k, (state, ..))| (k, state)));
-        for (state, session, window, activity) in notes {
-            self.notify_state(index, state, session, window, &activity);
+            .retain(|key| key.0 != id || tabs.get(&key.1).is_some_and(|seen| !seen));
+        self.pane_states.retain(|(host, _), _| *host != id);
+        self.pane_states
+            .extend(now.into_iter().map(|(k, (track, ..))| (k, track)));
+        for (state, session, window, block, activity) in notes {
+            self.notify_state(index, state, session, window, block, &activity);
         }
     }
 
@@ -345,6 +363,7 @@ impl Workspace {
         state: ProgramState,
         session: String,
         window: String,
+        block: String,
         activity: &TabActivity,
     ) {
         let config = &self.settings.notifications;
@@ -381,6 +400,7 @@ impl Workspace {
                 host,
                 session,
                 window: Some(window),
+                block: Some(block),
             },
         });
     }
@@ -431,6 +451,7 @@ impl Workspace {
                     host,
                     session: notice.session,
                     window,
+                    block: Some(notice.block),
                 },
             });
         }
@@ -467,49 +488,100 @@ impl Workspace {
             .send(note);
     }
 
-    /// A notification was clicked: raise the window and show its session and tab.
+    /// A notification was clicked: raise the window and focus the pane it came from, found
+    /// again by its host, session and block IDs. A pane that has closed is never swapped for
+    /// whatever now sits where it was: its tab is shown if it still exists, with a notice.
     pub fn open_note(&mut self, target: NoteTarget, token: Option<String>, tx: &mut Tx) {
         self.handle.activate(token.unwrap_or_default());
         let Some(index) = self.host_index(target.host) else {
-            return;
-        };
-        if let Some(window) = target.window {
-            self.select_window(index, target.session, window, tx);
-        } else {
-            self.select(index, target.session, tx);
-        }
-    }
-
-    /// An Activity row was pressed: show its session and focus the exact pane. The window is
-    /// found again from the block id, so a pane that has closed is never swapped for
-    /// whatever now sits at its old position.
-    pub fn open_pane(&mut self, target: &PaneRef, tx: &mut Tx) {
-        let live = self.host_index(target.host).filter(|&index| {
-            let model = &self.hosts[index].model;
-            model
-                .sessions
-                .iter()
-                .any(|s| s.session_id == target.session)
-                && model.views.get(&target.session).is_some_and(|view| {
-                    view.windows
-                        .iter()
-                        .any(|w| blocks(w).any(|b| b == target.block))
-                })
-        });
-        let Some(index) = live else {
             self.inform("That pane has closed.");
             return;
         };
-        self.select_window(index, target.session.clone(), target.window.clone(), tx);
+        if let Some(block) = &target.block {
+            if let Some(window) = self.pane_window(index, &target.session, block) {
+                self.focus_pane(index, target.session, window, block.clone(), tx);
+                return;
+            }
+            if let Some(window) = target
+                .window
+                .filter(|w| self.window_exists(index, &target.session, w))
+            {
+                self.select_window(index, target.session, window, tx);
+            }
+            self.inform("That pane has closed.");
+            return;
+        }
+        match target.window {
+            Some(window) => self.select_window(index, target.session, window, tx),
+            None => self.select(index, target.session, tx),
+        }
+    }
+
+    /// The tab that holds `block` in a session host `index` lists, if any.
+    fn pane_window(&self, index: usize, session: &str, block: &str) -> Option<String> {
+        let model = &self.hosts[index].model;
+        if !model.sessions.iter().any(|s| s.session_id == session) {
+            return None;
+        }
+        model
+            .views
+            .get(session)?
+            .windows
+            .iter()
+            .find(|w| blocks(w).any(|b| b == block))
+            .and_then(|w| w.window_id.clone())
+    }
+
+    fn window_exists(&self, index: usize, session: &str, window: &str) -> bool {
+        let model = &self.hosts[index].model;
+        model.sessions.iter().any(|s| s.session_id == session)
+            && model.views.get(session).is_some_and(|v| {
+                v.windows
+                    .iter()
+                    .any(|w| w.window_id.as_deref() == Some(window))
+            })
+    }
+
+    /// Show a session's tab and focus one of its panes.
+    fn focus_pane(
+        &mut self,
+        index: usize,
+        session: String,
+        window: String,
+        block: String,
+        tx: &mut Tx,
+    ) {
+        self.select_window(index, session.clone(), window, tx);
         self.send(
             index,
             rex_linux::connection::HostCommand::Request {
                 method: "session.focus_block".into(),
                 payload: serde_json::json!({
-                    "session_id": target.session,
-                    "block_id": target.block,
+                    "session_id": session,
+                    "block_id": block,
                 }),
             },
+        );
+    }
+
+    /// An Activity row was pressed: show its session and focus the exact pane. The tab is
+    /// found again from the block id, so a pane that has closed is never swapped for
+    /// whatever now sits at its old position.
+    pub fn open_pane(&mut self, target: &PaneRef, tx: &mut Tx) {
+        let live = self.host_index(target.host).and_then(|index| {
+            self.pane_window(index, &target.session, &target.block)
+                .map(|window| (index, window))
+        });
+        let Some((index, window)) = live else {
+            self.inform("That pane has closed.");
+            return;
+        };
+        self.focus_pane(
+            index,
+            target.session.clone(),
+            window,
+            target.block.clone(),
+            tx,
         );
     }
 
@@ -584,7 +656,14 @@ impl Workspace {
     }
 }
 
-pub type TabStates = HashMap<(HostId, String), ProgramState>;
+/// What a pane's activity was when last synced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneTrack {
+    pub state: ProgramState,
+}
+
+/// Each pane's activity when last synced, by host and block.
+pub type PaneStates = HashMap<(HostId, String), PaneTrack>;
 
 #[cfg(test)]
 mod tests {

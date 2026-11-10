@@ -545,7 +545,7 @@ fn activity_list(s: &Workspace) -> (El, f32) {
         .collect();
     let groups = activity_groups(
         &hosts,
-        &s.unseen_done,
+        &s.unseen_panes,
         s.settings.activity_grouping,
         s.settings.activity_show_idle,
     );

@@ -1,7 +1,7 @@
 //! Workspace state and behavior: hosts, sessions, tabs, panes, popups and preferences.
 //! Rendering lives in the sibling view modules; nothing here builds elements.
 use super::{
-    activity::TabStates,
+    activity::PaneStates,
     notify::{Note, Notifier},
     panel::*,
     term::{Term, TermColors},
@@ -168,9 +168,11 @@ pub struct Workspace {
     scratch: TextEdit,
     next_host: u64,
     pub settings_section: SettingsSection,
-    /// Each tab's folded activity state when last synced.
-    pub tab_states: TabStates,
-    /// Tabs whose programs finished while the user wasn't looking; they show "Done".
+    /// Each pane's activity state when last synced, by host and block.
+    pub pane_states: PaneStates,
+    /// Panes whose programs finished while the user wasn't looking, by host and block.
+    pub unseen_panes: HashSet<(HostId, String)>,
+    /// Tabs with a pane in `unseen_panes`; they show "Done".
     pub unseen_done: HashSet<(HostId, String)>,
     /// Tabs whose programs rang the bell while the user wasn't looking; they show "Bell".
     pub unseen_bells: HashSet<(HostId, String)>,
@@ -315,7 +317,8 @@ impl Workspace {
             scratch: TextEdit::new(""),
             next_host: 0,
             settings_section: SettingsSection::default(),
-            tab_states: HashMap::new(),
+            pane_states: HashMap::new(),
+            unseen_panes: HashSet::new(),
             unseen_done: HashSet::new(),
             unseen_bells: HashSet::new(),
             activity_epochs: HashMap::new(),
@@ -419,7 +422,8 @@ impl Workspace {
         let id = state.id;
         self.terminals.retain(|(host, _), _| *host != id);
         self.claimed.retain(|(host, _)| *host != id);
-        self.tab_states.retain(|(host, _), _| *host != id);
+        self.pane_states.retain(|(host, _), _| *host != id);
+        self.unseen_panes.retain(|(host, _)| *host != id);
         self.unseen_done.retain(|(host, _)| *host != id);
         self.unseen_bells.retain(|(host, _)| *host != id);
         self.activity_epochs.remove(&id);

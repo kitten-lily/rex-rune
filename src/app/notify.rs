@@ -1,6 +1,6 @@
 //! Desktop notifications through the freedesktop notification service, on a worker thread
 //! so D-Bus never blocks the UI. Clicking one raises the window (with the activation token
-//! the server sends just before the click, so Wayland lets it take focus) and shows its tab.
+//! the server sends just before the click, so Wayland lets it take focus) and focuses its pane.
 use super::workspace::{HostId, Workspace};
 use futures_util::StreamExt;
 use rune::AppHandle;
@@ -17,6 +17,8 @@ pub struct NoteTarget {
     pub host: HostId,
     pub session: String,
     pub window: Option<String>,
+    /// The pane the notification came from, focused when it is clicked.
+    pub block: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

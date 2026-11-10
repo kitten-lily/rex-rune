@@ -2690,6 +2690,83 @@ fn notification_settings_gate_what_is_sent() {
 }
 
 #[test]
+fn each_pane_notifies_with_its_own_block_and_keeps_its_tab_done() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Working, true))]);
+    // block:b finishing is news even though block:c keeps the tab's fold at Working.
+    set_activity(&mut ws, "block:b", &[]);
+    assert_eq!(ws.outbox.len(), 1);
+    assert_eq!(ws.outbox[0].target.block.as_deref(), Some("block:b"));
+    assert_eq!(ws.outbox[0].target.window.as_deref(), Some("split"));
+    assert!(ws.unseen("split"), "a tab is unseen Done while any pane is");
+    set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+    assert_eq!(ws.outbox.len(), 2);
+    assert_eq!(ws.outbox[1].target.block.as_deref(), Some("block:c"));
+    assert!(
+        ws.unseen("split"),
+        "block:c needing you doesn't see block:b"
+    );
+    set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
+    assert!(!ws.unseen("split"), "working again clears that pane's Done");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+fn sent_commands(rx: &flume::Receiver<HostCommand>) -> Vec<String> {
+    rx.try_iter()
+        .filter_map(|c| match c {
+            HostCommand::Navigate {
+                session, window, ..
+            } => Some(format!("navigate {session} {}", window.unwrap_or_default())),
+            HostCommand::Request { method, payload } => Some(format!("{method} {payload}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_clicked_notification_focuses_its_exact_pane() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    set_activity(&mut ws, "block:c", &[("", record(Error, true))]);
+    let target = ws.outbox[0].target.clone();
+    rx.try_iter().count();
+    ws.open_note(target, None, &mut rune::Tx::default());
+    assert_eq!(
+        sent_commands(&rx),
+        [
+            "navigate s split".to_owned(),
+            r#"session.focus_block {"block_id":"block:c","session_id":"s"}"#.to_owned()
+        ]
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_pane_that_moved_tabs_is_found_by_its_block() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    // The notification named the "dev" tab, but block:a lives in "server".
+    let target = super::notify::NoteTarget {
+        host: ws.hosts[0].id,
+        session: "s".into(),
+        window: Some("split".into()),
+        block: Some("block:a".into()),
+    };
+    ws.open_note(target, None, &mut rune::Tx::default());
+    assert_eq!(
+        sent_commands(&rx),
+        [
+            "navigate s single".to_owned(),
+            r#"session.focus_block {"block_id":"block:a","session_id":"s"}"#.to_owned()
+        ]
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn tab_pills_carry_the_activity_word_and_hide_it_when_turned_off() {
     use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
     let pill = |show: bool| {
