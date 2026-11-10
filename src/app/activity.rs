@@ -483,6 +483,14 @@ impl Workspace {
     /// found again from the block id, so a pane that has closed is never swapped for
     /// whatever now sits at its old position.
     pub fn open_pane(&mut self, target: &PaneRef, tx: &mut Tx) {
+        // A host that just disconnected would only refuse the focus request.
+        if let Some(index) = self.host_index(target.host)
+            && !self.hosts[index].model.connected
+        {
+            let label = self.settings.hosts[index].label.clone();
+            self.inform(format!("{label} is offline."));
+            return;
+        }
         let live = self.host_index(target.host).filter(|&index| {
             let model = &self.hosts[index].model;
             model

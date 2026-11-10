@@ -4076,6 +4076,31 @@ fn a_closed_pane_is_never_replaced_by_its_neighbour() {
 }
 
 #[test]
+fn a_row_on_a_host_that_just_went_offline_says_so_and_sends_nothing() {
+    let (mut ws, _rx0, rx1) = two_host_panes(&["block:z"]);
+    ws.hosts[1].model.connected = false;
+    let target = pane_ref(&ws, 1, "block:z");
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert_eq!(ws.active, 0, "an offline host isn't shown");
+    assert!(
+        rx1.try_iter().all(|c| !matches!(
+            c,
+            HostCommand::Request { .. } | HostCommand::Navigate { .. } | HostCommand::Select(_)
+        )),
+        "nothing is queued for a disconnected loop to refuse"
+    );
+    let label = &ws.settings.hosts[1].label;
+    assert!(
+        ws.notices
+            .iter()
+            .any(|n| n.text == format!("{label} is offline.")),
+        "{:?}",
+        ws.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn a_removed_host_is_not_targeted() {
     let (mut ws, rx0, rx1) = two_host_panes(&["block:z"]);
     let mut target = pane_ref(&ws, 1, "block:z");

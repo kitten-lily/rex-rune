@@ -166,13 +166,15 @@ pub fn activity_groups(
                         })
                         .flatten();
                     let location = match grouping {
-                        ActivityGrouping::Priority => {
-                            format!("{tab} · {} · {host_label}", info.label)
-                        }
+                        ActivityGrouping::Priority => join([
+                            Some(tab.as_str()),
+                            Some(info.label.as_str()),
+                            Some(host_label),
+                        ]),
                         ActivityGrouping::Session => tab.clone(),
                     };
                     let detail = join([program.as_deref(), a.msg.as_deref(), Some(&location)]);
-                    let tasks = records
+                    let mut tasks: Vec<_> = records
                         .into_iter()
                         .flatten()
                         .filter(|(task, _)| !task.is_empty())
@@ -186,6 +188,9 @@ pub fn activity_groups(
                             record: record.clone(),
                         })
                         .collect();
+                    // Parent first: in plain string order "build-x" would sit between
+                    // "build" and its child "build/test", since '-' sorts before '/'.
+                    tasks.sort_by(|a, b| a.id.split('/').cmp(b.id.split('/')));
                     drafts.push(Draft {
                         row: ActivityRow {
                             target: PaneRef {
@@ -229,14 +234,10 @@ pub fn activity_groups(
             ActivityGrouping::Priority => priority_title(d.row.rank).to_owned(),
             ActivityGrouping::Session => d.group.clone(),
         };
-        let at = groups
-            .iter()
-            .position(|(_, h, s, g)| g.title == title && (*h, *s) == (d.host, d.session))
-            .or_else(|| {
-                (grouping == ActivityGrouping::Priority)
-                    .then(|| groups.iter().position(|(.., g)| g.title == title))
-                    .flatten()
-            });
+        let at = groups.iter().position(|(_, h, s, g)| match grouping {
+            ActivityGrouping::Priority => g.title == title,
+            ActivityGrouping::Session => (*h, *s) == (d.host, d.session),
+        });
         match at {
             Some(i) => {
                 groups[i].0 = groups[i].0.min(d.row.rank);
@@ -557,6 +558,42 @@ mod tests {
             .map(|t| (t.id.as_str(), t.depth, t.title.as_str()))
             .collect();
         assert_eq!(tasks, [("build", 0, "Build"), ("build/test", 1, "test")]);
+    }
+
+    #[test]
+    fn subtasks_follow_their_parent_before_its_siblings() {
+        let mut m = host("dev", vec![tab("t", &["b"])]);
+        m.activity.insert(
+            "b".into(),
+            ["", "build", "build-x", "build/test", "build/test/unit"]
+                .into_iter()
+                .map(|id| (id.to_owned(), record(ProgramState::Working)))
+                .collect(),
+        );
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        let tasks: Vec<_> = g[0].rows[0]
+            .tasks
+            .iter()
+            .map(|t| (t.id.as_str(), t.depth))
+            .collect();
+        assert_eq!(
+            tasks,
+            [
+                ("build", 0),
+                ("build/test", 1),
+                ("build/test/unit", 2),
+                ("build-x", 0)
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unlabelled_session_leaves_no_empty_part_in_the_location() {
+        let mut m = host("dev", vec![tab("t", &["b"])]);
+        m.sessions[0].label = String::new();
+        report(&mut m, "b", ProgramState::Working);
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        assert_eq!(g[0].rows[0].detail, "t · h");
     }
 
     #[test]
