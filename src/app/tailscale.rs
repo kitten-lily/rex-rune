@@ -95,7 +95,7 @@ pub(super) fn rows(s: &Workspace, host: usize) -> El {
     ))
     .child(setting(
         "Keep on after restarts",
-        "Turn Tailscale back on under this name whenever Rex Linux connects to this server.",
+        "Turn Tailscale on under this name now and whenever Rex Linux connects to this server.",
         rune_kit::Switch::new(saved.keep_tailscale)
             .label(format!("Keep Tailscale on for {}", saved.label))
             .hide_label()
