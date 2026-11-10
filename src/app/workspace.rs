@@ -9,7 +9,10 @@ use super::{
     widgets::ScrollFx,
 };
 use rex_linux::{
-    connection::{Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options},
+    connection::{
+        Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options,
+        tailscale::valid_name,
+    },
     layout::{
         COLUMN_WIDTH_PRESETS, ColumnEdge, DEFAULT_COLUMN_WIDTH, Divider, MAX_COLUMN_WIDTH,
         MIN_COLUMN_WIDTH, Placement, Strip, shell_layout,
@@ -240,6 +243,8 @@ impl Workspace {
                 label: rex_linux::settings::endpoint_label(&options.endpoint),
                 endpoint: options.endpoint.clone(),
                 remote_control: false,
+                keep_tailscale: false,
+                tailscale_name: None,
                 collapsed: false,
                 shell: None,
             });
@@ -397,6 +402,7 @@ impl Workspace {
             index == self.active,
             self.declared_theme(),
             self.settings.client_label(),
+            host.kept_tailscale(),
         );
         let _ = connection
             .commands
@@ -487,6 +493,8 @@ impl Workspace {
         host.shell = shell;
         if host.endpoint != endpoint {
             host.remote_control = false;
+            host.keep_tailscale = false;
+            host.tailscale_name = None;
             let old = std::mem::replace(&mut host.endpoint, endpoint);
             self.settings.sessions.remove(&old);
             let state = self.spawn_host(index, false);
@@ -2655,6 +2663,7 @@ impl Workspace {
                     | PanelKind::RemoveHost(_)
                     | PanelKind::AgentChange { .. }
                     | PanelKind::StartSsh { .. }
+                    | PanelKind::Pairing { .. }
                     | PanelKind::Themes
                     | PanelKind::Chromes
                     | PanelKind::Discover
@@ -2813,6 +2822,11 @@ impl Workspace {
                         .chars()
                         .any(|c| c.is_whitespace() || c.is_control())
                         .then(|| "Enter one shell name or path, without arguments.".to_owned())
+                } else if let Form::TailscaleName(_) = form {
+                    (!valid_name(&values[0])).then(|| {
+                        "Use 1–63 letters, digits and hyphens, not starting or ending with a hyphen."
+                            .to_owned()
+                    })
                 } else if values.first().is_none_or(|s| s.is_empty()) {
                     Some("Enter a name".to_owned())
                 } else if let Form::AddSsh(index) = form {
@@ -2877,6 +2891,7 @@ impl Workspace {
                             (!values[0].is_empty()).then(|| values[0].clone());
                         self.save();
                     }
+                    Form::TailscaleName(host) => self.set_tailscale_name(host, values[0].clone()),
                     Form::RenameSession(None) => self.request("session.set_label", json!({"label":values[0]})),
                     Form::RenameSession(Some(session)) => {
                         self.session_request(&session, "session.set_label", json!({"label":values[0]}))
@@ -2899,6 +2914,8 @@ impl Workspace {
                             label: values[0].clone(),
                             endpoint: values[1].clone(),
                             remote_control: false,
+                            keep_tailscale: false,
+                            tailscale_name: None,
                             collapsed: false,
                             shell: None,
                         },
@@ -2912,6 +2929,8 @@ impl Workspace {
                                 label: values[0].clone(),
                                 endpoint,
                                 remote_control: false,
+                                keep_tailscale: false,
+                                tailscale_name: None,
                                 collapsed: false,
                                 shell: None,
                             },

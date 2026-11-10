@@ -27,6 +27,7 @@ fn host(endpoint: String) -> HostConnection {
         false,
         None,
         "remote-test".into(),
+        None,
     )
 }
 async fn queued(host: &HostConnection) -> perform::Pending {

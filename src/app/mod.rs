@@ -20,6 +20,7 @@ mod sidebar;
 mod sprites;
 mod ssh_setup;
 mod stats;
+mod tailscale;
 mod term;
 mod theme;
 mod toolbar;

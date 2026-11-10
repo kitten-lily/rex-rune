@@ -35,6 +35,7 @@ url = "2"
 # Desktop notifications over D-Bus, with Rune's own zbus build.
 zbus = { version = "6", default-features = false, features = ["tokio", "proxy"], optional = true }
 unicode-segmentation = "1"
+qrcode = { version = "0.14", default-features = false }
 
 [profile.dev]
 debug = 1

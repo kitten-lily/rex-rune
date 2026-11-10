@@ -176,6 +176,8 @@ pub enum Form {
     ClientLabel,
     /// A host's default shell for new terminals.
     HostShell(usize),
+    /// A local host's built-in Tailscale device name.
+    TailscaleName(usize),
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
     RenameSession(Option<SessionTarget>),
     RenameWindow(String),
@@ -259,6 +261,10 @@ pub enum PanelKind {
     },
     /// Captures the endpoint, not a mutable host index.
     StartSsh {
+        endpoint: String,
+    },
+    /// The pairing QR code; captures the endpoint like `StartSsh`.
+    Pairing {
         endpoint: String,
     },
     /// The preview of a `rex skill` change, waiting for Keep or Apply.
