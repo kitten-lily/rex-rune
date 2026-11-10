@@ -262,6 +262,10 @@ pub enum PanelKind {
     StartSsh {
         endpoint: String,
     },
+    /// The pairing QR code; captures the endpoint like `StartSsh`.
+    Pairing {
+        endpoint: String,
+    },
     /// The preview of a `rex skill` change, waiting for Keep or Apply.
     AgentChange {
         change: super::integrations::AgentChange,

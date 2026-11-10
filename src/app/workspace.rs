@@ -2613,6 +2613,7 @@ impl Workspace {
                     | PanelKind::RemoveHost(_)
                     | PanelKind::AgentChange { .. }
                     | PanelKind::StartSsh { .. }
+                    | PanelKind::Pairing { .. }
                     | PanelKind::Themes
                     | PanelKind::Chromes
                     | PanelKind::Discover

@@ -1,5 +1,8 @@
 use super::*;
-use crate::app::{panel::SettingsSection, tailscale::status_words};
+use crate::app::{
+    panel::SettingsSection,
+    tailscale::{qr_modules, status_words},
+};
 use rex_linux::connection::tailscale::{Call, Status};
 use serde_json::{Value, json};
 
@@ -256,5 +259,65 @@ fn an_invalid_saved_name_is_shown_and_blocks_calls_until_fixed() {
         rt.frame(1. / 60.);
     }
     assert!(!has(&rt, "tailscale-name-problem:0"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_qr_code_holds_only_the_url() {
+    let (w, dark) = qr_modules("https://rex-studio.tail1234.ts.net").unwrap();
+    assert!(w >= 21 && (w - 21) % 4 == 0);
+    assert_eq!(dark.len(), w * w);
+    // finder pattern corners are dark, the separator next to it is light
+    assert!(dark[0] && dark[6] && dark[6 * w] && !dark[7]);
+}
+
+#[test]
+fn pairing_is_offered_only_while_https_is_available_and_on_remote_hosts_too() {
+    let url = "https://rex-box.t.ts.net";
+    let https = |value: Value| {
+        status(json!({"state":"running","allow_tailnet_members":false,"https":value}))
+    };
+    let mut ws = workspace_hosts(2);
+    ws.settings.hosts[1].endpoint = "ssh://me@box".into();
+    ws.hosts[1].model.connected = true;
+    ws.hosts[1].model.tailscale = Some(https(json!({"state":"pending"})));
+    let mut rt = hosts_settings(ws);
+    assert!(!has(&rt, "tailscale-pair:1"));
+
+    let refresh = |rt: &mut Runtime<Workspace>| {
+        rt.invalidate();
+        for _ in 0..30 {
+            rt.frame(1. / 60.);
+        }
+    };
+    rt.state.hosts[1].model.tailscale = Some(https(json!({"state":"available","url":url})));
+    refresh(&mut rt);
+    assert!(has(&rt, "tailscale-pair:1"));
+    assert!(!has(&rt, "tailscale:1"), "no local controls over ssh://");
+
+    click(&mut rt, "tailscale-pair:1");
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
+    assert!(has(&rt, "pairing-qr") && has(&rt, "pairing-url"));
+
+    rt.state.hosts[1].model.tailscale = Some(https(json!({"state":"pending"})));
+    refresh(&mut rt);
+    assert!(has(&rt, "pairing-unavailable") && !has(&rt, "pairing-qr"));
+
+    rt.state.hosts[1].model.tailscale = Some(https(json!({"state":"available","url":url})));
+    refresh(&mut rt);
+    assert!(has(&rt, "pairing-qr"));
+    rt.state.hosts[1].model.connected = false;
+    refresh(&mut rt);
+    assert!(has(&rt, "pairing-unavailable") && !has(&rt, "pairing-qr"));
+    rt.state.cancel_panel(&mut rune::Tx::default());
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        !has(&rt, "tailscale-pair:1"),
+        "not offered while disconnected"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
