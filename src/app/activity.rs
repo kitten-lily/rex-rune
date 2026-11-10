@@ -15,7 +15,7 @@ use rex_linux::connection::{
 };
 use rex_linux::settings::NotificationsConfig;
 use rexrs::api::session;
-use rune::{El, Tx, el, row};
+use rune::{El, LoopSpec, Tx, el, row};
 use std::{borrow::Cow, collections::HashMap};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -227,6 +227,22 @@ pub fn shown_word(
     )
 }
 
+/// Whether a pill shows its working dots: its program is Working or reports progress that is
+/// running, with no trouble. A word from [`tab_word`] takes the dots' place.
+pub fn tab_working(activity: &TabActivity) -> bool {
+    use TerminalProgress::{Indeterminate, Set};
+    match activity.state {
+        ProgramState::Blocked | ProgramState::Error => false,
+        ProgramState::Working => true,
+        _ => matches!(activity.progress, Some(Set(_) | Indeterminate)),
+    }
+}
+
+/// [`tab_working`] under the user's channels: the dots follow Working's tab channel.
+pub fn shown_working(config: &NotificationsConfig, activity: &TabActivity) -> bool {
+    tab_working(&in_tabs(config, activity))
+}
+
 /// [`tab_progress`] under the user's channels.
 pub fn shown_progress(
     config: &NotificationsConfig,
@@ -295,6 +311,20 @@ pub fn progress_bar(key: String, (percent, tone): (Option<u8>, u32), inset: f32)
         }
         None => bar.fill(rgb(tone)).opacity(0.35),
     }
+}
+
+/// Three 4 pt `ACCENT` dots after a working tab's label, their opacity rising in turn. Under
+/// reduced motion they hold still at their dim pose.
+pub fn working_dots(key: String) -> El {
+    (0..3).fold(row().key(key).gap(3.).center_y(), |dots, i| {
+        dots.child(
+            el().w(4.)
+                .h(4.)
+                .radius(2.)
+                .fill(rgb(accent()))
+                .looping(LoopSpec::opacity(1.2, f64::from(i) * 0.2, 0.35, 1.)),
+        )
+    })
 }
 
 fn blocked_word(kind: Option<BlockedKind>) -> &'static str {

@@ -3,7 +3,7 @@
 use super::{
     activity::{
         TabActivity, activity_word, program_icon, progress_bar, shown_progress, shown_word,
-        tab_activity, tab_name,
+        shown_working, tab_activity, tab_name, working_dots,
     },
     activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
     panel::Intent,
@@ -309,6 +309,8 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
         s.bell_on(index, id),
     ) {
         row = row.child(text(word).font(medium(10.5)).color(rgb(tone)));
+    } else if shown_working(config, &activity) {
+        row = row.child(working_dots(format!("sidebar-tab-working:{index}:{id}")));
     }
     if let Some(progress) = shown_progress(config, &activity) {
         row = row.child(progress_bar(format!("tab-progress:{id}"), progress, 10.));

@@ -2539,6 +2539,42 @@ fn a_working_progress_report_draws_a_bar_on_its_tab_and_pane() {
 }
 
 #[test]
+fn a_working_tab_shows_dots_until_a_word_or_the_activity_switch_replaces_them() {
+    use rex_linux::connection::activity::{ProgramState::*, TerminalProgress::Set};
+    let settle = |rt: &mut Runtime<Workspace>| {
+        for _ in 0..90 {
+            rt.frame(1. / 60.);
+        }
+    };
+    let (mut ws, _rx) = tabbed_workspace("split");
+    set_activity(&mut ws, "block:c", &[("", record(Working, true))]);
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "tab-working:split"));
+    assert!(!has(&rt, "tab-word:split"));
+    // Trouble takes the dots' place.
+    rt.update(|s, _| set_activity(s, "block:c", &[("", record(Blocked, true))]));
+    settle(&mut rt);
+    assert!(has(&rt, "tab-word:split") && !has(&rt, "tab-working:split"));
+    // A running progress report alone also shows them, beside its bar.
+    rt.update(|s, _| {
+        set_activity(s, "block:c", &[]);
+        s.hosts[0]
+            .model
+            .progress
+            .insert("block:c".into(), Set(Some(30)));
+    });
+    settle(&mut rt);
+    assert!(has(&rt, "tab-working:split") && has(&rt, "tab-progress:split"));
+    rt.update(|s, _| s.settings.notifications.set_tabs(false));
+    settle(&mut rt);
+    assert!(
+        !has(&rt, "tab-working:split"),
+        "the activity switch hides them"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn a_titled_pane_shows_its_title_but_renames_from_its_label() {
     let (mut ws, _rx) = tabbed_workspace("split");
     let model = &mut ws.hosts[0].model;
