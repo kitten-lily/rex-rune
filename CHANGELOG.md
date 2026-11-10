@@ -13,6 +13,22 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 - Settings → Notifications is now a channels × states table (Tabs, Desktop, Count, Sound × Needs you, Fails, Finishes, Works, plus messages from programs). `notifications` in workspace.json has a new shape; older files migrate with their behaviour unchanged. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - OSC 7501 status records keep their `owner` and `updated_at`. A report without an app is named after the process in the foreground when it reported, for icons, Activity rows and notifications. When records tie on state and progress, the latest report by the server's clock speaks for the pane, tab or session; it is never compared with this computer's clock. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 
+## 0.5.2 - 2026-11-10
+
+### Added
+
+- Signed one-command user installer, published as immutable `install.sh` and `install.sh.minisig` release assets. Embedded CI and backup keys verify release checksums with minisign or OpenSSL 3+ before any downloaded code runs. Supports upgrades, checks, explicit version pins and uninstall; refuses automatic downgrades. Repository-key fallback is opt-in only (`--trust-repo-keys`).
+
+### Changed
+
+- Support Rex API revisions **10–13**, including the official Arch snapshot `0.0.1794323808-g757adf`. Refresh the vendored SDK for the additive `terminal.download_begin` method; existing attachment, upload gating and per-host remote-control consent remain unchanged. File-download UI is not enabled. See [API-13 compatibility notes](docs/server-api13.md).
+
+## 0.5.1 - 2026-11-10
+
+### Added
+
+- Settings → About with app version, build commit/date, connected server API revision, repository/release/license links and Copy version info for bug reports.
+
 ## 0.5.0 - 2026-11-10
 
 ### Added

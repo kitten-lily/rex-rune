@@ -12,6 +12,8 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 ## Features
 
+- **Settings → About** shows the app version, build commit and date, and the active server’s negotiated API revision when connected. Open the repository, this version’s release notes or MIT license, or **Copy version info** for a bug report (OS and architecture included; no host addresses or credentials). Source archives without Git show `unknown` for build metadata. Install channel and server software version are not inferred.
+
 - Multiple saved hosts, each with its sessions; session windows are tabs and splits follow the server's order and nesting. Tabs can draw those splits tiled to the window or as locally sized columns in a horizontal strip. Scrolling columns default to half a window, remember their widths on this client and keep splits inside them at the server's ratios; the server and other clients keep their own geometry.
 - Unix-socket, HTTPS/WSS and SSH endpoints. Add host lists the machines on your tailnet: a server that answers shows its reachable endpoint and, on API 12, a review of its listener addresses and access rules before connecting. Other machines take an SSH user name and are reached by forwarding their Rex socket over SSH (Tailscale SSH needs no keys).
 - A single toolbar with session identity, tabs, commands and the window's own controls. A tab with one pane draws it edge to edge; splits are rounded pane cards. Tabs close from their right-click menu, a middle-click or `Ctrl Shift W`, always behind a confirmation. Host-grouped session navigation opens on demand, with an optional sidebar (Ctrl Shift B) that opens at launch as it was left. Tabs can sit in the toolbar or, while the sidebar is open, under each session in the sidebar.
@@ -44,29 +46,64 @@ It is written in Rust on [Rune](https://github.com/anomalyco/rune) (wgpu/winit, 
 
 ## Install a binary release
 
+### One-command user install or upgrade (0.5.2+)
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/shuv1337/rex-rune/releases/latest/download/install.sh | sh
+# Explicit upgrade, check, pin (including deliberate downgrade), or uninstall:
+# ... | sh -s -- --upgrade
+# ... | sh -s -- --check
+# ... | sh -s -- --version 0.5.1
+# ... | sh -s -- --uninstall
+```
+
+The signed, immutable release asset detects x86_64/aarch64 Linux and requires
+**glibc 2.39+**, `curl`, `tar`, coreutils, `bash`, `desktop-file-utils`, and either
+**minisign or OpenSSL 3+**. It verifies the signed checksums with embedded CI and
+backup keys, verifies the tarball, then installs to `~/.local/bin` with a launcher
+and icons. `XDG_BIN_HOME`, `XDG_DATA_HOME` and `XDG_CACHE_HOME` are respected.
+No root, server changes or automatic downgrade. Uninstall keeps preferences.
+NixOS users should use [Nix](docs/nix.md); musl is unsupported.
+
+**Pipe-to-shell is trust on first use:** HTTPS and GitHub deliver the script you
+execute. Its detached `install.sh.minisig` can be verified with a separately
+trusted key before running a saved copy; retain that reviewed copy for upgrades.
+The script's body runs only after the complete function has downloaded. Package
+verification is mandatory; there is no unsigned mode. A saved script with old
+keys fails closed after rotation. **Only** explicit `--trust-repo-keys` expands
+trust to keys at the requested release's protected tag (never `master`), printing
+the key ID and fingerprint. Prefer fetching and reviewing the current script.
+
+`/usr/bin/rex-linux` or a mismatching install receipt blocks replacement;
+`--force` deliberately overrides those guards, **not signature checks or downgrade
+protection**. A receipt requires Python 3 to validate; pre-receipt installs such
+as 0.5.1 upgrade without it. Avoid mixing user installs and package managers.
+
+### Manual download
+
 Download a package and `SHA256SUMS` from [Releases](https://github.com/shuv1337/rex-rune/releases). Choose **x86_64 / amd64** for Intel/AMD or **aarch64 / arm64** for ARM64. For signed releases, [verify the signature](#verify-a-download) before installing.
 
 ```sh
 sha256sum --ignore-missing -c SHA256SUMS
 
 # Debian/Ubuntu: install the one .deb matching your architecture.
-sudo apt install ./rex-linux_0.5.0_amd64.deb
+sudo apt install ./rex-linux_0.5.2_amd64.deb
 
 # Or extract the matching tarball and install for your user (no root).
-tar -xzf rex-linux-0.5.0-x86_64-linux-gnu.tar.gz
-cd rex-linux-0.5.0-x86_64-linux-gnu
+tar -xzf rex-linux-0.5.2-x86_64-linux-gnu.tar.gz
+cd rex-linux-0.5.2-x86_64-linux-gnu
 bash install.sh
 ```
 
 The tarball installs into `~/.local/bin` with a desktop launcher and icons, independently of any source checkout. It needs `desktop-file-utils`; uninstall with `bash scripts/install-desktop.sh --uninstall`. Uninstall a `.deb` with `sudo apt remove rex-linux`. Neither removes preferences or changes Rex servers. Avoid mixing both installation methods: a user installation can shadow `/usr/bin/rex-linux`.
 
-Prebuilt packages are built on Ubuntu 24.04 and require **glibc 2.39+**. They are dynamically linked, not self-contained AppImages. Install your distribution's graphics drivers, fontconfig (including `fc-match`), xkbcommon, Wayland/X11, EGL/OpenGL/Vulkan libraries, CA certificates and `xdg-utils`. On Debian/Ubuntu the `.deb` declares these dependencies. Rust and Zig are **not** needed to run a binary. A running Rex server with API revision 10, 11 or 12 is required.
+Prebuilt packages are built on Ubuntu 24.04 and require **glibc 2.39+**. They are dynamically linked, not self-contained AppImages. Install your distribution's graphics drivers, fontconfig (including `fc-match`), xkbcommon, Wayland/X11, EGL/OpenGL/Vulkan libraries, CA certificates and `xdg-utils`. On Debian/Ubuntu the `.deb` declares these dependencies. Rust and Zig are **not** needed to run a binary. A running Rex server with API revision 10, 11, 12 or 13 is required.
 
 ### Verify a download
 
-The signed-release pipeline adds `SHA256SUMS.minisig`, `latest.json`, and
-`latest.json.minisig`. It requires [owner key setup](docs/releases.md#owner-setup-before-the-first-signed-release)
-before its first release; v0.4.2 and earlier remain unsigned. The CI public key is
+Releases from 0.5.0 include `SHA256SUMS.minisig`, `latest.json`, and
+`latest.json.minisig`; from 0.5.2, `install.sh` and `install.sh.minisig` too.
+Both release keys are configured; v0.4.2 and earlier remain unsigned. The CI public key is
 committed as [`packaging/keys/release.pub`](packaging/keys/release.pub):
 
 - Minisign key ID: `A1FD78C27652816E`.
@@ -110,7 +147,7 @@ Older releases do not gain signatures or attestations retroactively.
 - Rust 1.96 or newer (edition 2024; see `rust-version` in `Cargo.toml`).
 - [Zig](https://ziglang.org/) 0.17.x. The `ghostty-vt` crate builds Ghostty's VT library from a checksum-pinned source archive with Zig.
 - Linux with Wayland or X11, plus the usual graphics/input libraries: Vulkan, xkbcommon, fontconfig and the Wayland/X11 client libraries.
-- A running Rex server that supports API revision 10, 11 or 12. Verified with Linux server **0.1.0-preview.14 (`7e460d0`, API 12)**; see [compatibility results](docs/server-preview14.md). Rex is in alpha, so older revisions aren't supported; update Rex on a host that refuses the connection. Uploading files needs revision 11.
+- A running Rex server that supports API revision 10, 11, 12 or 13. Verified with Linux servers **0.0.1794323808-g757adf (API 13)** and **0.1.0-preview.14 (`7e460d0`, API 12)**; see [API-13 compatibility results](docs/server-api13.md) and [preview.14 results](docs/server-preview14.md). Rex is in alpha, so older revisions aren't supported; update Rex on a host that refuses the connection. Uploading files needs revision 11.
 
 ## Build
 
@@ -463,7 +500,7 @@ See [AGENTS.md](AGENTS.md) for the code layout and contributor conventions, and 
 Three dependencies are vendored with small, documented patches and wired in through `[patch]` in `Cargo.toml`:
 
 - [`vendor/rune/`](vendor/rune/README.md): the `rune`, `rune-motion`, `rune-staging` and `procwatch` crates from `anomalyco/rune` at `100b7d9` (MIT), with dead-key forwarding and window-chrome additions for a borderless Linux window (maximize/restore, minimize, edge resize, window menu, native window icon).
-- [`vendor/rexrs/`](vendor/rexrs/REX-LINUX.md): `a10y/rexrs` at `780be3f` (MIT OR Apache-2.0), plus revision-12 generated types, explicit API-revision range negotiation and preservation of an empty `attach_session_ids`.
+- [`vendor/rexrs/`](vendor/rexrs/REX-LINUX.md): `a10y/rexrs` at `780be3f` (MIT OR Apache-2.0), plus revision-13 generated types, explicit API-revision range negotiation and preservation of an empty `attach_session_ids`.
 - [`vendor/ghostty-vt/`](vendor/ghostty-vt/REX-LINUX.md): the crates.io `ghostty-vt` 0.8.0 source (Apache-2.0; Ghostty itself is MIT), plus a safe wrapper for Ghostty's render-state image iterator, image-aware snapshot decoding, a fixed temporary-file medium setting and grayscale PNG normalization.
 
 Each patch is meant to be dropped once the corresponding upstream release has equivalent APIs.
@@ -489,7 +526,7 @@ Other crates are used under their own licenses; see `Cargo.lock`.
 
 ## Acknowledgements
 
-- [Superlogical Rex](https://www.superlogical.com/rex), the server and protocol this client speaks. The implementation follows the server's `/llms.txt` API revision 12 contract; revisions 10 and 11 are also supported.
+- [Superlogical Rex](https://www.superlogical.com/rex), the server and protocol this client speaks. The implementation follows the server's `/llms.txt` API revision 13 contract; revisions 10–12 are also supported.
 - [anomalyco/rune](https://github.com/anomalyco/rune) and [a10y/rexrs](https://github.com/a10y/rexrs).
 - [Ghostty](https://github.com/ghostty-org/ghostty) for the terminal core.
 - [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux-client) and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx), whose protocol work served as references.

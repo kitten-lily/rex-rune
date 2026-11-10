@@ -1,6 +1,6 @@
 [package]
 name = "rex-linux"
-version = "0.5.0"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -63,7 +63,7 @@ rune = { path = "vendor/rune/crates/rune" }
 rune-motion = { path = "vendor/rune/crates/rune-motion" }
 rune-staging = { path = "vendor/rune/crates/rune-staging" }
 
-# Revision-11 generated types and explicit negotiation range (vendor/rexrs/REX-LINUX.md).
+# Revision-13 generated types and explicit negotiation range (vendor/rexrs/REX-LINUX.md).
 [patch."https://github.com/a10y/rexrs"]
 rexrs = { path = "vendor/rexrs" }
 

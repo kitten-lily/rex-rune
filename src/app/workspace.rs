@@ -159,6 +159,8 @@ pub struct Workspace {
     /// active one.
     pub launch_saved_font: String,
     pub title: String,
+    #[cfg(test)]
+    pub opened_links: Vec<String>,
     /// (active tab, pane width, sidebar open) when the active tab was last revealed.
     pub last_tab: (Option<String>, i32, bool),
     pub reveal_tab_again: bool,
@@ -315,6 +317,8 @@ impl Workspace {
             launch_font,
             launch_saved_font,
             title: "Rex".into(),
+            #[cfg(test)]
+            opened_links: Vec::new(),
             last_tab: (None, 0, false),
             reveal_tab_again: false,
             tab_strip: TabStrip::default(),
@@ -1645,6 +1649,14 @@ impl Workspace {
     /// Hand `uri` to the desktop's handler with `xdg-open`, off the UI thread. A failure
     /// becomes a notice.
     pub fn open_link(&mut self, uri: String) {
+        #[cfg(test)]
+        self.opened_links.push(uri.clone());
+        #[cfg(not(test))]
+        self.open_desktop_link(uri);
+    }
+
+    #[cfg(not(test))]
+    fn open_desktop_link(&mut self, uri: String) {
         let handle = self.handle.clone();
         let _ = std::thread::Builder::new()
             .name("rex-open-link".into())

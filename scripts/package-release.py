@@ -50,7 +50,7 @@ def main():
         (stage / "install.sh").write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
             'root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"\n'
-            'exec bash "$root/scripts/install-desktop.sh" --copy "$root/bin/rex-linux"\n'
+            f'exec bash "$root/scripts/install-desktop.sh" --copy --receipt-version {version} "$root/bin/rex-linux"\n'
         )
         (stage / "install.sh").chmod(0o755)
         licenses = stage / "licenses"
@@ -97,6 +97,8 @@ def main():
             deb = Path(temp) / "deb"
             (deb / "usr/bin").mkdir(parents=True)
             shutil.copy2(binary, deb / "usr/bin/rex-linux")
+            (deb / "usr/share/rex-linux").mkdir(parents=True)
+            (deb / "usr/share/rex-linux/channel").write_text("channel=deb\nhint=Install the latest .deb from GitHub Releases\n")
             (deb / "usr/share/applications").mkdir(parents=True)
             shutil.copy2(root / "resources/dev.shuv.rex-linux.desktop", deb / "usr/share/applications")
             for size in (32, 128, 256):
@@ -121,7 +123,7 @@ def main():
                 f"Installed-Size: {sum(p.stat().st_size for p in (deb / 'usr').rglob('*') if p.is_file()) // 1024}\n"
                 f"Depends: {depends}\nHomepage: https://github.com/shuv1337/rex-rune\n"
                 "Description: Native Linux client for existing Rex terminal servers\n"
-                " Unofficial Rune-based client. Requires a Rex server with API revisions 10–12.\n"
+                " Unofficial Rune-based client. Requires a Rex server with API revisions 10–13.\n"
             )
             package = dist / f"rex-linux_{version}_{deb_arch}.deb"
             run("dpkg-deb", "--root-owner-group", "--build", str(deb), str(package), env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch)})
