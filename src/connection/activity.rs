@@ -84,12 +84,105 @@ impl TerminalProgress {
     }
 }
 
+/// The terminal's foreground process when a status report arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub pid: u64,
+    pub name: String,
+}
+
+/// An RFC 3339 time by the server's clock, as UTC seconds and nanoseconds. Only compare it
+/// with another time from the same server: this computer's clock may disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ServerTime {
+    seconds: i64,
+    nanos: u32,
+}
+
+impl ServerTime {
+    /// `YYYY-MM-DDTHH:MM:SS[.fraction](Z|±HH:MM)`; none for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        let b = text.as_bytes();
+        let number = |range: std::ops::Range<usize>| -> Option<i64> {
+            let digits = b.get(range)?;
+            digits.iter().try_fold(0i64, |n, d| {
+                d.is_ascii_digit().then(|| n * 10 + i64::from(d - b'0'))
+            })
+        };
+        if b.len() < 20
+            || b[4] != b'-'
+            || b[7] != b'-'
+            || !matches!(b[10], b'T' | b't' | b' ')
+            || b[13] != b':'
+            || b[16] != b':'
+        {
+            return None;
+        }
+        let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+        let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days_in_month = match month {
+            2 if leap => 29,
+            2 => 28,
+            4 | 6 | 9 | 11 => 30,
+            1..=12 => 31,
+            _ => return None,
+        };
+        // RFC 3339 allows a leap second, 60.
+        if day < 1 || day > days_in_month || hour > 23 || minute > 59 || second > 60 {
+            return None;
+        }
+        let mut at = 19;
+        let mut nanos = 0u32;
+        if b[at] == b'.' {
+            let digits = b[at + 1..]
+                .iter()
+                .take_while(|d| d.is_ascii_digit())
+                .count();
+            if digits == 0 {
+                return None;
+            }
+            for (i, d) in b[at + 1..at + 1 + digits].iter().take(9).enumerate() {
+                nanos += u32::from(d - b'0') * 10u32.pow(8 - i as u32);
+            }
+            at += 1 + digits;
+        }
+        let offset = match b.get(at..)? {
+            [b'Z' | b'z'] => 0,
+            [sign @ (b'+' | b'-'), _, _, b':', _, _] => {
+                let (h, m) = (number(at + 1..at + 3)?, number(at + 4..at + 6)?);
+                if h > 23 || m > 59 {
+                    return None;
+                }
+                (h * 60 + m) * 60 * if *sign == b'-' { -1 } else { 1 }
+            }
+            _ => return None,
+        };
+        // Days since 1970-01-01 in the proleptic Gregorian calendar (Howard Hinnant's
+        // days_from_civil).
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        Some(Self {
+            seconds: days * 86_400 + hour * 3600 + minute * 60 + second - offset,
+            nanos,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StatusRecord {
     pub state: ProgramState,
     pub kind: Option<BlockedKind>,
     /// The program that reported, as `effective_app` (or `app`) names it.
     pub app: Option<String>,
+    /// The foreground process when the report arrived; names the program without an app.
+    pub owner: Option<Owner>,
+    /// When the report arrived, by the server's clock: orders this server's records only.
+    pub updated_at: Option<ServerTime>,
     /// The program's own words; shown only as plain text.
     pub title: Option<String>,
     pub msg: Option<String>,
@@ -117,6 +210,14 @@ impl StatusRecord {
                 _ => None,
             },
             app: text("effective_app").or_else(|| text("app")),
+            owner: value["owner"]["pid"].as_u64().and_then(|pid| {
+                let name = value["owner"]["name"].as_str().filter(|s| !s.is_empty())?;
+                Some(Owner {
+                    pid,
+                    name: name.to_owned(),
+                })
+            }),
+            updated_at: value["updated_at"].as_str().and_then(ServerTime::parse),
             title: text("title"),
             msg: text("msg"),
             progress: value["progress"]
@@ -125,6 +226,14 @@ impl StatusRecord {
                 .map(|p| p as u8),
             live: false,
         }
+    }
+
+    /// The program behind the record: its app, else the process that was in the foreground
+    /// when it reported.
+    pub fn program(&self) -> Option<&str> {
+        self.app
+            .as_deref()
+            .or(self.owner.as_ref().map(|o| o.name.as_str()))
     }
 }
 

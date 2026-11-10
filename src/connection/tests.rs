@@ -409,6 +409,9 @@ fn captured_block_events_update_activity_programs_and_notices() {
     assert_eq!(records["build"].state, ProgramState::Blocked);
     assert_eq!(records["build"].kind, Some(BlockedKind::Permission));
     assert_eq!(records["build/test"].state, ProgramState::Error);
+    assert_eq!(records["build"].owner.as_ref().map(|o| o.pid), Some(315850));
+    assert!(records["build"].updated_at > records[""].updated_at);
+    assert!(records["build/test"].updated_at > records["build"].updated_at);
     // The shell's argv0 is "/usr/bin/bash"; only its basename shows.
     assert_eq!(model.programs[FIXTURE_BLOCK], "bash");
     let notices: Vec<_> = model
@@ -474,6 +477,72 @@ fn a_title_lasts_while_the_program_that_set_it_runs() {
         activity::parse_title(&json!({"title":"t"})),
     );
     assert_eq!(model.title("b"), Some("t"));
+}
+
+#[test]
+fn status_records_keep_their_owner_and_server_time() {
+    use activity::{Owner, ServerTime, StatusRecord};
+    let record = StatusRecord::parse(&json!({
+        "state": "working",
+        "updated_at": "2026-11-02T00:52:57.195088137-08:00",
+        "owner": {"pid": 315850, "name": "claude"},
+    }));
+    assert_eq!(
+        record.owner,
+        Some(Owner {
+            pid: 315850,
+            name: "claude".into()
+        })
+    );
+    // With no app, the process that was in the foreground names the program.
+    assert_eq!(record.app, None);
+    assert_eq!(record.program(), Some("claude"));
+    let named = StatusRecord::parse(&json!({
+        "state": "working", "app": "cargo", "updated_at": "2026-11-02T08:52:57Z",
+        "owner": {"pid": 1, "name": "bash"},
+    }));
+    assert_eq!(named.program(), Some("cargo"));
+    // The same instant written with another offset is the same time.
+    let utc = ServerTime::parse("2026-11-02T08:52:57.195088137Z");
+    assert!(utc.is_some());
+    assert_eq!(record.updated_at, utc);
+    // Offsets count, so text order is not time order.
+    let later = ServerTime::parse("2026-11-02T00:45:00-08:00").unwrap();
+    let earlier = ServerTime::parse("2026-11-02T08:30:00Z").unwrap();
+    assert!(later > earlier);
+    assert!(
+        ServerTime::parse("2026-11-02t08:30:00.5z").unwrap()
+            > ServerTime::parse("2026-11-02T08:30:00.25+00:00").unwrap()
+    );
+    assert!(
+        ServerTime::parse("1969-12-31T23:59:59Z").unwrap()
+            < ServerTime::parse("1970-01-01T00:00:00Z").unwrap()
+    );
+    for bad in [
+        "",
+        "yesterday",
+        "2026-11-02T08:30:00",
+        "2026-13-02T08:30:00Z",
+        "2026-02-30T08:30:00Z",
+        "2026-11-02T24:00:00Z",
+        "2026-11-02T08:30:00.Z",
+        "2026-11-02T08:30:00+8:00",
+    ] {
+        assert_eq!(ServerTime::parse(bad), None, "{bad}");
+    }
+    // An owner needs both fields, as the schema requires; a bad time is left out.
+    for owner in [
+        json!({"pid": 1}),
+        json!({"name": "x"}),
+        json!({"pid": 1, "name": ""}),
+        json!(null),
+    ] {
+        let record =
+            StatusRecord::parse(&json!({"state":"idle","updated_at":"soon","owner":owner}));
+        assert_eq!(record.owner, None, "{owner}");
+        assert_eq!(record.updated_at, None);
+        assert_eq!(record.program(), None);
+    }
 }
 
 #[test]

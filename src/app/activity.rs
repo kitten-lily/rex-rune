@@ -111,9 +111,10 @@ pub fn pane_activity(model: &HostModel, block: &str) -> TabActivity {
 }
 
 /// The record that speaks for a set: the highest state, and among equals one that reports
-/// progress, so a percentage doesn't depend on record or pane order.
+/// progress, then the latest report, so neither depends on record or pane order. A set is
+/// one host's, so its report times all come from one server clock.
 fn deciding<'a>(records: impl Iterator<Item = &'a StatusRecord>) -> Option<&'a StatusRecord> {
-    records.max_by_key(|r| (r.state, r.progress.is_some()))
+    records.max_by_key(|r| (r.state, r.progress.is_some(), r.updated_at))
 }
 
 fn fold_activity<'a>(
@@ -132,7 +133,7 @@ fn fold_activity<'a>(
             .activity
             .get(b)
             .and_then(|records| deciding(records.values()))
-            .and_then(|r| r.app.clone())
+            .and_then(|r| r.program().map(str::to_owned))
             .or_else(|| model.programs.get(b).cloned())
     });
     // A program's own OSC 9;4 report wins over the percentage in its status record.
@@ -149,7 +150,7 @@ fn fold_activity<'a>(
         kind: top.and_then(|r| r.kind),
         msg: top.and_then(|r| r.msg.clone().or_else(|| r.title.clone())),
         live: top.is_some_and(|r| r.live),
-        source: top.and_then(|r| r.app.clone()),
+        source: top.and_then(|r| r.program().map(str::to_owned)),
         program,
         progress,
     }
@@ -705,6 +706,41 @@ mod tests {
         let (model, mut block) = pane(Some("shell"));
         block.creator_name = Some("com.example.other".into());
         assert_eq!(pane_name(&model, &block), "shell");
+    }
+
+    #[test]
+    fn among_equal_records_the_latest_report_speaks() {
+        let report = |at: &str, msg: &str| {
+            StatusRecord::parse(&serde_json::json!({"state":"blocked","msg":msg,"updated_at":at}))
+        };
+        let mut model = HostModel::default();
+        // "a" sorts first but was reported later, by the server's clock in another offset.
+        model.activity.insert(
+            "block".into(),
+            [
+                ("a".into(), report("2026-11-02T00:45:00-08:00", "later")),
+                ("b".into(), report("2026-11-02T08:30:00Z", "earlier")),
+            ]
+            .into(),
+        );
+        assert_eq!(pane_activity(&model, "block").msg.as_deref(), Some("later"));
+    }
+
+    #[test]
+    fn a_record_without_an_app_is_named_by_its_owner() {
+        let mut model = HostModel::default();
+        let record = StatusRecord::parse(&serde_json::json!({
+            "state": "done", "updated_at": "2026-11-02T08:30:00Z",
+            "owner": {"pid": 7, "name": "claude"},
+        }));
+        model
+            .activity
+            .insert("block".into(), [(String::new(), record)].into());
+        // The program has since left the foreground.
+        model.programs.insert("block".into(), "bash".into());
+        let activity = pane_activity(&model, "block");
+        assert_eq!(activity.source.as_deref(), Some("claude"));
+        assert_eq!(activity.program.as_deref(), Some("claude"));
     }
 
     #[test]
