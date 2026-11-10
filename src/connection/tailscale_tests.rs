@@ -244,6 +244,7 @@ async fn a_rejected_name_is_a_problem_and_the_connection_stays() {
     )
     .await;
     until(&host, |m| m.tailscale_problem.is_some()).await;
+    connected(&host).await;
     {
         let m = host.model.lock().unwrap();
         assert!(m.connected);

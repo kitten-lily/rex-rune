@@ -1461,13 +1461,14 @@ async fn run_host(
             for event in queued { handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?; }
             // Only the bootstrap status may turn Tailscale on: a newer event (a CLI disable during
             // startup) wins, and events never enable.
+            // Decided now, made once the terminals are restored; events stay buffered meanwhile.
             let status = shared.model.lock().expect("host model").tailscale.clone();
-            if let (Some(name), Some(status)) = (&keep_tailscale, status)
-                && state.tailscale_seq == state.bootstrap_seq
-                && let Some(call) = state.keeper.at_connect(&status, name)
-            {
-                tailscale_call(&mut control, shared, &mut state, &call).await?;
-            }
+            let startup_call = match (&keep_tailscale, status) {
+                (Some(name), Some(status)) if state.tailscale_seq == state.bootstrap_seq => {
+                    state.keeper.at_connect(&status, name)
+                }
+                _ => None,
+            };
             state.prune(&shared.model.lock().expect("host model"));
             shared.update(|m| m.ssh_server_missing = false);
             shared.status("Connected", true);
@@ -1479,6 +1480,7 @@ async fn run_host(
             declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
             // Restore terminal sizes and state before a best-effort keymap can wait.
             if let Some(declaration) = &keymap { keymap::refresh(&mut control, shared, declaration).await; }
+            if let Some(call) = startup_call { tailscale_call(&mut control, shared, &mut state, &call).await?; }
             retry = 0;
             prefetch.reset();
             probes.reset();
