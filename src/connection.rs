@@ -19,6 +19,7 @@ pub mod activity;
 pub mod clipboard;
 mod prefetch;
 mod probes;
+pub mod tailscale;
 
 /// The label new tabs get. A tab that still has it shows its program's terminal title.
 pub const DEFAULT_TAB_LABEL: &str = "Shell";
