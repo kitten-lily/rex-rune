@@ -70,30 +70,207 @@ pub enum SidebarMode {
 /// Client-local column widths, keyed by host endpoint, session, window and column.
 pub type ColumnWidths = HashMap<String, HashMap<String, HashMap<String, HashMap<String, f64>>>>;
 
-/// What program activity shows in tabs and which changes become desktop notifications.
+/// Where one program state shows: a word (or progress bar) in tabs, a desktop notification,
+/// the unread count, and a sound with the notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Channels {
+    pub tab: bool,
+    pub desktop: bool,
+    pub badge: bool,
+    pub sound: bool,
+}
+
+/// Notifications programs send themselves (OSC 9, OSC 777): a desktop notification and its
+/// sound only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageChannels {
+    pub desktop: bool,
+    pub sound: bool,
+}
+
+/// What program activity shows where, state by state: in tabs, as desktop notifications, in
+/// the unread count and as sounds. Saved in this shape; files from before it migrate (see
+/// [`LegacyNotifications`]) so a user's choices behave as they did.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "LegacyNotifications")]
 pub struct NotificationsConfig {
-    pub show_in_tabs: bool,
-    pub system_notifications: bool,
-    /// Notify when a background tab's programs move into each state.
-    pub working: bool,
-    pub blocked: bool,
-    pub error: bool,
-    pub done: bool,
-    /// Pass on OSC 9 and OSC 777 notifications that programs send themselves.
-    pub program_messages: bool,
+    /// Working shows as a progress bar in tabs; it never counts as unread.
+    pub working: Channels,
+    pub blocked: Channels,
+    pub error: Channels,
+    pub done: Channels,
+    pub messages: MessageChannels,
 }
 impl Default for NotificationsConfig {
     fn default() -> Self {
+        let on = Channels {
+            tab: true,
+            desktop: true,
+            badge: true,
+            sound: false,
+        };
         Self {
-            show_in_tabs: true,
-            system_notifications: true,
-            working: false,
-            blocked: true,
-            error: true,
-            done: true,
-            program_messages: true,
+            working: Channels {
+                desktop: false,
+                badge: false,
+                ..on
+            },
+            blocked: on,
+            error: on,
+            done: on,
+            messages: MessageChannels {
+                desktop: true,
+                sound: false,
+            },
+        }
+    }
+}
+impl NotificationsConfig {
+    /// Every state's channels, in the order Settings lists them.
+    pub fn states(&self) -> [(crate::connection::activity::ProgramState, Channels); 4] {
+        use crate::connection::activity::ProgramState::*;
+        [
+            (Blocked, self.blocked),
+            (Error, self.error),
+            (Done, self.done),
+            (Working, self.working),
+        ]
+    }
+
+    /// A state's channels; Idle has none.
+    pub fn channels(&self, state: crate::connection::activity::ProgramState) -> Option<Channels> {
+        use crate::connection::activity::ProgramState::*;
+        match state {
+            Working => Some(self.working),
+            Blocked => Some(self.blocked),
+            Error => Some(self.error),
+            Done => Some(self.done),
+            Idle => None,
+        }
+    }
+
+    pub fn channels_mut(
+        &mut self,
+        state: crate::connection::activity::ProgramState,
+    ) -> Option<&mut Channels> {
+        use crate::connection::activity::ProgramState::*;
+        match state {
+            Working => Some(&mut self.working),
+            Blocked => Some(&mut self.blocked),
+            Error => Some(&mut self.error),
+            Done => Some(&mut self.done),
+            Idle => None,
+        }
+    }
+
+    /// Any state shows in tabs. A bell's word follows this, having no state of its own.
+    pub fn any_tab(&self) -> bool {
+        self.states().iter().any(|(_, c)| c.tab)
+    }
+
+    /// Turn the tab channel on or off for every state, as the old single switch did.
+    pub fn set_tabs(&mut self, on: bool) {
+        for c in [
+            &mut self.working,
+            &mut self.blocked,
+            &mut self.error,
+            &mut self.done,
+        ] {
+            c.tab = on;
+        }
+    }
+
+    /// Any channel that needs every session's activity: tabs, notifications or the count.
+    pub fn watches_activity(&self) -> bool {
+        self.states()
+            .iter()
+            .any(|(_, c)| c.tab || c.desktop || c.badge)
+    }
+}
+
+/// One state as saved: a `Channels` object, or before it the old per-state notification
+/// switch.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LegacyState {
+    Channels(PartialChannels),
+    Switch(bool),
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PartialChannels {
+    tab: Option<bool>,
+    desktop: Option<bool>,
+    badge: Option<bool>,
+    sound: Option<bool>,
+}
+
+/// Either notification shape. Before the channels table, `show_in_tabs` switched every tab
+/// word, `system_notifications` every desktop notification, `working`, `blocked`, `error`
+/// and `done` each state's notification and `program_messages` programs' own. They map to
+/// `tab` for every state, `desktop = system_notifications && <state>`, and
+/// `messages.desktop = system_notifications && program_messages`. The count is new and
+/// shows where tab words did (`badge = show_in_tabs && <default>`); sound is new and off.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+pub struct LegacyNotifications {
+    show_in_tabs: Option<bool>,
+    system_notifications: Option<bool>,
+    program_messages: Option<bool>,
+    working: Option<LegacyState>,
+    blocked: Option<LegacyState>,
+    error: Option<LegacyState>,
+    done: Option<LegacyState>,
+    messages: Option<PartialMessages>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct PartialMessages {
+    desktop: Option<bool>,
+    sound: Option<bool>,
+}
+
+impl From<LegacyNotifications> for NotificationsConfig {
+    fn from(old: LegacyNotifications) -> Self {
+        let defaults = Self::default();
+        let system = old.system_notifications.unwrap_or(true);
+        let state = |saved: Option<LegacyState>, default: Channels| {
+            let tab = old.show_in_tabs.unwrap_or(default.tab);
+            match saved {
+                Some(LegacyState::Channels(c)) => Channels {
+                    tab: c.tab.unwrap_or(tab),
+                    desktop: c.desktop.unwrap_or(system && default.desktop),
+                    badge: c.badge.unwrap_or(default.badge),
+                    sound: c.sound.unwrap_or(default.sound),
+                },
+                Some(LegacyState::Switch(on)) => Channels {
+                    tab,
+                    desktop: system && on,
+                    badge: tab && default.badge,
+                    sound: default.sound,
+                },
+                None => Channels {
+                    tab,
+                    desktop: system && default.desktop,
+                    badge: tab && default.badge,
+                    sound: default.sound,
+                },
+            }
+        };
+        let messages = old.messages.unwrap_or_default();
+        Self {
+            working: state(old.working, defaults.working),
+            blocked: state(old.blocked, defaults.blocked),
+            error: state(old.error, defaults.error),
+            done: state(old.done, defaults.done),
+            messages: MessageChannels {
+                desktop: messages
+                    .desktop
+                    .unwrap_or(system && old.program_messages.unwrap_or(defaults.messages.desktop)),
+                sound: messages.sound.unwrap_or(defaults.messages.sound),
+            },
         }
     }
 }
@@ -509,7 +686,7 @@ mod tests {
         assert!(old.column_widths.is_empty());
         let partial: Settings =
             serde_json::from_str(r#"{"notifications":{"done":false}}"#).unwrap();
-        assert!(!partial.notifications.done && partial.notifications.blocked);
+        assert!(!partial.notifications.done.desktop && partial.notifications.blocked.desktop);
         let mut s = old;
         s.notice_position = NoticePosition::BottomRight;
         s.tab_layout = TabLayout::Scrolling;
@@ -543,6 +720,72 @@ mod tests {
             back.column_widths["unix:///run/rex.sock"]["session:a"]["window:a"]["split:a"],
             2. / 3.
         );
+    }
+
+    #[test]
+    fn old_notification_switches_migrate_to_the_channels_table() {
+        let c = |tab, desktop, badge, sound| Channels {
+            tab,
+            desktop,
+            badge,
+            sound,
+        };
+        let load = |json: &str| {
+            let path = std::env::temp_dir().join(format!(
+                "rex-linux-settings-notify-{}-{}.json",
+                std::process::id(),
+                json.len()
+            ));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"hosts":[{{"label":"a","endpoint":"unix:///run/rex.sock"}}],
+                        "notifications":{json}}}"#
+                ),
+            )
+            .unwrap();
+            let settings = Settings::load(&path).unwrap();
+            std::fs::remove_file(&path).ok();
+            settings.notifications
+        };
+        // The old defaults, written out, behave as the new defaults do.
+        let old_defaults = load(
+            r#"{"show_in_tabs":true,"system_notifications":true,"working":false,
+                "blocked":true,"error":true,"done":true,"program_messages":true}"#,
+        );
+        assert_eq!(old_defaults, NotificationsConfig::default());
+        // Tabs off, and desktop notifications off as a whole: every state keeps its own
+        // switch's value only where notifications were on.
+        let quiet = load(
+            r#"{"show_in_tabs":false,"system_notifications":false,"working":true,
+                "blocked":true,"error":false,"done":true,"program_messages":true}"#,
+        );
+        assert_eq!(quiet.working, c(false, false, false, false));
+        assert_eq!(quiet.blocked, c(false, false, false, false));
+        assert_eq!(quiet.error, c(false, false, false, false));
+        assert_eq!(quiet.done, c(false, false, false, false));
+        assert!(!quiet.messages.desktop);
+        assert!(!quiet.any_tab());
+        // Per-state choices under notifications that were on.
+        let picky = load(
+            r#"{"working":true,"blocked":false,"error":true,"done":false,
+                "program_messages":false}"#,
+        );
+        assert_eq!(picky.working, c(true, true, false, false));
+        assert_eq!(picky.blocked, c(true, false, true, false));
+        assert_eq!(picky.error, c(true, true, true, false));
+        assert_eq!(picky.done, c(true, false, true, false));
+        assert!(!picky.messages.desktop);
+        // The new shape round-trips, and the old keys are not written back.
+        let mut table = NotificationsConfig::default();
+        table.done.sound = true;
+        table.error.badge = false;
+        table.messages.sound = true;
+        let json = serde_json::to_value(&table).unwrap();
+        assert!(json.get("show_in_tabs").is_none() && json.get("program_messages").is_none());
+        assert_eq!(json["done"]["sound"], true);
+        let back: NotificationsConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back, table);
     }
 
     #[test]

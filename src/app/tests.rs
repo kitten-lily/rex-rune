@@ -609,7 +609,7 @@ fn split_pane_headers_show_their_own_status_word() {
         "only the pane that reported"
     );
     // A direct field write doesn't invalidate the view; go through update.
-    rt.update(|s, _| s.settings.notifications.show_in_tabs = false);
+    rt.update(|s, _| s.settings.notifications.set_tabs(false));
     // Let the word's exit transition finish.
     for _ in 0..90 {
         rt.frame(1. / 60.);
@@ -1959,8 +1959,8 @@ fn a_notification_switch_flips_and_settings_stay_open() {
     ws.perform(Intent::Settings, &mut tx);
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:notifications");
-    assert!(rt.state.settings.notifications.show_in_tabs);
-    click(&mut rt, "notify-tabs");
+    assert!(rt.state.settings.notifications.blocked.tab);
+    click(&mut rt, "notify-blocked-tab");
     assert!(
         matches!(
             rt.state.panel.as_ref().map(|p| &p.kind),
@@ -1969,7 +1969,7 @@ fn a_notification_switch_flips_and_settings_stay_open() {
         "Settings stays open"
     );
     assert!(
-        !rt.state.settings.notifications.show_in_tabs,
+        !rt.state.settings.notifications.blocked.tab,
         "the switch flipped"
     );
     std::fs::remove_file(&rt.state.settings_path).ok();
@@ -1978,13 +1978,13 @@ fn a_notification_switch_flips_and_settings_stay_open() {
 #[test]
 fn a_disabled_notification_switch_leaves_settings_open() {
     let mut ws = workspace();
-    ws.settings.notifications.system_notifications = false;
-    let blocked = ws.settings.notifications.blocked;
+    ws.settings.notifications.blocked.desktop = false;
+    let blocked = ws.settings.notifications.blocked.sound;
     let mut tx = rune::Tx::default();
     ws.perform(Intent::Settings, &mut tx);
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:notifications");
-    click(&mut rt, "notify-blocked");
+    click(&mut rt, "notify-blocked-sound");
     assert!(
         matches!(
             rt.state.panel.as_ref().map(|p| &p.kind),
@@ -1992,7 +1992,10 @@ fn a_disabled_notification_switch_leaves_settings_open() {
         ),
         "a press on a disabled switch must not reach the dismiss layer"
     );
-    assert_eq!(rt.state.settings.notifications.blocked, blocked, "disabled");
+    assert_eq!(
+        rt.state.settings.notifications.blocked.sound, blocked,
+        "disabled"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -2519,7 +2522,7 @@ fn a_working_progress_report_draws_a_bar_on_its_tab_and_pane() {
         "only the pane that reported"
     );
     assert!(!has(&rt, "tab-word:split"), "working is a bar, not a word");
-    rt.update(|s, _| s.settings.notifications.show_in_tabs = false);
+    rt.update(|s, _| s.settings.notifications.set_tabs(false));
     for _ in 0..90 {
         rt.frame(1. / 60.);
     }
@@ -2667,7 +2670,7 @@ fn notification_settings_gate_what_is_sent() {
     use rex_linux::connection::activity::{DesktopNotice, ProgramState::*};
     let (mut ws, _rx) = tabbed_workspace("single");
     ws.track_activity(0);
-    ws.settings.notifications.done = false;
+    ws.settings.notifications.done.desktop = false;
     set_activity(&mut ws, "block:b", &[("", record(Working, true))]);
     set_activity(&mut ws, "block:b", &[]);
     assert!(ws.outbox.is_empty(), "Done notifications are off");
@@ -2682,7 +2685,8 @@ fn notification_settings_gate_what_is_sent() {
     assert_eq!(ws.outbox.len(), 1, "the tab in front stays quiet");
     assert_eq!(ws.outbox[0].summary, "dev");
     assert_eq!(ws.outbox[0].body, "Build finished\ns-label · test-0");
-    ws.settings.notifications.system_notifications = false;
+    ws.settings.notifications.error.desktop = false;
+    ws.settings.notifications.messages.desktop = false;
     set_activity(&mut ws, "block:c", &[("", record(Error, true))]);
     ws.deliver_program_notices(0, vec![notice("block:c")]);
     assert_eq!(ws.outbox.len(), 1);
@@ -2878,11 +2882,58 @@ fn a_pane_that_moved_tabs_is_found_by_its_block() {
 }
 
 #[test]
+fn each_states_tab_channel_hides_only_its_own_word() {
+    use super::activity::{shown_progress, shown_word, tab_activity};
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _rx) = tabbed_workspace("single");
+    let word = |ws: &Workspace| {
+        let model = &ws.hosts[0].model;
+        let tab = &model.views["s"].windows[1];
+        shown_word(
+            &ws.settings.notifications,
+            &tab_activity(model, tab),
+            ws.unseen("split"),
+            false,
+        )
+        .map(|(w, _)| w.into_owned())
+    };
+    let mut blocked = record(Blocked, true);
+    blocked.progress = Some(40);
+    ws.hosts[0]
+        .model
+        .activity
+        .insert("block:c".into(), [("".into(), blocked)].into());
+    ws.hosts[0].model.progress.insert(
+        "block:b".into(),
+        rex_linux::connection::activity::TerminalProgress::Set(Some(40)),
+    );
+    assert_eq!(word(&ws).as_deref(), Some("Needs input"));
+    ws.settings.notifications.blocked.tab = false;
+    assert_eq!(
+        word(&ws),
+        None,
+        "no Blocked word, and Working shows no word"
+    );
+    let model = &ws.hosts[0].model;
+    let tab = tab_activity(model, &model.views["s"].windows[1]);
+    assert!(shown_progress(&ws.settings.notifications, &tab).is_some());
+    ws.settings.notifications.working.tab = false;
+    assert!(shown_progress(&ws.settings.notifications, &tab).is_none());
+    // Unseen Done follows Done's channel.
+    ws.hosts[0].model.activity.clear();
+    ws.unseen_done.insert((ws.hosts[0].id, "split".into()));
+    assert_eq!(word(&ws).as_deref(), Some("Done"));
+    ws.settings.notifications.done.tab = false;
+    assert_eq!(word(&ws), None);
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn tab_pills_carry_the_activity_word_and_hide_it_when_turned_off() {
     use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
     let pill = |show: bool| {
         let (mut ws, _rx) = tabbed_workspace("single");
-        ws.settings.notifications.show_in_tabs = show;
+        ws.settings.notifications.set_tabs(show);
         let mut blocked = record(Blocked, true);
         blocked.kind = Some(BlockedKind::Question);
         ws.hosts[0]
@@ -3880,20 +3931,29 @@ fn latest(rx: &flume::Receiver<HostCommand>) -> Option<Vec<String>> {
         .last()
 }
 
+/// Turn off every channel that reads activity from every session: tabs, desktop
+/// notifications and the unread count.
+fn watch_no_activity(ws: &mut Workspace) {
+    let n = &mut ws.settings.notifications;
+    for c in [&mut n.working, &mut n.blocked, &mut n.error, &mut n.done] {
+        (c.tab, c.desktop, c.badge) = (false, false, false);
+    }
+}
+
 #[test]
 fn tab_activity_prefetches_every_connected_session() {
     let (mut ws, rx) = tabbed_workspace("single");
     ws.hosts[0].model.sessions.push(session("other"));
-    assert!(ws.settings.notifications.show_in_tabs && !ws.sidebar_tabs());
+    assert!(ws.settings.notifications.blocked.tab && !ws.sidebar_tabs());
     ws.sync_prefetch();
     assert_eq!(
         latest(&rx),
         Some(vec!["other".to_owned(), "s".to_owned()]),
         "session rows and the switcher show every session's activity"
     );
-    ws.settings.notifications.show_in_tabs = false;
+    watch_no_activity(&mut ws);
     ws.sync_prefetch();
-    assert_eq!(latest(&rx), Some(vec![]), "nothing shows it");
+    assert_eq!(latest(&rx), Some(vec![]), "nothing shows or announces it");
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
@@ -3901,7 +3961,7 @@ fn tab_activity_prefetches_every_connected_session() {
 fn views_are_prefetched_only_for_tabs_the_sidebar_lists() {
     let all = Some(vec!["other".to_owned(), "s".to_owned()]);
     let (mut ws, rx) = tabbed_workspace("single");
-    ws.settings.notifications.show_in_tabs = false;
+    watch_no_activity(&mut ws);
     ws.hosts[0].model.sessions.push(session("other"));
     ws.toggle_sidebar();
     let mut rt = runtime(ws);
@@ -4415,7 +4475,7 @@ fn activity_mode_returns_the_toolbar_tabs() {
 #[test]
 fn activity_mode_prefetches_every_session() {
     let (mut ws, rx) = tabbed_workspace("single");
-    ws.settings.notifications.show_in_tabs = false;
+    watch_no_activity(&mut ws);
     ws.hosts[0].model.sessions.push(session("other"));
     ws.settings.hosts[0].collapsed = true;
     ws.show_activity();
@@ -4586,7 +4646,7 @@ fn a_session_working_with_progress_draws_a_bar_in_the_sidebar() {
     );
     assert!(has(&rt, "session-progress:0:other"));
     assert!(!has(&rt, "session-progress:0:s"));
-    rt.update(|s, _| s.settings.notifications.show_in_tabs = false);
+    rt.update(|s, _| s.settings.notifications.set_tabs(false));
     settle(&mut rt);
     assert!(!has(&rt, "session-progress:0:other"));
     std::fs::remove_file(&rt.state.settings_path).ok();
@@ -4620,7 +4680,7 @@ fn the_switcher_names_a_sessions_working_progress() {
     assert_eq!(detail(&ws).as_deref(), Some("42%"));
     progress(&mut ws, Indeterminate);
     assert_eq!(detail(&ws).as_deref(), Some("Working"));
-    ws.settings.notifications.show_in_tabs = false;
+    ws.settings.notifications.set_tabs(false);
     assert_eq!(detail(&ws).as_deref(), Some(""));
     std::fs::remove_file(&ws.settings_path).ok();
 }
@@ -4655,7 +4715,7 @@ fn unseen_done_reaches_the_session_row() {
     ws.unseen_done.insert((id, "split".into()));
     let (word, _, needing) = ws.session_word(0, "s").expect("a word");
     assert_eq!((word.as_ref(), needing), ("Done", 0));
-    ws.settings.notifications.show_in_tabs = false;
+    ws.settings.notifications.set_tabs(false);
     assert!(ws.session_word(0, "s").is_none());
     std::fs::remove_file(&ws.settings_path).ok();
 }

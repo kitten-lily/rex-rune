@@ -6,9 +6,11 @@ use super::{
     widgets::{Pill, glyph, pill},
     workspace::Workspace,
 };
-use rex_linux::settings::{FocusCentering, NoticePosition, NotificationsConfig, TabLayout};
+use rex_linux::settings::{
+    Channels, FocusCentering, NoticePosition, NotificationsConfig, TabLayout,
+};
 use rune::{Cursor, El, ScrollSpec, Tx, col, el, row, text};
-use rune_kit::{IconButton, Keybind, SegmentedControl, Switch};
+use rune_kit::{Checkbox, IconButton, Keybind, SegmentedControl, Switch};
 
 /// A labelled setting: name and optional explanation on the left, its control on the right.
 pub(super) fn setting(label: &str, detail: &str, control: El) -> El {
@@ -210,83 +212,160 @@ fn interface(s: &Workspace) -> El {
         ))
 }
 
-/// Where a notification switch keeps its value.
+/// Where a notification checkbox keeps its value.
 type Field = fn(&mut NotificationsConfig) -> &mut bool;
 
-/// A switch for one notification preference, saved as soon as it flips.
-fn notify_switch(key: &str, label: &str, on: bool, disabled: bool, field: Field) -> El {
-    Switch::new(on)
-        .label(label.to_owned())
-        .hide_label()
-        .disabled(disabled)
-        .on_toggle(move |s: &mut Workspace| {
-            let value = field(&mut s.settings.notifications);
-            *value = !*value;
-            s.save();
-        })
-        .build(kit())
-        .key(key.to_owned())
+/// The channels the table offers, as (key, caption).
+const CHANNELS: [(&str, &str); 4] = [
+    ("tab", "Tabs"),
+    ("desktop", "Desktop"),
+    ("badge", "Count"),
+    ("sound", "Sound"),
+];
+
+/// Width of one channel column of the notifications table.
+const CHANNEL_COLUMN: f32 = 64.;
+
+/// One cell of the notifications table: a checkbox saved as soon as it flips, or a dash
+/// where the channel doesn't apply to the row, or needs another channel (`why`) first.
+fn channel_cell(key: String, label: String, cell: Option<(bool, bool, Field)>) -> El {
+    let dash = || text("—").font(ui(12.)).color(rgb(muted())).key(key.clone());
+    let inner = match cell {
+        Some((on, false, field)) => Checkbox::new(on)
+            .label(label)
+            .hide_label()
+            .on_toggle(move |s: &mut Workspace| {
+                let value = field(&mut s.settings.notifications);
+                *value = !*value;
+                s.sync_prefetch();
+                s.save();
+            })
+            .build(kit())
+            .key(key.clone()),
+        Some((_, true, _)) => dash().help("Plays with a desktop notification"),
+        None => dash(),
+    };
+    row().w(CHANNEL_COLUMN).center().child(inner)
+}
+
+/// The cells one row offers, by channel key, value, whether it waits on another channel,
+/// and its field; a channel missing from it doesn't apply.
+type Cells = Vec<(&'static str, bool, bool, Field)>;
+
+fn channel_row(state: &str, label: &str, detail: &str, cells: Cells) -> El {
+    let mut controls = row().center_y();
+    for (channel, caption) in CHANNELS {
+        let cell = cells
+            .iter()
+            .find(|(c, ..)| *c == channel)
+            .map(|&(_, on, disabled, field)| (on, disabled, field));
+        controls = controls.child(channel_cell(
+            format!("notify-{state}-{channel}"),
+            format!("{label}: {caption}"),
+            cell,
+        ));
+    }
+    setting(label, detail, controls)
 }
 
 fn notifications(s: &Workspace) -> El {
     let n = &s.settings.notifications;
-    let off = !n.system_notifications;
-    let mut body = col()
-        .gap(4.)
-        .child(setting(
-            "Activity in tabs",
-            "A word on a tab whose programs need you or failed, and Done on one that finished while you were away.",
-            notify_switch("notify-tabs", "Show activity in tabs", n.show_in_tabs, false, |n| &mut n.show_in_tabs),
-        ))
-        .child(divider())
-        .child(setting(
-            "Desktop notifications",
-            "For tabs you aren't looking at, through your desktop's notification service. Clicking one shows its tab.",
-            notify_switch("notify-system", "Desktop notifications", n.system_notifications, false, |n| &mut n.system_notifications),
-        ))
-        .child(group("Notify when a program"));
-    let states: [(&str, &str, &str, bool, Field); 4] = [
+    let mut header = row().w_full().mt(8.).center_y().child(el().grow(1.));
+    for (channel, caption) in CHANNELS {
+        header = header.child(
+            row().w(CHANNEL_COLUMN).center().child(
+                text(caption)
+                    .key(format!("notify-column-{channel}"))
+                    .font(label_caps())
+                    .text_case(rune::TextCase::Uppercase)
+                    .color(rgb(muted())),
+            ),
+        );
+    }
+    let states: [(&str, &str, &str, Channels, [Field; 4]); 4] = [
         (
-            "notify-blocked",
+            "blocked",
             "Needs you",
             "Waiting for approval, an answer or a sign-in.",
             n.blocked,
-            |n| &mut n.blocked,
+            [
+                |n| &mut n.blocked.tab,
+                |n| &mut n.blocked.desktop,
+                |n| &mut n.blocked.badge,
+                |n| &mut n.blocked.sound,
+            ],
         ),
-        ("notify-error", "Fails", "Reports an error.", n.error, |n| {
-            &mut n.error
-        }),
         (
-            "notify-done",
-            "Finishes",
-            "Stops working, or reports that it's done.",
-            n.done,
-            |n| &mut n.done,
+            "error",
+            "Fails",
+            "Reports an error.",
+            n.error,
+            [
+                |n| &mut n.error.tab,
+                |n| &mut n.error.desktop,
+                |n| &mut n.error.badge,
+                |n| &mut n.error.sound,
+            ],
         ),
-        ("notify-working", "Starts working", "", n.working, |n| {
-            &mut n.working
-        }),
+        (
+            "done",
+            "Finishes",
+            "Stops working, or reports that it's done. It counts until you see it.",
+            n.done,
+            [
+                |n| &mut n.done.tab,
+                |n| &mut n.done.desktop,
+                |n| &mut n.done.badge,
+                |n| &mut n.done.sound,
+            ],
+        ),
+        (
+            "working",
+            "Works",
+            "Starts working. Tabs draw its progress as a bar; it never counts.",
+            n.working,
+            [
+                |n| &mut n.working.tab,
+                |n| &mut n.working.desktop,
+                |n| &mut n.working.badge,
+                |n| &mut n.working.sound,
+            ],
+        ),
     ];
-    for (i, (key, label, detail, on, field)) in states.into_iter().enumerate() {
+    let mut body = col()
+        .gap(4.)
+        .child(
+            text("When a program in a pane you aren't looking at changes state. Desktop notifications go through your desktop's notification service; clicking one shows its pane.")
+                .font(ui(11.5))
+                .color(rgb(muted()))
+                .wrap(),
+        )
+        .child(header);
+    for (i, (key, label, detail, c, [tab, desktop, badge, sound])) in states.into_iter().enumerate()
+    {
         if i > 0 {
             body = body.child(divider());
         }
-        body = body.child(setting(
-            label,
-            detail,
-            notify_switch(key, label, on, off, field),
-        ));
+        let mut cells: Cells = vec![
+            ("tab", c.tab, false, tab),
+            ("desktop", c.desktop, false, desktop),
+        ];
+        if key != "working" {
+            cells.push(("badge", c.badge, false, badge));
+        }
+        // Sound plays with a desktop notification, so it needs one.
+        cells.push(("sound", c.sound, !c.desktop, sound));
+        body = body.child(channel_row(key, label, detail, cells));
     }
-    body.child(divider()).child(setting(
+    let m = n.messages;
+    body.child(divider()).child(channel_row(
+        "messages",
         "Messages from programs",
         "Notifications programs send themselves with OSC 9 or OSC 777.",
-        notify_switch(
-            "notify-messages",
-            "Messages from programs",
-            n.program_messages,
-            off,
-            |n| &mut n.program_messages,
-        ),
+        vec![
+            ("desktop", m.desktop, false, |n| &mut n.messages.desktop),
+            ("sound", m.sound, !m.desktop, |n| &mut n.messages.sound),
+        ],
     ))
 }
 

@@ -1747,7 +1747,7 @@ impl Workspace {
     /// those of expanded hosts while the sidebar is open with Sidebar tab position.
     pub fn sync_prefetch(&mut self) {
         let listing = self.sidebar_tabs();
-        let every = self.settings.notifications.show_in_tabs
+        let every = self.settings.notifications.watches_activity()
             || (self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity);
         for index in 0..self.hosts.len() {
             let eligible = (every && self.hosts[index].model.connected)

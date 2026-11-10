@@ -4,7 +4,7 @@
 //! under the wheel and to bring the focused pane into view.
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
-    activity::{pane_activity, progress_bar, tab_progress, tab_word},
+    activity::{pane_activity, progress_bar, shown_progress, shown_word},
     input::search_key,
     panel::{Form, Intent, PanelKind},
     term::{self, CursorLook, GridLook, Metrics, MouseGesture, PADDING},
@@ -83,9 +83,8 @@ fn header(s: &Workspace, block: &str, width: f32, focused: bool, m: &Metrics) ->
     let label = s.pane_name(block);
     // The tab's words for this pane alone; Done and Bell stay with the tab, which they latch.
     let activity = pane_activity(s.model(), block);
-    let word = tab_word(&activity, false, false)
-        .filter(|_| s.settings.notifications.show_in_tabs)
-        .map(|(word, colour)| {
+    let word =
+        shown_word(&s.settings.notifications, &activity, false, false).map(|(word, colour)| {
             let w = text(word)
                 .key(format!("pane-word:{block}"))
                 .font(medium(11.))
@@ -134,7 +133,7 @@ fn header(s: &Workspace, block: &str, width: f32, focused: bool, m: &Metrics) ->
         Some(strip) => h.child(strip),
         None => h,
     };
-    match tab_progress(&activity).filter(|_| s.settings.notifications.show_in_tabs) {
+    match shown_progress(&s.settings.notifications, &activity) {
         Some(progress) => h.child(progress_bar(
             format!("pane-progress:{block}"),
             progress,

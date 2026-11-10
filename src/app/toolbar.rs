@@ -1,7 +1,7 @@
 //! The 52pt bar on the window ground: sidebar toggle, identity chip, tab track, drag space,
 //! Commands, New tab and Settings, a divider, and Close.
 use super::{
-    activity::{program_icon, progress_bar, tab_activity, tab_name, tab_progress, tab_word},
+    activity::{program_icon, progress_bar, shown_progress, shown_word, tab_activity, tab_name},
     panel::Intent,
     theme::*,
     widgets::{chrome_button, glyph},
@@ -89,8 +89,12 @@ fn tab_track(s: &Workspace) -> El {
             let active = view.active_window_id.as_ref() == Some(&id);
             let label = tab_name(model, tab);
             let activity = tab_activity(model, tab);
-            let word = tab_word(&activity, s.unseen(&id), s.bell_on(s.active, &id))
-                .filter(|_| s.settings.notifications.show_in_tabs);
+            let word = shown_word(
+                &s.settings.notifications,
+                &activity,
+                s.unseen(&id),
+                s.bell_on(s.active, &id),
+            );
             let (press_id, rename_id, menu_id) = (id.clone(), id.clone(), id.clone());
             let mut tab_el = row()
                 .key(format!("tab:{id}"))
@@ -168,9 +172,7 @@ fn tab_track(s: &Workspace) -> El {
                 }
                 tab_el = tab_el.child(mark);
             }
-            if s.settings.notifications.show_in_tabs
-                && let Some(progress) = tab_progress(&activity)
-            {
+            if let Some(progress) = shown_progress(&s.settings.notifications, &activity) {
                 tab_el = tab_el.child(progress_bar(format!("tab-progress:{id}"), progress, 14.));
             }
             names = names.child(tab_el);

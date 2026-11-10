@@ -13,6 +13,7 @@ use rex_linux::connection::{
         BlockedKind, ProgramState, StatusRecord, TERMINAL as TERMINAL_CREATOR, TerminalProgress,
     },
 };
+use rex_linux::settings::NotificationsConfig;
 use rexrs::api::session;
 use rune::{El, Tx, el, row};
 use std::{borrow::Cow, collections::HashMap};
@@ -194,6 +195,44 @@ pub fn tab_word(
             _ => None,
         },
     }
+}
+
+/// What tabs show of `activity` under the user's channels: a state whose tab channel is off
+/// shows nothing, and progress bars follow Working's.
+pub fn in_tabs(config: &NotificationsConfig, activity: &TabActivity) -> TabActivity {
+    let mut shown = activity.clone();
+    if config.channels(activity.state).is_some_and(|c| !c.tab) {
+        shown.state = ProgramState::Idle;
+        shown.kind = None;
+        shown.msg = None;
+    }
+    if !config.working.tab {
+        shown.progress = None;
+    }
+    shown
+}
+
+/// [`tab_word`] under the user's channels: unseen Done follows Done's tab channel and a bell
+/// shows while any state does.
+pub fn shown_word(
+    config: &NotificationsConfig,
+    activity: &TabActivity,
+    unseen_done: bool,
+    unseen_bell: bool,
+) -> Option<(Cow<'static, str>, u32)> {
+    tab_word(
+        &in_tabs(config, activity),
+        unseen_done && config.done.tab,
+        unseen_bell && config.any_tab(),
+    )
+}
+
+/// [`tab_progress`] under the user's channels.
+pub fn shown_progress(
+    config: &NotificationsConfig,
+    activity: &TabActivity,
+) -> Option<(Option<u8>, u32)> {
+    tab_progress(&in_tabs(config, activity))
 }
 
 fn progress_word(progress: TerminalProgress) -> (Cow<'static, str>, u32) {
@@ -385,15 +424,10 @@ impl Workspace {
         block: String,
         activity: &TabActivity,
     ) {
-        let config = &self.settings.notifications;
-        let wanted = match state {
-            ProgramState::Working => config.working,
-            ProgramState::Blocked => config.blocked,
-            ProgramState::Error => config.error,
-            ProgramState::Done => config.done,
-            ProgramState::Idle => false,
+        let Some(channels) = self.settings.notifications.channels(state) else {
+            return;
         };
-        if !config.system_notifications || !wanted {
+        if !channels.desktop {
             return;
         }
         let word = match state {
@@ -430,8 +464,7 @@ impl Workspace {
         index: usize,
         notices: Vec<rex_linux::connection::activity::DesktopNotice>,
     ) {
-        let config = &self.settings.notifications;
-        if !config.system_notifications || !config.program_messages {
+        if !self.settings.notifications.messages.desktop {
             return;
         }
         for notice in notices {
@@ -634,9 +667,7 @@ impl Workspace {
         host: usize,
         session: &str,
     ) -> Option<(Cow<'static, str>, u32, usize)> {
-        if !self.settings.notifications.show_in_tabs {
-            return None;
-        }
+        let config = &self.settings.notifications;
         let model = &self.hosts[host].model;
         let (fold, needing) = super::activity_list::session_activity(model, session)?;
         let windows = || {
@@ -649,18 +680,15 @@ impl Workspace {
         };
         let done = windows().any(|w| self.unseen_on(host, w));
         let bell = windows().any(|w| self.bell_on(host, w));
-        let (word, tone) = tab_word(&fold, done, bell)?;
+        let (word, tone) = shown_word(config, &fold, done, bell)?;
         Some((word, tone, needing))
     }
 
     /// The progress bar a session's row draws, as a tab's pill does ([`tab_progress`]), or
     /// None when it has none or tab activity is hidden.
     pub fn session_progress(&self, host: usize, session: &str) -> Option<(Option<u8>, u32)> {
-        if !self.settings.notifications.show_in_tabs {
-            return None;
-        }
         let (fold, _) = super::activity_list::session_activity(&self.hosts[host].model, session)?;
-        tab_progress(&fold)
+        shown_progress(&self.settings.notifications, &fold)
     }
 
     pub fn unseen_on(&self, host: usize, window: &str) -> bool {

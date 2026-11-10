@@ -2,8 +2,8 @@
 //! (keyboard session navigation is the Ctrl K switcher, so arrows never switch sessions).
 use super::{
     activity::{
-        TabActivity, activity_word, program_icon, progress_bar, tab_activity, tab_name,
-        tab_progress, tab_word,
+        TabActivity, activity_word, program_icon, progress_bar, shown_progress, shown_word,
+        tab_activity, tab_name,
     },
     activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
     panel::Intent,
@@ -307,15 +307,16 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
     } else {
         row = row.hover(white(0.05));
     }
-    if s.settings.notifications.show_in_tabs
-        && let Some((word, tone)) =
-            tab_word(&activity, s.unseen_on(index, id), s.bell_on(index, id))
-    {
+    let config = &s.settings.notifications;
+    if let Some((word, tone)) = shown_word(
+        config,
+        &activity,
+        s.unseen_on(index, id),
+        s.bell_on(index, id),
+    ) {
         row = row.child(text(word).font(medium(10.5)).color(rgb(tone)));
     }
-    if s.settings.notifications.show_in_tabs
-        && let Some(progress) = tab_progress(&activity)
-    {
+    if let Some(progress) = shown_progress(config, &activity) {
         row = row.child(progress_bar(format!("tab-progress:{id}"), progress, 10.));
     }
     row
