@@ -410,4 +410,17 @@ fn remote_control_switch_is_per_host_and_survives_save() {
     );
     assert!(!rt.state.settings.hosts[0].remote_control);
     assert!(rt.state.settings.hosts[1].remote_control);
+    rt.state.settings.hosts[1].keep_tailscale = true;
+    rt.state.settings.hosts[1].tailscale_name = Some("rex-x".into());
+    let endpoint = rt.state.settings.hosts[1].endpoint.clone();
+    rt.state.edit_host(1, "same".into(), endpoint, None);
+    assert!(rt.state.settings.hosts[1].keep_tailscale);
+    rt.state.edit_host(
+        1,
+        "moved".into(),
+        "unix:///nonexistent/moved.sock".into(),
+        None,
+    );
+    assert!(!rt.state.settings.hosts[1].keep_tailscale);
+    assert_eq!(rt.state.settings.hosts[1].tailscale_name, None);
 }

@@ -38,6 +38,8 @@ fn workspace_hosts(count: usize) -> Workspace {
                     format!("unix:///nonexistent/rex-test-{i}.sock")
                 },
                 remote_control: false,
+                keep_tailscale: false,
+                tailscale_name: None,
                 collapsed: false,
                 shell: None,
             })

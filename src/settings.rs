@@ -13,12 +13,47 @@ pub struct Host {
     pub endpoint: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_control: bool,
+    /// Keep built-in Tailscale on and named whenever this host connects.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_tailscale: bool,
+    /// The Tailscale device name to use; none means the default for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale_name: Option<String>,
     #[serde(default)]
     pub collapsed: bool,
     /// The shell new terminals on this host start (`zsh`, `/bin/zsh`); none uses the server
     /// user's login shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
+}
+
+impl Host {
+    /// Whether this client may control the host's Tailscale: only a local Unix socket.
+    pub fn controls_tailscale(&self) -> bool {
+        self.endpoint.starts_with("unix://")
+    }
+
+    /// The device name to use: the saved one, or this machine's default when none is saved.
+    /// An invalid saved name is an error, never replaced by the default.
+    pub fn tailscale_name(&self) -> Result<String, String> {
+        use crate::connection::tailscale::{default_name, valid_name};
+        match &self.tailscale_name {
+            Some(name) if valid_name(name) => Ok(name.clone()),
+            Some(name) => Err(format!(
+                "The saved device name \u{201c}{name}\u{201d} isn't valid. Edit it to use Tailscale from here."
+            )),
+            None => Ok(default_name(&gethostname::gethostname().to_string_lossy())),
+        }
+    }
+
+    /// The name every automatic path sends: set only when this host opts in and the name is valid.
+    pub fn kept_tailscale(&self) -> Option<String> {
+        if self.controls_tailscale() && self.keep_tailscale {
+            self.tailscale_name().ok()
+        } else {
+            None
+        }
+    }
 }
 
 /// The window corner in-app notices stack in.
@@ -222,6 +257,8 @@ impl Default for Settings {
                     .to_owned(),
                 endpoint: crate::transport::local_endpoint(),
                 remote_control: false,
+                keep_tailscale: false,
+                tailscale_name: None,
                 collapsed: false,
                 shell: None,
             }],
@@ -485,6 +522,51 @@ mod tests {
         assert_eq!(hostname_label("  workstation\n"), "workstation");
         assert_eq!(hostname_label(""), "Rex Linux");
         assert_eq!(hostname_label(" \n "), "Rex Linux");
+    }
+
+    #[test]
+    fn tailscale_opt_in_is_off_by_default_and_round_trips() {
+        let old: Settings =
+            serde_json::from_str(r#"{"hosts":[{"label":"a","endpoint":"unix:///run/rex.sock"}]}"#)
+                .unwrap();
+        assert!(!old.hosts[0].keep_tailscale);
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved["hosts"][0].get("keep_tailscale").is_none());
+        assert!(saved["hosts"][0].get("tailscale_name").is_none());
+        assert!(old.hosts[0].tailscale_name().unwrap().starts_with("rex"));
+        assert!(old.hosts[0].controls_tailscale());
+        assert_eq!(old.hosts[0].kept_tailscale(), None, "off by default");
+        let mut h = old.hosts[0].clone();
+        h.keep_tailscale = true;
+        h.tailscale_name = Some("rex-a".into());
+        assert_eq!(h.kept_tailscale().as_deref(), Some("rex-a"));
+        h.endpoint = "ssh://me@box".into();
+        assert!(!h.controls_tailscale());
+        assert_eq!(h.kept_tailscale(), None);
+    }
+
+    #[test]
+    fn an_invalid_saved_device_name_is_kept_and_stops_automatic_calls() {
+        let dir = std::env::temp_dir().join(format!("rex-ts-{}", std::process::id()));
+        let path = dir.join("workspace.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"hosts":[{"label":"a","endpoint":"unix:///run/rex.sock",
+            "keep_tailscale":true,"tailscale_name":"bad name"}]}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&path).unwrap();
+        assert!(s.hosts[0].keep_tailscale);
+        assert_eq!(s.hosts[0].tailscale_name.as_deref(), Some("bad name"));
+        assert!(
+            s.hosts[0]
+                .tailscale_name()
+                .unwrap_err()
+                .contains("bad name")
+        );
+        assert_eq!(s.hosts[0].kept_tailscale(), None);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

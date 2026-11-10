@@ -234,6 +234,8 @@ impl Workspace {
                 label: rex_linux::settings::endpoint_label(&options.endpoint),
                 endpoint: options.endpoint.clone(),
                 remote_control: false,
+                keep_tailscale: false,
+                tailscale_name: None,
                 collapsed: false,
                 shell: None,
             });
@@ -477,6 +479,8 @@ impl Workspace {
         host.shell = shell;
         if host.endpoint != endpoint {
             host.remote_control = false;
+            host.keep_tailscale = false;
+            host.tailscale_name = None;
             let old = std::mem::replace(&mut host.endpoint, endpoint);
             self.settings.sessions.remove(&old);
             let state = self.spawn_host(index, false);
@@ -2850,6 +2854,8 @@ impl Workspace {
                             label: values[0].clone(),
                             endpoint: values[1].clone(),
                             remote_control: false,
+                            keep_tailscale: false,
+                            tailscale_name: None,
                             collapsed: false,
                             shell: None,
                         },
@@ -2863,6 +2869,8 @@ impl Workspace {
                                 label: values[0].clone(),
                                 endpoint,
                                 remote_control: false,
+                                keep_tailscale: false,
+                                tailscale_name: None,
                                 collapsed: false,
                                 shell: None,
                             },
