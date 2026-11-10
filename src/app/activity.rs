@@ -3,7 +3,7 @@
 //! changes become desktop notifications and which panes finished out of sight.
 use super::{
     activity_list::PaneRef,
-    notify::{Note, NoteTarget, Notifier},
+    notify::{Note, NoteTarget, Notifier, Sound},
     theme::*,
     workspace::{HostId, Workspace},
 };
@@ -306,6 +306,17 @@ fn blocked_word(kind: Option<BlockedKind>) -> &'static str {
     }
 }
 
+/// The freedesktop sound theme name a state's notification plays: attention for a program
+/// that needs you, an error for one that failed, completion for one that finished.
+fn state_sound(state: ProgramState) -> &'static str {
+    match state {
+        ProgramState::Blocked => "message-new-instant",
+        ProgramState::Error => "dialog-error",
+        ProgramState::Done => "complete",
+        ProgramState::Working | ProgramState::Idle => "message",
+    }
+}
+
 fn finished(before: ProgramState, now: ProgramState) -> bool {
     matches!(before, ProgramState::Working | ProgramState::Blocked)
         && matches!(now, ProgramState::Done | ProgramState::Idle)
@@ -484,6 +495,11 @@ impl Workspace {
         if !channels.desktop {
             return;
         }
+        let sound = if channels.sound {
+            Sound::Named(state_sound(state))
+        } else {
+            Sound::Silent
+        };
         let word = match state {
             ProgramState::Blocked => blocked_word(activity.kind),
             ProgramState::Error => "Error",
@@ -509,6 +525,7 @@ impl Workspace {
                 window: Some(window),
                 block: Some(block),
             },
+            sound,
         });
     }
 
@@ -518,9 +535,15 @@ impl Workspace {
         index: usize,
         notices: Vec<rex_linux::connection::activity::DesktopNotice>,
     ) {
-        if !self.settings.notifications.messages.desktop {
+        let messages = self.settings.notifications.messages;
+        if !messages.desktop {
             return;
         }
+        let sound = if messages.sound {
+            Sound::Named("message")
+        } else {
+            Sound::Silent
+        };
         for notice in notices {
             let window = self.hosts[index]
                 .model
@@ -559,6 +582,7 @@ impl Workspace {
                     window,
                     block: Some(notice.block),
                 },
+                sound,
             });
         }
     }

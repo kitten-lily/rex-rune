@@ -26,11 +26,31 @@ pub struct NoteTarget {
     pub block: Option<String>,
 }
 
+/// What a notification asks the server to play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sound {
+    /// A sound from the desktop's sound theme, by its freedesktop name, as `sound-name`.
+    Named(&'static str),
+    /// `suppress-sound`, so a server that plays a sound for every notification stays quiet.
+    Silent,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Note {
     pub summary: String,
     pub body: String,
     pub target: NoteTarget,
+    pub sound: Sound,
+}
+
+/// The hints a notification carries: the desktop entry it belongs to, and its sound.
+pub fn note_hints(sound: Sound) -> HashMap<&'static str, Variant<'static>> {
+    let mut hints = HashMap::from([("desktop-entry", Variant::from(DESKTOP_ID))]);
+    match sound {
+        Sound::Named(name) => hints.insert("sound-name", Variant::from(name)),
+        Sound::Silent => hints.insert("suppress-sound", Variant::from(true)),
+    };
+    hints
 }
 
 enum Message {
@@ -109,7 +129,7 @@ async fn run(notes: flume::Receiver<Message>, handle: AppHandle<Workspace>) -> z
                     }
                     Err(_) => return Ok(()),
                 };
-                let hints = HashMap::from([("desktop-entry", Variant::from(DESKTOP_ID))]);
+                let hints = note_hints(note.sound);
                 // Without a notification service the badge still works, so go on.
                 let id: u32 = match proxy
                     .call(
@@ -169,6 +189,19 @@ async fn run(notes: flume::Receiver<Message>, handle: AppHandle<Workspace>) -> z
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sound_is_named_or_suppressed() {
+        let named = note_hints(Sound::Named("complete"));
+        assert_eq!(named["sound-name"], Variant::from("complete"));
+        assert!(!named.contains_key("suppress-sound"));
+        let silent = note_hints(Sound::Silent);
+        assert_eq!(silent["suppress-sound"], Variant::from(true));
+        assert!(!silent.contains_key("sound-name"));
+        for hints in [named, silent] {
+            assert_eq!(hints["desktop-entry"], Variant::from(DESKTOP_ID));
+        }
+    }
 
     #[test]
     fn the_badge_shows_a_count_and_hides_at_zero() {

@@ -2997,6 +2997,40 @@ fn the_activity_segment_shows_the_unread_count() {
 }
 
 #[test]
+fn each_notification_names_its_sound_or_silences_the_server() {
+    use super::notify::Sound;
+    use rex_linux::connection::activity::{DesktopNotice, ProgramState::*};
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    ws.settings.notifications.blocked.sound = true;
+    ws.settings.notifications.done.sound = true;
+    set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+    set_activity(&mut ws, "block:b", &[("", record(Error, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Working, true))]);
+    set_activity(&mut ws, "block:c", &[("", record(Done, true))]);
+    ws.deliver_program_notices(
+        0,
+        vec![DesktopNotice {
+            session: "s".into(),
+            block: "block:c".into(),
+            title: String::new(),
+            body: "Hi".into(),
+        }],
+    );
+    let sounds: Vec<_> = ws.outbox.iter().map(|n| n.sound).collect();
+    assert_eq!(
+        sounds,
+        [
+            Sound::Named("message-new-instant"),
+            Sound::Silent,
+            Sound::Named("complete"),
+            Sound::Silent,
+        ]
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn tab_pills_carry_the_activity_word_and_hide_it_when_turned_off() {
     use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
     let pill = |show: bool| {
