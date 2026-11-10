@@ -444,6 +444,17 @@ mod tests {
     }
 
     #[test]
+    fn equal_panes_in_one_tab_keep_layout_order() {
+        let mut m = host("dev", vec![tab("t", &["right", "left"])]);
+        for b in ["left", "right"] {
+            report(&mut m, b, ProgramState::Working);
+        }
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        let order: Vec<_> = g[0].rows.iter().map(|r| r.target.block.as_str()).collect();
+        assert_eq!(order, ["right", "left"]);
+    }
+
+    #[test]
     fn quiet_shells_and_idle_agents_stay_out_unless_asked() {
         let mut m = host("dev", vec![tab("t", &["shell", "agent"])]);
         report(&mut m, "agent", ProgramState::Idle);
@@ -500,6 +511,8 @@ mod tests {
         assert_eq!(word(&m), "40%");
         report(&mut m, "b", ProgramState::Idle);
         assert_eq!(word(&m), "Idle");
+        report(&mut m, "b", ProgramState::Done);
+        assert_eq!(word(&m), "Done");
         let mut blocked = record(ProgramState::Blocked);
         blocked.kind = Some(BlockedKind::Permission);
         m.activity
@@ -635,6 +648,11 @@ mod tests {
         let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
         let row = &g[0].rows[0];
         assert_eq!(row.program.as_deref(), Some("Claude Code"), "the text");
+        assert!(
+            row.detail.starts_with("Claude Code · t · dev · h"),
+            "the terminal title stands in for the app: {}",
+            row.detail
+        );
         assert_eq!(row.icon_program(), Some("claude"));
     }
 

@@ -4101,6 +4101,45 @@ fn a_row_on_a_host_that_just_went_offline_says_so_and_sends_nothing() {
 }
 
 #[test]
+fn a_row_whose_session_has_ended_says_the_pane_closed() {
+    let (mut ws, _rx0, rx1) = two_host_panes(&["block:z"]);
+    let mut target = pane_ref(&ws, 1, "block:z");
+    target.session = "gone".into();
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert_eq!(ws.active, 0);
+    assert!(rx1.try_iter().all(|c| !matches!(
+        c,
+        HostCommand::Request { .. } | HostCommand::Navigate { .. }
+    )));
+    assert!(ws.notices.iter().any(|n| n.text.contains("closed")));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn a_row_in_another_hosts_selected_session_switches_host_and_focuses_the_pane() {
+    let (mut ws, _rx0, rx1) = two_host_panes(&["block:y", "block:z"]);
+    ws.hosts[1].model.selected = Some("b".into());
+    let target = pane_ref(&ws, 1, "block:z");
+    ws.open_pane(&target, &mut rune::Tx::default());
+    assert_eq!(ws.active, 1, "only the host changes");
+    let focus: Vec<_> = rx1
+        .try_iter()
+        .filter_map(|c| match c {
+            HostCommand::Request { method, payload } => Some((method, payload)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        focus,
+        [(
+            "session.focus_block".to_owned(),
+            serde_json::json!({"session_id": "b", "block_id": "block:z"})
+        )]
+    );
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn a_removed_host_is_not_targeted() {
     let (mut ws, rx0, rx1) = two_host_panes(&["block:z"]);
     let mut target = pane_ref(&ws, 1, "block:z");
@@ -4309,6 +4348,38 @@ fn activity_mode_prefetches_every_session() {
 }
 
 #[test]
+fn activity_mode_prefetches_nothing_from_a_disconnected_host() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.settings.notifications.show_in_tabs = false;
+    ws.show_activity();
+    assert_eq!(latest(&rx), Some(vec!["s".to_owned()]));
+    ws.hosts[0].model.connected = false;
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx), Some(vec![]), "its views would be stale");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn sidebar_tabs_still_prefetch_an_expanded_host_while_it_reconnects() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.settings.notifications.show_in_tabs = false;
+    ws.set_vertical_tabs(true);
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx), Some(vec!["s".to_owned()]));
+    ws.hosts[0].model.connected = false;
+    ws.sync_prefetch();
+    assert_eq!(
+        latest(&rx),
+        None,
+        "the tabs it lists keep their views, connected or not"
+    );
+    ws.settings.hosts[0].collapsed = true;
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx), Some(vec![]), "a collapsed host lists none");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn commands_offer_activity() {
     use rex_linux::settings::SidebarMode;
     let mut ws = workspace();
@@ -4446,6 +4517,56 @@ fn the_switcher_names_session_activity() {
     );
     assert_eq!(detail(&ws, "one-label").as_deref(), Some("Needs input"));
     assert_eq!(detail(&ws, "s-label").as_deref(), Some(""));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn the_full_switcher_names_the_host_beside_session_activity() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "other", 2);
+    ws.picker(false);
+    // Commands lists sessions once there is a query.
+    ws.panel.as_mut().unwrap().inputs[0] = rune::TextEdit::new("label");
+    let detail = |label: &str| {
+        ws.entries()
+            .into_iter()
+            .find(|e| e.label == label)
+            .map(|e| e.detail)
+    };
+    assert_eq!(
+        detail("other-label").as_deref(),
+        Some("test-0 · Needs input · 2")
+    );
+    assert_eq!(detail("s-label").as_deref(), Some("test-0 · Session"));
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
+fn one_pane_needing_you_shows_its_word_but_no_count() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    blocked_session(&mut ws, "one", 1);
+    assert_eq!(
+        ws.session_word(0, "one")
+            .map(|(w, _, n)| (w.into_owned(), n)),
+        Some(("Needs input".to_owned(), 1))
+    );
+    ws.toggle_sidebar();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    assert!(has(&rt, "session-word:0:one"));
+    assert!(!has(&rt, "session-count:0:one"), "a count starts at two");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn an_unseen_bell_reaches_the_session_row() {
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    assert!(ws.session_word(0, "s").is_none());
+    let id = ws.hosts[0].id;
+    ws.unseen_bells.insert((id, "split".into()));
+    let (word, _, needing) = ws.session_word(0, "s").expect("a word");
+    assert_eq!((word.as_ref(), needing), ("Bell", 0));
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
