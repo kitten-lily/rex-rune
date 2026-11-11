@@ -142,7 +142,6 @@ pub static GRUVBOX_DARK: Palette = Palette {
 
 impl Palette {
     /// A palette from derived tokens. The card is the ground.
-    #[cfg_attr(not(rex_dracula_pro), allow(dead_code))]
     pub fn from_tokens(t: &rex_linux::dracula_pro::derive::ChromeTokens) -> Palette {
         Palette {
             ground: t.ground,

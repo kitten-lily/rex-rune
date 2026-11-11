@@ -304,8 +304,11 @@ fn version_info_names_local_themes() {
     let ws = workspace();
     let info = about::version_info(&ws);
     assert!(info.contains("Includes local Dracula Pro themes"), "{info}");
-    assert!(
-        info.contains("\nOS: ") && info.lines().nth(5) == Some("Includes local Dracula Pro themes"),
+    let mut lines = info.lines().skip_while(|l| !l.starts_with("OS: "));
+    assert!(lines.next().is_some(), "an OS line: {info}");
+    assert_eq!(
+        lines.next(),
+        Some("Includes local Dracula Pro themes"),
         "right after the OS line: {info}"
     );
     let rt = about(ws);
