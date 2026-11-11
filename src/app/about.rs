@@ -83,14 +83,22 @@ fn format_info(
     info
 }
 
+/// Said in a build that includes themes from a local Dracula Pro checkout.
+#[cfg(rex_dracula_pro)]
+const LOCAL_THEMES: &str = "Includes local Dracula Pro themes";
+
 /// The client's and the active server's versions, for a bug report.
 pub fn version_info(s: &Workspace) -> String {
+    let os = format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH);
+    // The marker follows the OS line, ahead of any server lines.
+    #[cfg(rex_dracula_pro)]
+    let os = format!("{os}\n{LOCAL_THEMES}");
     format_info(
         VERSION,
         COMMIT,
         BUILD_DATE,
         rex_linux::BUILD_CHANNEL,
-        &format!("{} ({})", std::env::consts::OS, std::env::consts::ARCH),
+        &os,
         Server::of(s.model()).as_ref(),
     )
 }
@@ -399,9 +407,13 @@ pub fn section(s: &Workspace) -> El {
             }),
         )
     });
+    #[cfg_attr(not(rex_dracula_pro), allow(unused_mut))]
+    let mut build_section = vec![card(build)];
+    #[cfg(rex_dracula_pro)]
+    build_section.push(settings_kit::footnote(LOCAL_THEMES).key("about-local-themes"));
     page([
         header(s),
-        settings_kit::section("", [card(build)]),
+        settings_kit::section("", build_section),
         settings_kit::section("Project", [card(links)]),
     ])
 }

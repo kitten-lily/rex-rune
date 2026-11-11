@@ -749,11 +749,12 @@ impl Workspace {
             return self.discovery_entries(&lower);
         }
         if matches!(panel.kind, PanelKind::Chromes) {
-            return ChromeTheme::ALL
+            let shown = self.settings.chrome_theme.effective();
+            return ChromeTheme::all()
                 .into_iter()
                 .map(|chrome| {
                     let mut e = Entry::new(chrome.name(), "", "", Intent::Chrome(chrome));
-                    e.current = chrome == self.settings.chrome_theme;
+                    e.current = chrome == shown;
                     e
                 })
                 .collect();

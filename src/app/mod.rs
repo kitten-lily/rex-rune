@@ -7,6 +7,7 @@ mod bindings;
 mod commands;
 mod dialogs;
 mod discover;
+mod dracula_pro;
 mod find;
 mod font_size;
 mod fonts;

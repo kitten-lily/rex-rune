@@ -297,3 +297,18 @@ fn every_page_prints_the_client_version_one_way() {
     assert!(about::version_info(&rt.state).starts_with(&format!("Rex Linux {version}\n")));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
+
+#[cfg(rex_dracula_pro)]
+#[test]
+fn version_info_names_local_themes() {
+    let ws = workspace();
+    let info = about::version_info(&ws);
+    assert!(info.contains("Includes local Dracula Pro themes"), "{info}");
+    assert!(
+        info.contains("\nOS: ") && info.lines().nth(5) == Some("Includes local Dracula Pro themes"),
+        "right after the OS line: {info}"
+    );
+    let rt = about(ws);
+    assert!(shows(&rt, "Includes local Dracula Pro themes"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}

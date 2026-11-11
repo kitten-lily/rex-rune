@@ -4734,12 +4734,10 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
         .collect();
     assert_eq!(
         rows,
-        [
-            ("Midnight".to_owned(), true),
-            ("Rosé Pine".to_owned(), false),
-            ("Rosé Pine Moon".to_owned(), false),
-            ("Gruvbox Dark".to_owned(), false),
-        ]
+        ChromeTheme::all()
+            .into_iter()
+            .map(|c| (c.name().to_owned(), c == ChromeTheme::Midnight))
+            .collect::<Vec<_>>()
     );
     let rose = rt
         .elements()
@@ -4813,6 +4811,68 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
     let again = relaunch(&rt.state);
     assert_eq!(again.settings.chrome_theme, ChromeTheme::RosePineMoon);
     assert_eq!(again.term_colors().background, 0x232136);
+    rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight), tx));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_routine_save_keeps_an_unavailable_chrome() {
+    use rex_linux::settings::ChromeTheme;
+    let ws = workspace();
+    std::fs::write(
+        &ws.settings_path,
+        r#"{"chrome_theme": "not_a_real_chrome"}"#,
+    )
+    .unwrap();
+    let mut s = relaunch(&ws);
+    assert!(matches!(
+        s.settings.chrome_theme,
+        ChromeTheme::Unavailable(_)
+    ));
+    assert_eq!(
+        super::theme::palette_of(s.settings.chrome_theme).ground,
+        0x001528
+    );
+    s.save();
+    let saved = std::fs::read_to_string(&s.settings_path).unwrap();
+    assert!(saved.contains("not_a_real_chrome"), "{saved}");
+    s.perform(Intent::ChooseChrome, &mut rune::Tx::default());
+    let current: Vec<_> = s
+        .entries()
+        .into_iter()
+        .filter(|e| e.current)
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(current, ["Midnight"]);
+    std::fs::remove_file(&s.settings_path).ok();
+}
+
+#[cfg(rex_dracula_pro_chrome)]
+#[test]
+fn a_dracula_pro_chrome_applies_and_brings_its_terminal_theme() {
+    use rex_linux::{settings::ChromeTheme, terminal_theme::paired};
+    let chrome = ChromeTheme::all()
+        .into_iter()
+        .find(|c| matches!(c, ChromeTheme::Generated(_)))
+        .expect("a generated chrome");
+    let ChromeTheme::Generated(i) = chrome else {
+        unreachable!()
+    };
+    let tokens = rex_linux::dracula_pro::THEMES[i as usize].chrome.unwrap();
+    let mut ws = workspace_hosts(1);
+    let host = capture_host(&mut ws, 0);
+    let mut rt = runtime(ws);
+    rt.update(|s, tx| s.perform(Intent::Chrome(chrome), tx));
+    rt.frame(1. / 60.);
+    assert_eq!(rt.state.settings.chrome_theme, chrome);
+    assert_eq!(super::theme::kit().c.page, super::theme::rgb(tokens.ground));
+    let theme = (paired(chrome).theme)();
+    assert_eq!(theme.background, Some(tokens.ground));
+    assert_eq!(rt.state.term_theme, Some(theme.clone()));
+    assert_eq!(declared(&host), [Some(theme.args())]);
+    let again = relaunch(&rt.state);
+    assert_eq!(again.settings.chrome_theme, chrome);
+    assert_eq!(again.term_colors().background, tokens.ground);
     rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight), tx));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

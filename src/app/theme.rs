@@ -140,12 +140,33 @@ pub static GRUVBOX_DARK: Palette = Palette {
     kit: OnceLock::new(),
 };
 
+impl Palette {
+    /// A palette from derived tokens. The card is the ground.
+    #[cfg_attr(not(rex_dracula_pro), allow(dead_code))]
+    pub fn from_tokens(t: &rex_linux::dracula_pro::derive::ChromeTokens) -> Palette {
+        Palette {
+            ground: t.ground,
+            card: t.ground,
+            popover: t.popover,
+            ink: t.ink,
+            muted: t.muted,
+            accent: t.accent,
+            accent2: t.accent2,
+            live: t.live,
+            warning: t.warning,
+            danger: t.danger,
+            on_accent: t.on_accent,
+            terminal_selection: t.terminal_selection,
+            kit: OnceLock::new(),
+        }
+    }
+}
+
 /// The palette a chrome theme draws in.
 pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
     match chrome {
-        ChromeTheme::Midnight | ChromeTheme::Generated(_) | ChromeTheme::Unavailable(_) => {
-            &MIDNIGHT
-        }
+        ChromeTheme::Midnight | ChromeTheme::Unavailable(_) => &MIDNIGHT,
+        ChromeTheme::Generated(i) => super::dracula_pro::palette(i),
         ChromeTheme::RosePine => &ROSE_PINE,
         ChromeTheme::RosePineMoon => &ROSE_PINE_MOON,
         ChromeTheme::GruvboxDark => &GRUVBOX_DARK,
@@ -648,9 +669,48 @@ mod tests {
     }
 
     #[test]
+    fn from_tokens_copies_every_role() {
+        use rex_linux::dracula_pro::derive::ChromeTokens;
+        let t = ChromeTokens {
+            ground: 0x010203,
+            popover: 0x111213,
+            ink: 0x212223,
+            muted: 0x313233,
+            accent: 0x414243,
+            accent2: 0x515253,
+            live: 0x616263,
+            warning: 0x717273,
+            danger: 0x818283,
+            on_accent: 0x919293,
+            terminal_selection: 0xa1a2a3,
+        };
+        let p = Palette::from_tokens(&t);
+        assert_eq!(
+            [
+                p.ground,
+                p.card,
+                p.popover,
+                p.ink,
+                p.muted,
+                p.accent,
+                p.accent2,
+                p.live,
+                p.warning,
+                p.danger,
+                p.on_accent,
+                p.terminal_selection
+            ],
+            [
+                0x010203, 0x010203, 0x111213, 0x212223, 0x313233, 0x414243, 0x515253, 0x616263,
+                0x717273, 0x818283, 0x919293, 0xa1a2a3
+            ]
+        );
+    }
+
+    #[test]
     fn every_palette_is_legible_and_pairs_with_its_terminal_theme() {
         assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 1e-9);
-        for chrome in ChromeTheme::ALL {
+        for chrome in ChromeTheme::all() {
             let p = palette_of(chrome);
             let name = chrome.name();
             assert!(contrast(p.muted, p.card) >= 4.5, "{name}: muted on card");
