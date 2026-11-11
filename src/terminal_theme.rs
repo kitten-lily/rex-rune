@@ -90,6 +90,11 @@ pub fn builtin(id: &str) -> Option<&'static Builtin> {
 
 /// The built-in theme paired with `chrome`: its background is the chrome's ground.
 pub fn paired(chrome: ChromeTheme) -> &'static Builtin {
+    // Generated palettes use Midnight's until they have a pairing of their own.
+    let chrome = match chrome.effective() {
+        ChromeTheme::Generated(_) => ChromeTheme::Midnight,
+        other => other,
+    };
     BUILTINS
         .iter()
         .find(|b| b.chrome == chrome)

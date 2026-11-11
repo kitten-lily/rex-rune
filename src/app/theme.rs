@@ -143,7 +143,9 @@ pub static GRUVBOX_DARK: Palette = Palette {
 /// The palette a chrome theme draws in.
 pub fn palette_of(chrome: ChromeTheme) -> &'static Palette {
     match chrome {
-        ChromeTheme::Midnight => &MIDNIGHT,
+        ChromeTheme::Midnight | ChromeTheme::Generated(_) | ChromeTheme::Unavailable(_) => {
+            &MIDNIGHT
+        }
         ChromeTheme::RosePine => &ROSE_PINE,
         ChromeTheme::RosePineMoon => &ROSE_PINE_MOON,
         ChromeTheme::GruvboxDark => &GRUVBOX_DARK,

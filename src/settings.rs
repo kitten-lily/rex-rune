@@ -369,30 +369,106 @@ impl Default for UpdatesConfig {
     }
 }
 
-/// The palette the chrome is drawn in. A value this version doesn't know reads as Midnight.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The palette the chrome is drawn in. A value this version doesn't know is kept as
+/// `Unavailable`, drawn as Midnight and saved back unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ChromeTheme {
     RosePine,
     RosePineMoon,
     GruvboxDark,
     #[default]
-    #[serde(other)]
     Midnight,
+    /// An index into `dracula_pro::THEMES`, a theme with a chrome palette.
+    Generated(u8),
+    /// A saved id this build can't draw (an older or newer version's, or a generated theme
+    /// that isn't in this build).
+    Unavailable(&'static str),
+}
+
+// By hand: the derive would tie `'de` to `'static` because of `Unavailable`'s string.
+impl Serialize for ChromeTheme {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        String::from(*self).serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for ChromeTheme {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// Leaks each distinct string once, so `ChromeTheme` stays `Copy`.
+fn intern(s: String) -> &'static str {
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(&known) = seen.iter().find(|&&k| k == s) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(s.into_boxed_str());
+    seen.push(leaked);
+    leaked
+}
+
+impl From<String> for ChromeTheme {
+    fn from(value: String) -> Self {
+        match value.as_str() {
+            "midnight" => Self::Midnight,
+            "rose_pine" => Self::RosePine,
+            "rose_pine_moon" => Self::RosePineMoon,
+            "gruvbox_dark" => Self::GruvboxDark,
+            _ => match crate::dracula_pro::chrome_index(&value) {
+                Some(i) => Self::Generated(i),
+                None => Self::Unavailable(intern(value)),
+            },
+        }
+    }
+}
+impl From<ChromeTheme> for String {
+    fn from(chrome: ChromeTheme) -> Self {
+        match chrome {
+            ChromeTheme::Midnight => "midnight".into(),
+            ChromeTheme::RosePine => "rose_pine".into(),
+            ChromeTheme::RosePineMoon => "rose_pine_moon".into(),
+            ChromeTheme::GruvboxDark => "gruvbox_dark".into(),
+            ChromeTheme::Generated(i) => {
+                crate::dracula_pro::THEMES[i as usize].id.replace('-', "_")
+            }
+            ChromeTheme::Unavailable(s) => s.into(),
+        }
+    }
 }
 impl ChromeTheme {
+    /// The four palettes that always ship.
     pub const ALL: [ChromeTheme; 4] = [
         ChromeTheme::Midnight,
         ChromeTheme::RosePine,
         ChromeTheme::RosePineMoon,
         ChromeTheme::GruvboxDark,
     ];
+    /// Every palette this build can draw: the shipped four, then each generated theme that
+    /// has a chrome.
+    pub fn all() -> Vec<ChromeTheme> {
+        let generated = crate::dracula_pro::THEMES
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.chrome.is_some())
+            .map(|(i, _)| ChromeTheme::Generated(i as u8));
+        Self::ALL.into_iter().chain(generated).collect()
+    }
+    /// What to draw: an unavailable palette draws as Midnight.
+    pub fn effective(self) -> ChromeTheme {
+        match self {
+            ChromeTheme::Unavailable(_) => ChromeTheme::Midnight,
+            other => other,
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
-            ChromeTheme::Midnight => "Midnight",
+            ChromeTheme::Midnight | ChromeTheme::Unavailable(_) => "Midnight",
             ChromeTheme::RosePine => "Rosé Pine",
             ChromeTheme::RosePineMoon => "Rosé Pine Moon",
             ChromeTheme::GruvboxDark => "Gruvbox Dark",
+            ChromeTheme::Generated(i) => crate::dracula_pro::THEMES[i as usize].name,
         }
     }
 }
@@ -1109,7 +1185,7 @@ mod tests {
     }
 
     #[test]
-    fn the_chrome_theme_round_trips_and_unknown_values_are_midnight() {
+    fn the_chrome_theme_round_trips_and_unknown_values_draw_as_midnight() {
         let old: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.chrome_theme, ChromeTheme::Midnight);
         for (chrome, saved) in [
@@ -1132,7 +1208,46 @@ mod tests {
         let s: Settings =
             serde_json::from_value(serde_json::json!({ "chrome_theme": "solarized_light" }))
                 .unwrap();
-        assert_eq!(s.chrome_theme, ChromeTheme::Midnight);
+        assert_eq!(s.chrome_theme, ChromeTheme::Unavailable("solarized_light"));
+        assert_eq!(s.chrome_theme.effective(), ChromeTheme::Midnight);
+        assert_eq!(s.chrome_theme.name(), "Midnight");
+    }
+
+    #[test]
+    fn an_unknown_chrome_survives_a_save() {
+        let path =
+            std::env::temp_dir().join(format!("rex-unknown-chrome-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"chrome_theme":"not_a_real_chrome"}"#).unwrap();
+        let loaded = Settings::load(&path).unwrap();
+        assert_eq!(
+            loaded.chrome_theme,
+            ChromeTheme::Unavailable("not_a_real_chrome")
+        );
+        loaded.save(&path).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(json["chrome_theme"], "not_a_real_chrome");
+    }
+
+    #[test]
+    fn generated_chromes_round_trip() {
+        let all = ChromeTheme::all();
+        // The shipped four plus every generated theme with a chrome (six under the fixture).
+        let generated = crate::dracula_pro::THEMES
+            .iter()
+            .filter(|t| t.chrome.is_some())
+            .count();
+        assert_eq!(all.len(), 4 + generated);
+        for chrome in all {
+            let json = serde_json::to_value(chrome).unwrap();
+            let back: ChromeTheme = serde_json::from_value(json).unwrap();
+            assert_eq!(back, chrome);
+            if let ChromeTheme::Generated(i) = chrome {
+                assert_eq!(chrome.name(), crate::dracula_pro::THEMES[i as usize].name);
+                assert_eq!(chrome.effective(), chrome);
+            }
+        }
     }
 
     #[test]
