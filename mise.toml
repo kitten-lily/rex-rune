@@ -2,22 +2,14 @@
 rust = { version = "1.96.1", components = "clippy,rustfmt" }
 zig = "0.17.1"
 
+[tasks.fetch-dracula-pro]
+description = "Fetch Dracula Pro Ghostty themes (licensees; uses your GitHub credentials)"
+run = "bash scripts/fetch-dracula-pro.sh"
+
 [tasks.build]
 description = "Build the release application"
+depends = ["fetch-dracula-pro"]
 run = "cargo build --locked --release --bin rex-linux && touch target/release/.rex-linux-build.stamp"
-sources = [
-    "Cargo.toml",
-    "Cargo.lock",
-    "src/**/*",
-    "resources/icons/256x256/apps/dev.shuv.rex-linux.png",
-    "vendor/rune/crates/{rune,rune-motion,rune-staging,rune-taffy,procwatch}/Cargo.toml",
-    "vendor/rune/crates/{rune,rune-motion,rune-staging,rune-taffy,procwatch}/src/**/*",
-    "vendor/rune/crates/rune/assets/**/*",
-    "vendor/rexrs/Cargo.toml",
-    "vendor/rexrs/src/**/*",
-    "vendor/ghostty-vt/**/*",
-]
-outputs = ["target/release/rex-linux", "target/release/.rex-linux-build.stamp"]
 
 [tasks.install]
 description = "Build Rex Linux and install it with a launcher for the current user"
@@ -51,4 +43,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-features
 cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
+python3 scripts/test-fetch-dracula-pro.py
+REX_DRACULA_PRO_DIR=$PWD/tests/fixtures/dracula-pro cargo clippy --locked --all-targets --all-features -- -D warnings
+REX_DRACULA_PRO_DIR=$PWD/tests/fixtures/dracula-pro cargo test --locked --all-features
 """
