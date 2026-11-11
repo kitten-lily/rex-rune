@@ -1,6 +1,6 @@
 # Design system
 
-Rex Linux draws calm, dark chrome around terminals that the server owns. Chrome palettes are token sets defined in `src/app/theme.rs`, which is the source of truth, and chosen at runtime (Settings → Interface → Theme): Midnight, the default, Rosé Pine, Rosé Pine Moon and Gruvbox Dark. Their tokens are listed below (update both together). Each palette pairs with a built-in terminal theme whose background equals the chrome's ground, so a single pane reads as one surface with the toolbar. Palettes are dark only and change colours only; fills, borders, motion and layout are shared.
+Rex Linux draws calm, dark chrome around terminals that the server owns. Chrome palettes are token sets defined in `src/app/theme.rs`, which is the source of truth, and chosen at runtime (Settings → Interface → Theme): Midnight, the default, Rosé Pine, Rosé Pine Moon and Gruvbox Dark. Their tokens are listed below (update both together). Each palette pairs with a built-in terminal theme whose background equals the chrome's ground, so a single pane reads as one surface with the toolbar. Palettes are dark only (light Dracula Pro themes, Alucard, are terminal-only) and change colours only; fills, borders, motion and layout are shared.
 
 ## Principles
 
@@ -47,7 +47,9 @@ Progress bars under tab pills and pane names use `ACCENT` (working), `WARNING` (
 
 The paired terminal themes are Midnight (its navy behind Rex's default text), Rosé Pine and Rosé Pine Moon as their Ghostty themes draw them, and Gruvbox Dark's background, text, cursor and 16-colour palette. In every palette `MUTED` on `CARD` and `INK` on `POPOVER` meet WCAG AA (4.5:1); `WARNING` and `DANGER` are at least 3:1 on both surfaces (Gruvbox Dark's red is the lowest, 4.3:1 on its ground and 3.4:1 on popovers) and always carry a word. Switching palettes is instant: colours change in one frame, with no crossfade.
 
-Interaction fills are translucent white over the surface: hover 7%, pressed 11%; borders 6–20% white (focus uses `ACCENT`). Trouble states always carry a word, never colour alone; healthy states show nothing. There is no light chrome palette.
+Fork-only: a build that finds a licensee's local Dracula Pro checkout adds seven chrome palettes (every dark theme) and eight terminal themes. The chrome tokens come from each theme's Ghostty file: `CARD` is its background; `INK` its foreground; `POPOVER` is `INK` mixed over `CARD` at 6%; `MUTED` is the first step, at 5% increments, of mixing `INK` toward the cursor colour that meets 4.5:1 on `CARD`; `ACCENT`, `ACCENT2`, `LIVE`, `WARNING` and `DANGER` are palette slots 4, 5, 2, 3 and 1; `ON_ACCENT` is `CARD`; `TERMINAL_SELECTION` is the selection background. A theme whose derived tokens fail the contrast or hue checks (`INK` 4.5:1 on `POPOVER`, `WARNING` and `DANGER` 3:1 on both surfaces and at least 30 degrees apart) gets no chrome palette, and a light theme gets none by design. No Dracula Pro colour value appears in this repository.
+
+Interaction fills are translucent white over the surface: hover 7%, pressed 11%; borders 6–20% white (focus uses `ACCENT`). Trouble states always carry a word, never colour alone; healthy states show nothing. There is no light chrome palette, not even for Alucard.
 
 ## Typography
 

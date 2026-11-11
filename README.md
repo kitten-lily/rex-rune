@@ -164,6 +164,12 @@ The repository is also a Nix flake: `nix build .#rex-linux` builds a package wit
 
 `Cargo.lock` pins the dependency graph. Server connections use Rustls with the system trust roots; release metadata checks use Rustls with WebPKI roots and verify Ed25519 Minisign signatures against the embedded release public keys. The workspace also builds three probes (`rex-probe`, `rex-workspace-probe`, `rex-update-probe`) that do not need the UI; use `--no-default-features` to build only those.
 
+### Optional: Dracula Pro themes (licensees only)
+
+If you hold a Dracula Pro licence, a local build can include the private Ghostty themes as built-in terminal themes and chrome palettes (Alucard is terminal-only). `mise run build` first fetches them with your own GitHub credentials; `mise run fetch-dracula-pro` fetches them on its own. The checkout is stored in `${XDG_DATA_HOME:-$HOME/.local/share}/rex-linux/dracula-pro-ghostty`, or in `REX_DRACULA_PRO_DIR` if set. `REX_DRACULA_PRO=0` turns off both the fetch and the themes. A failed fetch only warns, and the build uses the existing checkout or has no themes.
+
+A plain `cargo build` never fetches. If neither the checkout directory nor its parent exists, it does not notice a later fetch until `build.rs` reruns for another reason; the fetch script always creates the parent. A saved Dracula Pro choice is kept, and draws as Midnight or Follow chrome, on a build without the themes. A build with them says "Includes local Dracula Pro themes" in About; the packaging and screenshot scripts refuse such a binary, and the release workflow and Nix package build with `REX_DRACULA_PRO=0`. The themes stay on your machine and are never in releases.
+
 ## Run
 
 ```sh
