@@ -180,7 +180,17 @@ pub fn is_light(color: u32) -> bool {
     (299 * r + 587 * g + 114 * b) / 1000 > 128
 }
 
-/// The chrome palette for a dark source, or why it can't have one.
+/// White over a keycap's surface, white over a selected row's fill, and a selected row's
+/// tint over the popover: copies of the app's `KEYCAP_FILL`, `KEYCAP_LIT` and
+/// `SELECTION_FILL` (`src/app/theme.rs`), which this build-time module can't import. A test
+/// in `src/app/dracula_pro.rs` keeps them equal.
+pub const KEYCAP_FILL: f32 = 0.07;
+pub const KEYCAP_LIT: f32 = 0.12;
+pub const SELECTION_FILL: f32 = 0.18;
+
+/// The chrome palette for a dark source, or why it can't have one. It applies every
+/// legibility rule the app's palette test checks, so a theme that would fail one gets no
+/// chrome (and stays terminal-only) instead of failing the app's tests.
 pub fn chrome(s: &Source) -> Result<ChromeTokens, String> {
     if is_light(s.background) {
         return Err("light background".into());
@@ -205,12 +215,35 @@ pub fn chrome(s: &Source) -> Result<ChromeTokens, String> {
     if gap.min(360. - gap) < 30. {
         return Err("warning and danger hues too close".into());
     }
+    // Keycaps, on a popover's rows and on the sidebar's search chip (itself 8% white over
+    // the ground).
+    let keys = mix(ink, muted, 0.5);
+    for (surface, under, lift) in [("popover", popover, 0.), ("sidebar", ground, 0.08)] {
+        if contrast(keys, mix(0xffffff, under, KEYCAP_FILL + lift)) < 4.5 {
+            return Err(format!("keycaps too faint on the {surface}"));
+        }
+    }
+    // A selected row keeps its label and keycaps in ink on either tint, and its outline
+    // stands clear of the popover.
+    let accent = s.palette[4];
+    for (kind, tone) in [("selection", accent), ("destructive selection", danger)] {
+        let fill = mix(tone, popover, SELECTION_FILL);
+        if contrast(ink, fill) < 4.5 {
+            return Err(format!("foreground too faint on the {kind}"));
+        }
+        if contrast(ink, mix(0xffffff, fill, KEYCAP_LIT)) < 4.5 {
+            return Err(format!("keycaps too faint on the {kind}"));
+        }
+        if contrast(tone, popover) < 3. {
+            return Err(format!("{kind} outline too faint"));
+        }
+    }
     Ok(ChromeTokens {
         ground,
         popover,
         ink,
         muted,
-        accent: s.palette[4],
+        accent,
         accent2: s.palette[5],
         live: s.palette[2],
         warning,
@@ -320,6 +353,32 @@ palette = 15=#f8f8f8
             ..dark()
         };
         assert!(chrome(&light).is_err());
+    }
+
+    /// Each of the app's legibility rules for keycaps and selected rows, failed on its own.
+    #[test]
+    fn chrome_rejects_faint_keycaps_and_selection_outlines() {
+        let with = |foreground, accent| {
+            let mut s = Source {
+                foreground,
+                ..dark()
+            };
+            s.palette[4] = accent;
+            chrome(&s).map(|_| ()).unwrap_err()
+        };
+        assert_eq!(with(0xa0a0a0, 0x8060ff), "keycaps too faint on the popover");
+        assert_eq!(with(0xb0b0b0, 0x8060ff), "keycaps too faint on the sidebar");
+        assert_eq!(
+            with(0xc0c0c0, 0xffffff),
+            "keycaps too faint on the selection"
+        );
+        assert_eq!(with(0xc0c0c0, 0x202030), "selection outline too faint");
+        let mut ok = Source {
+            foreground: 0xc0c0c0,
+            ..dark()
+        };
+        ok.palette[4] = 0x8060ff;
+        assert!(chrome(&ok).is_ok());
     }
 
     #[test]
