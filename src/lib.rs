@@ -13,6 +13,7 @@ pub fn format_version(version: &str) -> String {
 
 pub mod connection;
 pub mod download;
+pub mod dracula_pro;
 pub mod keymap;
 pub mod layout;
 pub mod links;
