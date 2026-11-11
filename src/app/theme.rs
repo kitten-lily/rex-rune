@@ -747,16 +747,24 @@ mod tests {
                 gap.min(360. - gap) >= 30.,
                 "{name}: warning and danger differ in hue"
             );
-            assert_eq!(p.card, p.ground, "{name}: one surface");
+            assert!(
+                p.card == p.ground,
+                "{name}: card and ground are one surface"
+            );
             let paired = rex_linux::terminal_theme::paired(chrome);
-            assert_eq!(
-                (paired.theme)().background,
-                Some(p.ground),
+            assert!(
+                (paired.theme)().background == Some(p.ground),
                 "{name}: the paired theme sits on the ground"
             );
             set_palette(p);
-            assert_eq!(kit().c.page, rgb(p.ground), "{name}: its own kit");
-            assert_eq!(kit().c.text_base, rgb(p.ink));
+            assert!(
+                kit().c.page == rgb(p.ground),
+                "{name}: the kit's page is the palette's ground"
+            );
+            assert!(
+                kit().c.text_base == rgb(p.ink),
+                "{name}: the kit's text is the palette's ink"
+            );
         }
         set_palette(&MIDNIGHT);
         assert_eq!(kit().c.page, rgb(0x001528), "Midnight's kit is unchanged");

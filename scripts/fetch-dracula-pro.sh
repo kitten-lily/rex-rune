@@ -7,6 +7,10 @@
 # REX_DRACULA_PRO=0        skip (also disables theme generation in build.rs)
 # REX_DRACULA_PRO_DIR      checkout location (same default as build.rs)
 # REX_DRACULA_PRO_URL      remote (default https://github.com/dracula-pro/ghostty.git)
+#
+# --rev                    print the checkout's HEAD commit (nothing without a checkout, or
+#                          with REX_DRACULA_PRO=0) and exit without fetching. mise passes it to
+#                          cargo as REX_DRACULA_PRO_REV so a first fetch reruns build.rs.
 
 [ "${REX_DRACULA_PRO:-}" = "0" ] && exit 0
 
@@ -22,6 +26,13 @@ if [ -z "$dir" ]; then
         exit 0
     fi
     dir=$data/rex-linux/dracula-pro-ghostty
+fi
+# A trailing slash would put the temporary clone inside the directory.
+while [ "${dir%/}" != "$dir" ] && [ "$dir" != "/" ]; do dir=${dir%/}; done
+
+if [ "${1:-}" = "--rev" ]; then
+    [ -d "$dir/.git" ] && git -C "$dir" rev-parse HEAD 2>/dev/null
+    exit 0
 fi
 
 # $1 is the reason; the build goes on with the checkout if there is one.

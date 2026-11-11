@@ -17,9 +17,10 @@ def refuse_local_themes(data: bytes, what: str) -> None:
 
 def refuse_in_tarball(path: Path) -> None:
     with tarfile.open(path) as archive:
-        for member in archive:
-            if member.isfile() and fnmatch(member.name, "*/bin/rex-linux"):
-                data = archive.extractfile(member).read()
-                refuse_local_themes(data, f"{path}:{member.name}")
-                return
-    raise SystemExit(f"{path} has no */bin/rex-linux member to check for local Dracula Pro themes")
+        members = [m for m in archive if m.isfile() and fnmatch(m.name, "*/bin/rex-linux")]
+        if not members:
+            raise SystemExit(f"{path} has no */bin/rex-linux member to check for local Dracula Pro themes")
+        if len(members) > 1:
+            raise SystemExit(f"{path} has {len(members)} */bin/rex-linux members; extraction keeps only the last")
+        member = members[0]
+        refuse_local_themes(archive.extractfile(member).read(), f"{path}:{member.name}")

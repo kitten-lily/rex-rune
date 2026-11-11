@@ -9,7 +9,7 @@ run = "bash scripts/fetch-dracula-pro.sh"
 [tasks.build]
 description = "Build the release application"
 depends = ["fetch-dracula-pro"]
-run = "cargo build --locked --release --bin rex-linux && touch target/release/.rex-linux-build.stamp"
+run = "REX_DRACULA_PRO_REV=\"$(bash scripts/fetch-dracula-pro.sh --rev)\" cargo build --locked --release --bin rex-linux && touch target/release/.rex-linux-build.stamp"
 
 [tasks.install]
 description = "Build Rex Linux and install it with a launcher for the current user"
@@ -40,8 +40,8 @@ run = "cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features"
 description = "Run all repository checks"
 run = """
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-features
+REX_DRACULA_PRO=0 cargo clippy --locked --all-targets --all-features -- -D warnings
+REX_DRACULA_PRO=0 cargo test --locked --all-features
 cargo test --manifest-path vendor/rexrs/Cargo.toml --all-features
 python3 scripts/test-fetch-dracula-pro.py
 REX_DRACULA_PRO_DIR=$PWD/tests/fixtures/dracula-pro cargo clippy --locked --all-targets --all-features -- -D warnings

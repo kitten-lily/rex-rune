@@ -4816,6 +4816,43 @@ fn a_chrome_palette_applies_at_once_and_brings_its_terminal_theme_until_one_is_c
 }
 
 #[test]
+fn a_missing_dracula_pro_terminal_theme_follows_the_chrome_in_session() {
+    use rex_linux::{settings::ChromeTheme, terminal_theme::paired};
+    const MISSING: &str = "rex/dracula-pro-nonexistent";
+    let mut ws = workspace();
+    ws.settings.chrome_theme = ChromeTheme::RosePine;
+    ws.settings.terminal_theme = TerminalThemeChoice::Named(MISSING.into());
+    ws.settings.terminal_theme_chosen = true;
+    ws.save();
+    let mut ws = relaunch(&ws);
+    let host = capture_host(&mut ws, 0);
+    assert!(
+        ws.term_theme == Some((paired(ChromeTheme::RosePine).theme)()),
+        "the missing theme starts as the chrome's pair"
+    );
+    ws.set_chrome(ChromeTheme::GruvboxDark, &mut rune::Tx::default());
+    assert!(
+        ws.term_theme == Some((paired(ChromeTheme::GruvboxDark).theme)()),
+        "switching chrome moves the terminal theme in the same session"
+    );
+    assert_eq!(
+        declared(&host),
+        [Some((paired(ChromeTheme::GruvboxDark).theme)().args())]
+    );
+    ws.perform(Intent::ChooseTheme, &mut rune::Tx::default());
+    let current: Vec<_> = ws
+        .entries()
+        .into_iter()
+        .filter(|e| e.current)
+        .map(|e| e.label)
+        .collect();
+    assert_eq!(current, ["Follow chrome"]);
+    let saved = std::fs::read_to_string(&ws.settings_path).unwrap();
+    assert!(saved.contains(MISSING), "{saved}");
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn a_routine_save_keeps_an_unavailable_chrome() {
     use rex_linux::settings::ChromeTheme;
     let ws = workspace();
@@ -4865,14 +4902,29 @@ fn a_dracula_pro_chrome_applies_and_brings_its_terminal_theme() {
     rt.update(|s, tx| s.perform(Intent::Chrome(chrome), tx));
     rt.frame(1. / 60.);
     assert_eq!(rt.state.settings.chrome_theme, chrome);
-    assert_eq!(super::theme::kit().c.page, super::theme::rgb(tokens.ground));
+    assert!(
+        super::theme::kit().c.page == super::theme::rgb(tokens.ground),
+        "the kit's page differs from the chrome's ground"
+    );
     let theme = (paired(chrome).theme)();
-    assert_eq!(theme.background, Some(tokens.ground));
-    assert_eq!(rt.state.term_theme, Some(theme.clone()));
-    assert_eq!(declared(&host), [Some(theme.args())]);
+    assert!(
+        theme.background == Some(tokens.ground),
+        "the paired theme's background differs from the chrome's ground"
+    );
+    assert!(
+        rt.state.term_theme == Some(theme.clone()),
+        "the applied terminal theme differs from the chrome's pair"
+    );
+    assert!(
+        declared(&host) == [Some(theme.args())],
+        "the declared terminal theme differs from the chrome's pair"
+    );
     let again = relaunch(&rt.state);
     assert_eq!(again.settings.chrome_theme, chrome);
-    assert_eq!(again.term_colors().background, tokens.ground);
+    assert!(
+        again.term_colors().background == tokens.ground,
+        "the relaunched terminal background differs from the chrome's ground"
+    );
     rt.update(|s, tx| s.perform(Intent::Chrome(ChromeTheme::Midnight), tx));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

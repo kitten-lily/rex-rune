@@ -94,6 +94,20 @@ pub fn builtin(id: &str) -> Option<&'static Builtin> {
     builtins().find(|b| b.id == id)
 }
 
+impl TerminalThemeChoice {
+    /// Whether this choice draws as Follow chrome: that choice itself, or a saved Dracula Pro
+    /// theme this build lacks. The saved id is never rewritten.
+    pub fn follows_chrome(&self) -> bool {
+        match self {
+            TerminalThemeChoice::FollowChrome => true,
+            TerminalThemeChoice::Named(id) => {
+                id.starts_with("rex/dracula-pro") && builtin(id).is_none()
+            }
+            _ => false,
+        }
+    }
+}
+
 /// The built-in theme paired with `chrome`: its background is the chrome's ground.
 pub fn paired(chrome: ChromeTheme) -> &'static Builtin {
     let chrome = Some(chrome.effective());
@@ -335,14 +349,16 @@ impl ThemeDirs {
         choice: &TerminalThemeChoice,
         chrome: ChromeTheme,
     ) -> Result<Option<TerminalTheme>> {
+        // A Dracula Pro theme this build lacks follows the chrome instead of failing.
+        if choice.follows_chrome() {
+            return Ok(Some((paired(chrome).theme)()));
+        }
         Ok(match choice {
             TerminalThemeChoice::FollowServer => None,
             TerminalThemeChoice::RexDefault => Some(TerminalTheme::default()),
-            TerminalThemeChoice::FollowChrome => Some((paired(chrome).theme)()),
+            TerminalThemeChoice::FollowChrome => unreachable!("handled by follows_chrome"),
             TerminalThemeChoice::Named(id) => Some(match builtin(id) {
                 Some(builtin) => (builtin.theme)(),
-                // A Dracula Pro theme this build lacks follows the chrome instead of failing.
-                None if id.starts_with("rex/dracula-pro") => (paired(chrome).theme)(),
                 None => self.load(id)?,
             }),
         })

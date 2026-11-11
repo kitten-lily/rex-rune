@@ -296,6 +296,16 @@ class LocalThemesGuardTests(unittest.TestCase):
             tar = temp / "clean.tar.gz"
             self.tarball(tar, clean)
             themes.refuse_in_tarball(tar)
+            tar = temp / "duplicate.tar.gz"
+            first = temp / "first"
+            second = temp / "second"
+            first.write_bytes(clean)
+            second.write_bytes(marked)
+            with tarfile.open(tar, "w:gz") as archive:
+                archive.add(first, arcname="rex-linux-0.5.0-x86_64-linux-gnu/bin/rex-linux")
+                archive.add(second, arcname="rex-linux-0.5.0-x86_64-linux-gnu/bin/rex-linux")
+            with self.assertRaises(SystemExit):
+                themes.refuse_in_tarball(tar)
             tar = temp / "nobinary.tar.gz"
             self.tarball(tar, marked, member="rex-linux-0.5.0-x86_64-linux-gnu/README.md")
             with self.assertRaises(SystemExit):

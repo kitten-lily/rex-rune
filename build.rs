@@ -21,6 +21,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    // mise sets it to the checkout's HEAD, so a first fetch reruns this script.
+    println!("cargo:rerun-if-env-changed=REX_DRACULA_PRO_REV");
     // Watch the resolved paths too: .git is a file in a linked worktree.
     for name in ["HEAD", "refs/heads", "packed-refs"] {
         if let Some(path) = output(Command::new("git").args(["rev-parse", "--git-path", name])) {

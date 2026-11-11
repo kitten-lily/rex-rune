@@ -34,13 +34,13 @@ class FetchTest(unittest.TestCase):
         self.work = work
         self.dest = self.tmp / "data" / "checkout"
 
-    def run_script(self, url=None, dest=None, cwd=None, **env):
+    def run_script(self, *args, url=None, dest=None, cwd=None, **env):
         e = {k: v for k, v in os.environ.items() if not k.startswith("REX_DRACULA_PRO")}
         e["REX_DRACULA_PRO_URL"] = url if url is not None else str(self.bare)
         e["REX_DRACULA_PRO_DIR"] = str(dest or self.dest)
         e.update(env)
         return subprocess.run(
-            ["bash", str(SCRIPT)], env=e, cwd=cwd or self.tmp, capture_output=True, text=True
+            ["bash", str(SCRIPT), *args], env=e, cwd=cwd or self.tmp, capture_output=True, text=True
         )
 
     def head(self, dest=None):
@@ -85,6 +85,34 @@ class FetchTest(unittest.TestCase):
         self.assertIn("no Dracula Pro themes", r.stderr)
         self.assertFalse(self.dest.exists())
         self.assertEqual(list(self.dest.parent.glob("*.tmp.*")), [])
+
+    def test_rev_prints_the_checkout_head_without_fetching(self):
+        self.run_script()
+        head = self.head()
+        (self.work / "blade").write_text("made-up two\n")
+        git("add", "blade", cwd=self.work)
+        git("commit", "-q", "-m", "two", cwd=self.work)
+        git("push", "-q", str(self.bare), "main", cwd=self.work)
+        r = self.run_script("--rev")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), head)
+        self.assertEqual(self.head(), head)
+
+    def test_rev_prints_nothing_without_a_checkout_or_when_disabled(self):
+        r = self.run_script("--rev")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+        self.assertFalse(self.dest.parent.exists())
+        self.run_script()
+        r = self.run_script("--rev", REX_DRACULA_PRO="0")
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "", ""))
+
+    def test_a_trailing_slash_still_clones(self):
+        dest = f"{self.dest}//"
+        r = self.run_script(dest=dest)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("warning", r.stderr)
+        self.assertEqual((self.dest / "pro").read_text(), "made-up one\n")
+        self.assertEqual([p.name for p in self.dest.parent.iterdir()], ["checkout"])
 
     def test_disabled_does_nothing(self):
         r = self.run_script(REX_DRACULA_PRO="0")

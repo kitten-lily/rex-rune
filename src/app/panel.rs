@@ -684,7 +684,9 @@ impl Workspace {
         let mut add = |label: &str, detail: &str, group: &str, choice: TerminalThemeChoice| {
             if label.to_lowercase().contains(lower) {
                 let mut e = Entry::new(label, detail, group, Intent::Theme(choice.clone()));
-                e.current = *current == choice;
+                // A Dracula Pro theme this build lacks draws as Follow chrome.
+                e.current = *current == choice
+                    || (choice == TerminalThemeChoice::FollowChrome && current.follows_chrome());
                 entries.push(e);
             }
         };

@@ -1972,7 +1972,7 @@ impl Workspace {
         {
             self.settings.terminal_theme = TerminalThemeChoice::FollowChrome;
         }
-        if self.settings.terminal_theme == TerminalThemeChoice::FollowChrome {
+        if self.settings.terminal_theme.follows_chrome() {
             self.term_theme = Some((paired(chrome).theme)());
             self.declare_theme();
         }
@@ -2013,10 +2013,10 @@ impl Workspace {
             TerminalThemeChoice::FollowServer => "Follow server",
             TerminalThemeChoice::RexDefault => "Rex default colours",
             TerminalThemeChoice::FollowChrome => "Follow chrome",
+            // A Dracula Pro theme this build lacks follows the chrome.
+            choice if choice.follows_chrome() => "Follow chrome",
             TerminalThemeChoice::Named(id) => match rex_linux::terminal_theme::builtin(id) {
                 Some(b) => b.name,
-                // A Dracula Pro theme this build lacks follows the chrome.
-                None if id.starts_with("rex/dracula-pro") => "Follow chrome",
                 None => id,
             },
         }
