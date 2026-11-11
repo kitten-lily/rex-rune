@@ -201,6 +201,7 @@ pub struct Workspace {
     pub themes: Vec<ThemeInfo>,
     /// Each scrolling tab's place along its strip, by host and Rex window ID.
     pub strips: HashMap<HostId, HashMap<String, StripView>>,
+    pub updates: super::updates::Updates,
 }
 
 /// A scrolling tab's place along its strip, and the pane it last brought into view.
@@ -346,7 +347,9 @@ impl Workspace {
             theme_dirs,
             themes: Vec::new(),
             strips: HashMap::new(),
+            updates: Default::default(),
         };
+        this.init_updates();
         if let Some(error) = theme_error {
             this.notify(format!("{error:#}; following the server's colours"));
         }
@@ -2333,6 +2336,8 @@ impl Workspace {
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
             }
+            Intent::Updates => self.open_updates_settings(),
+            Intent::CheckUpdates => self.check_updates_now(),
             Intent::EditHost(host) => {
                 let h = self.settings.hosts[host].clone();
                 self.open_panel(

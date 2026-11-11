@@ -7,7 +7,8 @@ use super::{
     workspace::Workspace,
 };
 use rex_linux::settings::{
-    Channels, FocusCentering, NoticePosition, NotificationsConfig, SessionList, TabLayout,
+    Channels, FocusCentering, NoticePosition, NotificationsConfig, PaneDensity, SessionList,
+    TabLayout,
 };
 use rune::{Cursor, El, ScrollSpec, Tx, col, el, row, text};
 use rune_kit::{Checkbox, IconButton, Keybind, SegmentedControl, Switch};
@@ -148,6 +149,27 @@ fn interface(s: &Workspace) -> El {
                 .child(pill("zoom-reset", "Reset", Pill::Neutral, 26., |s, tx| {
                     s.change_ui_scale(0, tx)
                 })),
+        ))
+        .child(divider())
+        .child(setting(
+            "Pane density",
+            "Compact uses straight separators, without pane headers or gaps.",
+            SegmentedControl::new(
+                &["Compact", "Comfortable"],
+                Some(usize::from(s.settings.pane_density == PaneDensity::Comfortable)),
+            )
+            .fit()
+            .on_pick(|s: &mut Workspace, i, tx| {
+                s.settings.pane_density = if i == 0 {
+                    PaneDensity::Compact
+                } else {
+                    PaneDensity::Comfortable
+                };
+                s.save();
+                tx.instant();
+            })
+            .build(k)
+            .key("pane-density"),
         ))
         .child(divider())
         .child(setting(
@@ -428,6 +450,23 @@ fn terminal(s: &Workspace) -> El {
                 format!("{} pt", s.settings.font_size),
                 |s, _| s.change_font(-1.),
                 |s, _| s.change_font(1.),
+            ),
+        ))
+        .child(divider())
+        .child(setting(
+            "Pane padding",
+            "0–32 pt around each terminal's content. Applies immediately to every pane.",
+            stepper(
+                "pane-padding",
+                format!("{} pt", s.settings.pane_padding),
+                |s, _| {
+                    s.settings.pane_padding = (s.settings.pane_padding - 1.).max(0.);
+                    s.save();
+                },
+                |s, _| {
+                    s.settings.pane_padding = (s.settings.pane_padding + 1.).min(32.);
+                    s.save();
+                },
             ),
         ))
         .child(divider())
@@ -899,6 +938,7 @@ pub fn settings(s: &Workspace, viewport: [f32; 2]) -> El {
         SettingsSection::Integrations => super::integrations::section(s),
         SettingsSection::Hosts => hosts(s),
         SettingsSection::Shortcuts => shortcuts(s),
+        SettingsSection::Updates => super::updates::section(s),
         SettingsSection::About => super::about::section(s),
     };
     let content = col()

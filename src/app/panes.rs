@@ -1,13 +1,14 @@
 //! The pane area: server-placed terminals as floating cards in 8pt gutters, each with a header
 //! (status, label, size, exception pill), drag handles in the gutters, and empty states. A tab
 //! with a single pane draws it edge to edge instead. A scrolling tab's columns slide sideways
-//! under the wheel and to bring the focused pane into view.
+//! under the wheel and to bring the focused pane into view. Compact density removes card
+//! decorations and gaps from every placement.
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
     activity::{pane_activity, progress_bar, shown_progress, shown_word},
     input::search_key,
     panel::{Form, Intent, PanelKind},
-    term::{self, CursorLook, GridLook, Metrics, MouseGesture, PADDING},
+    term::{self, CursorLook, GridLook, Metrics, MouseGesture},
     theme::*,
     widgets::{Pill, pill},
     workspace::{DividerDrag, HostId, Workspace},
@@ -15,7 +16,7 @@ use super::{
 use rex_linux::{
     connection::Command,
     layout::{self, Placement},
-    settings::TabLayout,
+    settings::{PaneDensity, TabLayout},
     terminal::selection::Phase as SelectionPhase,
 };
 use rexrs::api::session::Window;
@@ -28,6 +29,9 @@ use rune_kit::TextInput;
 /// The area cards are laid out in, in the pane area's own points.
 fn inner(s: &Workspace) -> [f32; 4] {
     let [_, _, aw, ah] = s.area;
+    if s.settings.pane_density == PaneDensity::Compact {
+        return [0., 0., aw, ah];
+    }
     [
         MARGIN,
         0.,
@@ -41,7 +45,11 @@ fn inner(s: &Workspace) -> [f32; 4] {
 pub fn card_rect(s: &Workspace, placement: &Placement) -> [f32; 4] {
     let [ix, iy, iw, ih] = inner(s);
     let [x, y, w, h] = placement.rect;
-    let half = GUTTER / 2.;
+    let half = if s.settings.pane_density == PaneDensity::Compact {
+        0.
+    } else {
+        GUTTER / 2.
+    };
     let [l, t, r, b] = placement.inner;
     let mut c = [
         ix + x as f32 * iw,
@@ -500,12 +508,12 @@ fn pane_card(
                 Some(edit) => grid.child(search_field(block, &key, edit, t)),
                 None => grid,
             };
-            let top = if bleed { PADDING } else { 0. };
+            let padding = s.settings.pane_padding;
             // The card draws a background of its own colour, edge included; any other sits
             // inside the card's border, never over it.
             let fill = t.body(&colors);
             let body = if fill == card() {
-                col().w_full().px(PADDING + 4.).pb(PADDING)
+                col().w_full().px(padding).pb(padding)
             } else {
                 let (edge, radius) = if bleed {
                     (0., 0.)
@@ -516,8 +524,8 @@ fn pane_card(
                     .self_stretch()
                     .mx(edge)
                     .mb(edge)
-                    .px(PADDING + 4. - edge)
-                    .pb(PADDING - edge)
+                    .px((padding - edge).max(0.))
+                    .pb((padding - edge).max(0.))
                     .corners([0., 0., radius, radius])
                     .continuous_corners()
                     .fill(rgb(fill))
@@ -525,7 +533,7 @@ fn pane_card(
             c.child(
                 body.grow(1.)
                     .min_h(0.)
-                    .pt(top)
+                    .pt(padding)
                     .instant_changes()
                     .motion(STILL)
                     .child(grid),
@@ -762,7 +770,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
             &m,
             state,
             is_focus && s.panel.is_none(),
-            bleed,
+            bleed || s.settings.pane_density == PaneDensity::Compact,
         ));
     }
     let [ix, iy, iw, ih] = inner(s);
@@ -784,6 +792,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
                     .h(ih),
                 true,
                 dragging,
+                s.settings.pane_density == PaneDensity::Compact,
             )
             .on_drag(move |s: &mut Workspace, g, tx| {
                 let same = s
@@ -832,6 +841,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
                 handle.key(format!("divider:{}", divider.key())),
                 horizontal,
                 dragging,
+                s.settings.pane_density == PaneDensity::Compact,
             )
             .on_drag(move |s: &mut Workspace, g, tx| {
                 let Some(session) = s.model().selected.clone() else {
@@ -871,20 +881,28 @@ pub fn area(s: &Workspace, px: f32) -> El {
     area
 }
 
-/// An invisible drag target in a gutter with a 2pt line: faint under the pointer, accent while
-/// dragging.
-pub fn divider_handle(e: El, vertical_line: bool, dragging: bool) -> El {
+/// A drag target with a permanent straight separator in Compact density, otherwise a hover line.
+pub fn divider_handle(e: El, vertical_line: bool, dragging: bool, compact: bool) -> El {
+    let (offset, inset, thickness) = if compact { (5., 0., 1.) } else { (4., 8., 2.) };
     let line = if vertical_line {
-        el().pin(Some(4.), Some(8.), None, Some(8.)).w(2.)
+        el().pin(Some(offset), Some(inset), None, Some(inset))
+            .w(thickness)
     } else {
-        el().pin(Some(8.), Some(4.), Some(8.), None).h(2.)
+        el().pin(Some(inset), Some(offset), Some(inset), None)
+            .h(thickness)
     };
-    let line = line.radius(1.);
-    let line = if dragging {
-        line.fill(rgb(accent()))
-            .box_shadow(shadow(0., 0., 10., rgb(accent()).alpha(0.5)))
+    let line = line.key("divider-line");
+    let line = if compact {
+        line.fill(if dragging { rgb(accent()) } else { white(0.18) })
+    } else if dragging {
+        line.radius(1.).fill(rgb(accent())).box_shadow(shadow(
+            0.,
+            0.,
+            10.,
+            rgb(accent()).alpha(0.5),
+        ))
     } else {
-        line.fill(white(0.18)).group_opacity(0., 1.)
+        line.radius(1.).fill(white(0.18)).group_opacity(0., 1.)
     };
     e.cursor(if vertical_line {
         Cursor::ResizeColumn

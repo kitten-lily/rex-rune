@@ -2660,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "rex-linux"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2669,19 +2669,23 @@ dependencies = [
  "futures-util",
  "gethostname",
  "ghostty-vt",
+ "libc",
  "log",
  "qrcode",
  "rexrs",
+ "ring",
  "rune",
  "rune-kit",
  "rune-theme-opencode",
  "rustls",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "tokio",
  "tokio-tungstenite",
  "unicode-segmentation",
+ "ureq",
  "url",
  "zbus",
 ]

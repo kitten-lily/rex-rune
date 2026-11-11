@@ -13,6 +13,24 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 - Settings → Notifications is now a channels × states table (Tabs, Desktop, Count, Sound × Needs you, Fails, Finishes, Works, plus messages from programs). `notifications` in workspace.json has a new shape; older files migrate with their behaviour unchanged. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - OSC 7501 status records keep their `owner` and `updated_at`. A report without an app is named after the process in the foreground when it reported, for icons, Activity rows and notifications. When records tie on state and progress, the latest report by the server's clock speaks for the pane, tab or session; it is never compared with this computer's clock. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 
+## 0.6.0 - 2026-11-10
+
+### Added
+
+- **In-app update notice and Settings → Updates:** on startup (after 30 seconds) and at most once every 24 hours while running, checks the signed GitHub release manifest (`latest.json` and `latest.json.minisig`) against the embedded CI and backup Minisign public keys (`packaging/keys/release.pub` and `packaging/keys/release-backup.pub`). When a newer stable release is verified, shows a non-blocking update toast with **What's new** (opens the release page in your browser without rendering remote HTML or markdown), **Updates…** and **Dismiss for this version**. Guidance matches the detected install channel (`REX_LINUX_CHANNEL`, `/usr/share/rex-linux/channel` and `~/.local/share/rex-linux/install.json`): `sudo pacman -Syu rex-linux-bin` on Arch (`omarchy update` on Omarchy), the verified `install.sh` one-command upgrade for tarball/script installs, `.deb` upgrade instructions for Debian/Ubuntu, and `nix flake update rex-rune` / `nix profile upgrade rex-linux` for Nix. Includes `rex-linux --check-update`, a **Check now** action, and opt-out via Settings → Updates (`updates.check` in `workspace.json`) or `REX_LINUX_NO_UPDATE_CHECK=1`; source builds never check automatically, background check failures back off for 24 hours silently, and the client never self-updates or downloads binaries.
+- **Pane density and padding:** Settings → Interface → **Pane density** adds a **Compact** mode alongside **Comfortable** (default), removing split pane headers, rounded card borders, shadows, gaps and outer margins in favour of 1 pt split separators while keeping split geometry, divider dragging and floating reconnect controls. Settings → Terminal → **Pane padding** adjusts uniform terminal content padding from 0 to 32 pt (default 8 pt) live without restarting. Adapted from [Loric ANDRE (@LoricAndre)](https://github.com/LoricAndre) ([LoricAndre/rex-rune](https://github.com/LoricAndre/rex-rune), `fd4e753`, `e0be986`, `d3a9cbe`).
+
+### Changed
+
+- **Uniform default pane padding:** terminal content now uses uniform 8 pt padding on all four sides in every pane by default (replacing the previous 12 pt horizontal, 8 pt bottom, and 0 pt split-card top padding), so single panes and split cards share identical inset geometry at a given **Pane padding** setting.
+
+## 0.5.3 - 2026-11-10
+
+### Added
+
+- Signed Arch pacman repository at `https://pkg.shuv.dev/arch/$arch`, with x86_64 and aarch64 packages, signed repository databases and package signatures. See the [setup and migration instructions](docs/auto-update-operator-walkthrough.md#5-the-arch-repository-u2).
+- Install channel markers and installer receipts; About identifies the installation channel. Nix installation guidance is available in `docs/nix.md`.
+
 ## 0.5.2 - 2026-11-10
 
 ### Added
