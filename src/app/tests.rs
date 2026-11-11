@@ -1,15 +1,37 @@
 //! Headless focus and key-routing checks on Rune's runtime (no server: the one host is a
 //! socket that does not exist).
+#[path = "about_tests.rs"]
+mod about_tests;
 #[path = "bindings_integration_tests.rs"]
 mod bindings_integration_tests;
+#[path = "command_tests.rs"]
+mod command_tests;
+#[path = "find_tests.rs"]
+mod find_tests;
+#[path = "menu_tests.rs"]
+mod menu_tests;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
+#[path = "pane_header_tests.rs"]
+mod pane_header_tests;
+#[path = "pane_verb_tests.rs"]
+mod pane_verb_tests;
+#[path = "polish_tests.rs"]
+mod polish_tests;
 #[path = "remote_session_tests.rs"]
 mod remote_session_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
+#[path = "settings_tests.rs"]
+mod settings_tests;
+#[path = "tab_tests.rs"]
+mod tab_tests;
 #[path = "tailscale_tests.rs"]
 mod tailscale_tests;
+#[path = "wiring_tests.rs"]
+mod wiring_tests;
+#[path = "workspace_fixes_tests.rs"]
+mod workspace_fixes_tests;
 use super::{
     panel::{Form, Intent, PanelKind, SessionAction},
     placeholder, view,
@@ -196,8 +218,8 @@ fn host_menu_rows_online_and_offline() {
         rows(&rt),
         [
             ("New session".to_owned(), String::new(), false),
-            ("Default shell…".to_owned(), String::new(), true),
             ("Retry connection".to_owned(), String::new(), true),
+            ("Default shell…".to_owned(), String::new(), true),
             ("Edit host…".to_owned(), String::new(), true),
             ("Remove host…".to_owned(), String::new(), true),
         ]
@@ -462,7 +484,10 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
         .expect("a view"),
     );
     ws.perform(
-        Intent::Pane(target, super::panel::PaneAction::Split("horizontal")),
+        Intent::Pane(
+            target,
+            super::panel::PaneAction::Split(super::splits::SplitWay::Right),
+        ),
         &mut tx,
     );
     let sent = requests(&other);
@@ -1279,7 +1304,7 @@ fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
     );
 
     let mut tx = rune::Tx::default();
-    ws.perform(Intent::Split("horizontal"), &mut tx);
+    ws.perform(Intent::Split(super::splits::SplitWay::Right), &mut tx);
     let sent = requests(&rx);
     assert_eq!(sent[0].0, "session.new_split");
     assert_eq!(sent[0].2["anchor_id"], "column:eg");
@@ -1395,18 +1420,14 @@ fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     let mut rt = runtime(ws);
     secondary_click(&mut rt, "tab:split");
     let panel = rt.state.panel.as_ref().expect("a tab menu");
-    assert!(matches!(&panel.kind, PanelKind::Window(t) if t.window == "split" && t.session == "s"));
+    assert!(matches!(&panel.kind, PanelKind::Window));
+    let tab = panel.tab.as_ref().expect("the menu's tab");
+    assert_eq!((tab.window.as_str(), tab.session.as_str()), ("split", "s"));
     assert_eq!(panel.title, "dev");
     let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
-    assert_eq!(
-        labels,
-        [
-            "Rename tab…",
-            "Use scrolling layout",
-            "Close tab…",
-            "New tab"
-        ]
-    );
+    assert_eq!(labels.first().map(String::as_str), Some("Rename tab…"));
+    assert!(labels.iter().any(|l| l == "Use scrolling layout"));
+    assert_eq!(labels.last().map(String::as_str), Some("Close tab…"));
     assert!(has(&rt, "menu-surface"));
     press(&mut rt, Key::Escape);
     assert!(rt.state.panel.is_none());
@@ -1484,7 +1505,10 @@ fn capture_host(ws: &mut Workspace, index: usize) -> flume::Receiver<HostCommand
 #[test]
 fn split_uses_the_focused_pane_as_its_directory_source() {
     let (mut ws, rx) = tabbed_workspace("split");
-    ws.perform(Intent::Split("vertical"), &mut rune::Tx::default());
+    ws.perform(
+        Intent::Split(super::splits::SplitWay::Down),
+        &mut rune::Tx::default(),
+    );
     let sent = requests(&rx);
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].0, "session.new_split");
@@ -1787,9 +1811,9 @@ fn session_menu_on_an_edge_row_and_an_offline_host() {
             ("Rename session…".to_owned(), false),
             ("Move up".to_owned(), false),
             ("Move down".to_owned(), false),
-            ("Close session…".to_owned(), false),
             ("Retry connection".to_owned(), true),
             ("Edit host…".to_owned(), true),
+            ("Close session…".to_owned(), false),
         ]
     );
     assert_eq!(panel.selected, 0);
@@ -2006,16 +2030,36 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     assert!(
         rt.elements()
             .iter()
-            .any(|e| e.text.as_deref() == Some(env!("CARGO_PKG_VERSION")))
+            .any(|e| e.text.as_deref() == Some(concat!("Version ", env!("CARGO_PKG_VERSION"))))
     );
     assert!(!has(&rt, "about-server"));
+    // The header's two copies come first, then the project links.
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
     press(&mut rt, Key::Tab); // Close
-    press(&mut rt, Key::Tab); // Repository
+    press(&mut rt, Key::Tab);
+    assert!(focused(&rt).unwrap().ends_with("about-copy"));
+    press(&mut rt, Key::Enter);
+    assert_eq!(
+        clipboard.text().as_deref().map(String::as_str),
+        Some(super::about::version_info(&rt.state).as_str())
+    );
+    press(&mut rt, Key::Tab);
+    assert!(focused(&rt).unwrap().ends_with("about-copy-debug"));
+    press(&mut rt, Key::Text(" ".into()));
+    assert_eq!(
+        clipboard.text().as_deref().map(String::as_str),
+        Some(super::about::debug_info(&rt.state).as_str())
+    );
+    press(&mut rt, Key::Tab);
     assert!(focused(&rt).unwrap().ends_with("about-repository"));
     press(&mut rt, Key::Enter);
     press(&mut rt, Key::Tab);
     press(&mut rt, Key::Text(" ".into()));
     press(&mut rt, Key::Tab);
+    press(&mut rt, Key::Enter);
+    press(&mut rt, Key::Tab);
+    assert!(focused(&rt).unwrap().ends_with("about-issues"));
     press(&mut rt, Key::Enter);
     assert_eq!(
         rt.state.opened_links,
@@ -2027,16 +2071,8 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
                 super::about::REPOSITORY,
                 env!("CARGO_PKG_VERSION")
             ),
+            format!("{}/issues", super::about::REPOSITORY),
         ]
-    );
-    let clipboard = rune::clipboard::memory();
-    rt.use_clipboard(&clipboard);
-    press(&mut rt, Key::Tab);
-    assert!(focused(&rt).unwrap().ends_with("about-copy"));
-    press(&mut rt, Key::Enter);
-    assert_eq!(
-        clipboard.text().as_deref().map(String::as_str),
-        Some(super::about::version_info(&rt.state).as_str())
     );
 }
 
@@ -3178,6 +3214,23 @@ fn each_states_tab_channel_hides_only_its_own_word() {
 }
 
 #[test]
+fn a_muted_tab_leaves_the_unread_count() {
+    use rex_linux::connection::activity::ProgramState::*;
+    let (mut ws, _rx) = tabbed_workspace("single");
+    ws.track_activity(0);
+    set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
+    set_activity(&mut ws, "block:a", &[("", record(Error, false))]);
+    assert_eq!(ws.unread_count(), 2);
+    let split = ws.tab_target(0, "s", "split").unwrap();
+    ws.set_tab_muted(&split, true);
+    assert_eq!(ws.unread_count(), 1, "only the unmuted tab's pane counts");
+    assert_eq!(ws.badges.last(), Some(&1), "muting sends the new count");
+    ws.set_tab_muted(&split, false);
+    assert_eq!(ws.unread_count(), 2);
+    std::fs::remove_file(&ws.settings_path).ok();
+}
+
+#[test]
 fn the_unread_count_follows_panes_that_need_you_or_finished_unseen() {
     use rex_linux::connection::activity::ProgramState::*;
     let (mut ws, _rx) = tabbed_workspace("single");
@@ -3524,14 +3577,15 @@ fn integrations_list_agents_and_preview_changes_before_making_them() {
     let home = omp_home("list");
     let mut rt = integrations_open(Ok(SKILL_STATUS.into()), omp_at(&home));
     let codex = element_text(&rt, "agent:codex").join(" | ");
-    assert!(codex.contains("Not installed"), "{codex}");
-    assert!(codex.contains("with OpenCode and Pi and OMP"), "{codex}");
+    assert_eq!(codex, "Codex | Not installed | Install…");
     let omp = element_text(&rt, "agent:omp").join(" | ");
-    assert!(omp.contains("OMP"), "{omp}");
-    assert!(omp.contains("Not installed"), "{omp}");
-    assert!(omp.contains("with Codex and OpenCode and Pi"), "{omp}");
-    assert!(omp.contains("Shares Pi's skill directory"), "{omp}");
-    assert!(omp.contains("Install…"), "{omp}");
+    assert_eq!(omp, "OMP | Not installed | Install…");
+    // The skill these agents share is explained once for the group, not on each row.
+    let shared = element_text(&rt, "agents-shared").join(" | ");
+    assert!(
+        shared.starts_with("Codex, OpenCode, Pi and OMP share one skill"),
+        "{shared}"
+    );
     assert!(
         element_text(&rt, "agent:claude")
             .join(" ")
@@ -3623,8 +3677,13 @@ fn omp_mirrors_pis_skill_and_is_only_offered_when_found() {
 
     let rt = integrations_open(Ok(SKILL_STATUS.into()), Default::default());
     let row = element_text(&rt, "agent:omp").join(" | ");
-    assert!(row.contains("Not found on this machine"), "{row}");
-    assert!(!row.contains("Install…"), "{row}");
+    assert_eq!(row, "OMP | Not found", "nothing to install it for");
+    let chip = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("agent-state:omp"))
+        .expect("OMP's state chip");
+    assert_eq!(chip.help.as_deref(), Some("Not found on this machine"));
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
@@ -3820,10 +3879,15 @@ fn terminal_copies_reach_the_clipboard_once_and_only_in_the_foreground() {
         ("block:a", "s", true, true, "sentinel"),
     ] {
         let (mut ws, _rx) = tabbed_workspace("single");
-        ws.window_focused = focused;
         ws.hosts[0].model.visible = true;
         *ws.hosts[0].connection.model.lock().unwrap() = ws.hosts[0].model.clone();
         let mut rt = runtime(ws);
+        if !focused {
+            // The event Rune sends when the window loses focus, not a poke at the field.
+            rt.window_focus(false);
+            rt.frame(1. / 60.);
+            assert!(!rt.state.window_focused);
+        }
         let clipboard = rune::clipboard::memory();
         clipboard.set_text("sentinel");
         rt.use_clipboard(&clipboard);
@@ -3862,6 +3926,128 @@ fn terminal_copies_reach_the_clipboard_once_and_only_in_the_foreground() {
         );
         std::fs::remove_file(&rt.state.settings_path).ok();
     }
+}
+
+#[test]
+fn native_window_focus_gates_terminal_copies_and_the_cursor() {
+    use rex_linux::connection::{Connection, TerminalSender, clipboard::ClipboardCopy};
+    let (mut ws, rx) = tabbed_workspace("single");
+    let (sender, _sent) = flume::unbounded();
+    let connection = Connection {
+        model: Default::default(),
+        commands: TerminalSender::new(sender, "s".into(), "block:a".into()),
+        wake: flume::unbounded().1,
+    };
+    let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 40,
+        rows: 4,
+        ..Default::default()
+    })
+    .unwrap();
+    terminal.vt_write(b"$ ");
+    {
+        let mut m = connection.model.lock().unwrap();
+        m.connected = true;
+        m.control_connected = true;
+        m.frame = Some(std::sync::Arc::new(
+            rex_linux::terminal::Renderer::new()
+                .unwrap()
+                .frame(&terminal)
+                .unwrap(),
+        ));
+    }
+    let key = ws.term_key("block:a");
+    let mut term = super::term::Term::new(connection.clone());
+    term.refresh();
+    ws.terminals.insert(key, term);
+    ws.hosts[0].model.visible = true;
+    // A sync keeps the terminals the host's model lists.
+    ws.hosts[0]
+        .model
+        .terminals
+        .insert("block:a".into(), connection);
+    *ws.hosts[0].connection.model.lock().unwrap() = ws.hosts[0].model.clone();
+    let mut rt = runtime(ws);
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
+    // A block cursor is a filled box; the unfocused form is a hollow outline without fill.
+    let cursor_filled = |rt: &Runtime<Workspace>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.ends_with("/cursor")))
+            .expect("the pane draws its cursor")
+            .fill
+            .a
+            > 0.
+    };
+    let copy = |rt: &mut Runtime<Workspace>, text: &str| {
+        rt.update(|s, tx| {
+            s.hosts[0].connection.model.lock().unwrap().clipboard = Some(ClipboardCopy {
+                session: "s".into(),
+                block: "block:a".into(),
+                text: text.into(),
+            });
+            s.sync(0, tx);
+        });
+        rt.frame(1. / 60.);
+    };
+    let text = |clipboard: &rune::clipboard::MemoryClipboard| {
+        clipboard
+            .text()
+            .as_deref()
+            .map(String::as_str)
+            .map(str::to_owned)
+    };
+
+    assert!(rt.state.window_focused);
+    assert!(
+        cursor_filled(&rt),
+        "a focused window shows the solid cursor"
+    );
+    clipboard.set_text("sentinel");
+
+    rt.window_focus(false);
+    rt.frame(1. / 60.);
+    assert!(
+        !rt.state.window_focused,
+        "Rune's window focus event reaches the workspace"
+    );
+    assert!(
+        !cursor_filled(&rt),
+        "an unfocused window shows a hollow cursor"
+    );
+    copy(&mut rt, "while unfocused");
+    assert_eq!(
+        text(&clipboard).as_deref(),
+        Some("sentinel"),
+        "an unfocused window leaves the clipboard alone"
+    );
+
+    // Commands sent before the refocus don't count for the claim below.
+    while rx.try_recv().is_ok() {}
+    rt.window_focus(true);
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
+    assert!(rt.state.window_focused);
+    assert!(cursor_filled(&rt), "the cursor is solid again on focus");
+    assert_eq!(
+        text(&clipboard).as_deref(),
+        Some("sentinel"),
+        "a copy dropped while unfocused stays dropped after refocus"
+    );
+    assert!(
+        rx.try_iter()
+            .any(|command| matches!(command, HostCommand::Claim { .. })),
+        "a refocused window claims the size of the terminals it shows again"
+    );
+    copy(&mut rt, "after refocus");
+    assert_eq!(
+        text(&clipboard).as_deref(),
+        Some("after refocus"),
+        "a refocused window applies terminal copies"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
 }
 
 #[test]
@@ -4210,6 +4396,15 @@ fn font_family_row_says_a_saved_font_waits_for_the_next_launch() {
         &rt,
         "JetBrainsMono Nerd Font isn't installed, so terminals use IBM Plex Mono (bundled)."
     ));
+    // The row's helper is one short sentence; what is drawn now is the footnote's.
+    let helper = rt
+        .elements()
+        .into_iter()
+        .filter_map(|e| e.text)
+        .find(|t| t.contains("reopen the client"))
+        .expect("the row's helper");
+    assert_eq!(helper, "Applies when you reopen the client.");
+    assert!(has(&rt, "font-drawn"));
 
     click(&mut rt, "font-change");
     rt.state.panel.as_mut().unwrap().inputs[0].text = "MonoLisaCode Variable".into();
@@ -4375,22 +4570,33 @@ fn a_sidebar_tabs_menu_rename_and_middle_click_act_on_its_own_session() {
     };
     sent(&rx);
 
-    // Outside the selected session the menu leaves out what would act on that session.
+    // Outside the selected session the menu leaves out the column actions, which would act
+    // on the selected session.
     secondary_click(&mut rt, tab);
     let panel = rt.state.panel.as_ref().expect("a tab menu");
-    assert!(matches!(&panel.kind, PanelKind::Window(t)
-        if t.host == 0 && t.session == "other" && t.window == "other-second"));
-    let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
+    assert!(matches!(&panel.kind, PanelKind::Window));
+    let target = panel.tab.as_ref().expect("the menu's tab");
     assert_eq!(
-        labels,
-        ["Rename tab…", "Use scrolling layout", "Close tab…"]
+        (target.host, target.session.as_str(), target.window.as_str()),
+        (0, "other", "other-second")
     );
-    assert!(has(&rt, "sidebar-tab-target:0:other:other-second"));
+    let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
+    assert_eq!(labels.first().map(String::as_str), Some("Rename tab…"));
+    assert!(labels.iter().any(|l| l == "Use scrolling layout"));
+    assert!(!labels.iter().any(|l| l.contains("column")), "{labels:?}");
+    assert!(has(&rt, "tab-target:other-second"));
 
     // Rename tab… names its own session, not the selected one.
     press(&mut rt, Key::Enter);
     let panel = rt.state.panel.as_mut().expect("a rename form");
-    assert!(matches!(&panel.kind, PanelKind::Form(Form::RenameWindow(t)) if t.session == "other"));
+    assert!(matches!(
+        &panel.kind,
+        PanelKind::Form(Form::RenameWindow(_))
+    ));
+    assert_eq!(
+        panel.tab.as_ref().map(|t| t.session.as_str()),
+        Some("other")
+    );
     panel.inputs[0] = rune::TextEdit::new("renamed");
     press(&mut rt, Key::Enter);
     assert_eq!(
@@ -4404,7 +4610,7 @@ fn a_sidebar_tabs_menu_rename_and_middle_click_act_on_its_own_session() {
     assert!(
         matches!(&panel.kind, PanelKind::Confirm { method, .. } if method == "session.close_window")
     );
-    assert!(has(&rt, "sidebar-tab-target:0:other:other-second"));
+    assert!(has(&rt, "tab-target:other-second"));
     rt.state.submit(&mut rune::Tx::default());
     assert_eq!(
         sent(&rx),
@@ -6593,4 +6799,82 @@ fn settings_updates_shows_channel_guidance_opt_out_and_silent_background_failure
     let _ = std::fs::remove_file(&state_path);
     let _ = std::fs::remove_file(state_path.with_extension("lock"));
     let _ = std::fs::remove_file(&rt.state.settings_path);
+}
+
+/// The first node of Rune's accessibility tree (as `--tree` writes it) that `want` accepts.
+fn a11y_find(
+    node: &serde_json::Value,
+    want: &dyn Fn(&serde_json::Value) -> bool,
+) -> Option<serde_json::Value> {
+    if want(node) {
+        return Some(node.clone());
+    }
+    node["children"]
+        .as_array()?
+        .iter()
+        .find_map(|c| a11y_find(c, want))
+}
+
+fn a11y_has_state(node: &serde_json::Value, state: &str) -> bool {
+    node["states"]
+        .as_array()
+        .is_some_and(|s| s.iter().any(|v| v == state))
+}
+
+#[test]
+fn the_active_toolbar_tab_is_selected_for_assistive_technology() {
+    let (ws, _rx) = tabbed_workspace("split");
+    let rt = runtime(ws);
+    let tree = rt.accessibility_json();
+    let tab = |key: &str| {
+        a11y_find(&tree, &|n| n["key"] == key).unwrap_or_else(|| panic!("no {key} in the tree"))
+    };
+    let (split, single) = (tab("tab:split"), tab("tab:single"));
+    assert_eq!(split["role"], "tab");
+    assert_eq!(split["name"], "dev");
+    assert!(a11y_has_state(&split, "selected"), "{split}");
+    assert!(!a11y_has_state(&single, "selected"), "{single}");
+}
+
+#[test]
+fn a_dialog_is_named_by_its_title() {
+    let mut ws = workspace();
+    ws.panel = Some(super::panel::Panel::new(
+        PanelKind::Settings,
+        "Settings",
+        &[],
+    ));
+    let rt = runtime(ws);
+    let tree = rt.accessibility_json();
+    let dialog = a11y_find(&tree, &|n| n["key"] == "dialog").expect("the dialog surface");
+    assert_eq!(dialog["role"], "dialog");
+    assert_eq!(dialog["name"], "Settings");
+}
+
+#[test]
+fn the_switcher_names_its_highlighted_row_to_assistive_technology() {
+    let mut ws = workspace();
+    let _rx = capture_host(&mut ws, 0);
+    ws.hosts[0].model.connected = true;
+    ws.hosts[0].model.sessions = vec![session("a"), session("b")];
+    ws.picker(true);
+    let mut rt = runtime(ws);
+    let highlighted = |rt: &Runtime<Workspace>| {
+        a11y_find(&rt.accessibility_json(), &|n| {
+            n.get("activeDescendant").is_some()
+        })
+        .map(|n| n["activeDescendant"].clone())
+    };
+    let first = rt.state.panel.as_ref().unwrap().selected;
+    assert_eq!(
+        highlighted(&rt),
+        Some(serde_json::json!(format!("entry:{first}")))
+    );
+    press(&mut rt, Key::Down);
+    assert_eq!(rt.state.panel.as_ref().unwrap().selected, first + 1);
+    assert_eq!(
+        highlighted(&rt),
+        Some(serde_json::json!(format!("entry:{}", first + 1))),
+        "moving the highlight moves the active descendant"
+    );
 }

@@ -147,6 +147,8 @@ pub struct Workspace {
     pub window_focused: bool,
     /// The pane a file drag from another app is over.
     pub drop_hover: Option<String>,
+    /// Pane headers brought out by the pointer or by Reveal pane headers.
+    pub header_reveal: super::pane_header::Reveal,
     /// The pane area in window points, for divider drags and target outlines.
     pub area: [f32; 4],
     pub viewport: [f32; 2],
@@ -161,14 +163,17 @@ pub struct Workspace {
     pub title: String,
     #[cfg(test)]
     pub opened_links: Vec<String>,
-    /// (active tab, pane width, sidebar open) when the active tab was last revealed.
-    pub last_tab: (Option<String>, i32, bool),
+    /// (active tab and its place, pane width, sidebar open) when the active tab was last
+    /// revealed.
+    pub last_tab: (Option<(String, usize)>, i32, bool),
     pub reveal_tab_again: bool,
     pub tab_strip: TabStrip,
     pub tab_pos: rune::Live<[f32; 2]>,
     pub tab_fade: [rune::Live<f32>; 2],
     pub sidebar_fx: ScrollFx,
     pub switcher_fx: ScrollFx,
+    /// The Settings page's scroll thumb.
+    pub settings_fx: ScrollFx,
     pub sidebar_drag_start: Option<f32>,
     scratch: TextEdit,
     next_host: u64,
@@ -311,6 +316,7 @@ impl Workspace {
             handle,
             window_focused: true,
             drop_hover: None,
+            header_reveal: Default::default(),
             area: [0.; 4],
             viewport: [1440., 900.],
             sidebar,
@@ -327,6 +333,7 @@ impl Workspace {
             tab_fade: [rune::Live::new(0.4), rune::Live::new(1.)],
             sidebar_fx: ScrollFx::default(),
             switcher_fx: ScrollFx::default(),
+            settings_fx: ScrollFx::default(),
             sidebar_drag_start: None,
             scratch: TextEdit::new(""),
             next_host: 0,
@@ -414,6 +421,8 @@ impl Workspace {
         let _ = connection
             .commands
             .send(HostCommand::Keymap(Box::new(self.keymap_declaration())));
+        // About and the copied reports name the server; reading it changes nothing there.
+        let _ = connection.commands.send(HostCommand::Identify);
         let id = HostId(self.next_host);
         self.next_host += 1;
         let receiver = connection.wake.clone();
@@ -659,6 +668,7 @@ impl Workspace {
             self.close_panel(tx);
             self.inform("That pane is no longer available.");
         }
+        self.sync_tabs(index, tx);
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
             self.column_drag = None;
@@ -937,22 +947,7 @@ impl Workspace {
     }
 
     pub fn shortcut_detail(&self, action: &str, args: &Value) -> String {
-        let empty = |args: &Value| args.is_null() || args.as_object().is_some_and(|a| a.is_empty());
-        self.effective_bindings()
-            .iter()
-            .find(|b| {
-                let bound = b.binding.args.as_ref().unwrap_or(&Value::Null);
-                b.binding.action == action && (bound == args || (empty(bound) && empty(args)))
-            })
-            .and_then(|b| b.chords.as_ref())
-            .map(|chords| {
-                chords
-                    .iter()
-                    .map(|c| c.keycaps().join(" "))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .unwrap_or_default()
+        super::keycaps::spell(&self.shortcut_chords(action, args))
     }
 
     fn announce_keymap_problems(&mut self, index: usize) {
@@ -1037,6 +1032,7 @@ impl Workspace {
             term.cache_images(self.images.as_ref());
             term.resize_if_owner(font);
         }
+        self.place_find(key);
     }
 
     fn tab_layout_for(&self, host: usize, session: &str, window: &str) -> TabLayout {
@@ -1055,29 +1051,14 @@ impl Workspace {
         self.tab_layout_for(target.host, &target.session, &target.window)
     }
 
-    /// The selected session on the active host is `session` on `host`.
-    pub fn is_current_session(&self, host: usize, session: &str) -> bool {
-        host == self.active && self.model().selected.as_deref() == Some(session)
-    }
-
     /// `window` in the active host's selected session.
+    #[cfg(test)]
     pub fn window_target(&self, window: String) -> Option<WindowTarget> {
         Some(WindowTarget {
             host: self.active,
             session: self.model().selected.clone()?,
             window,
         })
-    }
-
-    /// The tab `target` names, while its host still lists it.
-    fn target_window(&self, target: &WindowTarget) -> Option<&Window> {
-        self.hosts[target.host]
-            .model
-            .views
-            .get(&target.session)?
-            .windows
-            .iter()
-            .find(|w| w.window_id.as_ref() == Some(&target.window))
     }
 
     /// The layout of `window` in the active host and session: its own choice, else the default.
@@ -1659,13 +1640,13 @@ impl Workspace {
 
     pub fn update_title(&mut self, tx: &mut Tx) {
         let model = &self.hosts[self.active].model;
-        let session = model
-            .view()
-            .and_then(|v| v.label.clone())
-            .unwrap_or_else(|| "Choose session".into());
-        let title = format!(
-            "{session} — {} — Rex",
-            self.settings.hosts[self.active].label
+        let title = window_title(
+            model
+                .window()
+                .map(|tab| super::activity::tab_name(model, tab))
+                .as_deref(),
+            model.view().and_then(|v| v.label.as_deref()),
+            &self.settings.hosts[self.active].label,
         );
         if title != self.title {
             tx.set_title(title.clone());
@@ -1733,9 +1714,6 @@ impl Workspace {
             self.settings.ui_scale = scale;
             self.save();
         }
-        if let Some(id) = self.zoom_notice.take() {
-            self.dismiss_notice(id);
-        }
         let effective = (self.ui_scale() * 100.).round() as i32;
         let suffix = if effective < percent {
             format!(" · showing {effective}% to fit this window")
@@ -1746,9 +1724,17 @@ impl Workspace {
         } else {
             String::new()
         };
-        self.inform(format!("Zoom {percent}%{suffix}"));
-        self.zoom_notice = Some(self.next_notice);
+        self.size_notice(format!("Zoom {percent}%{suffix}"));
         tx.instant();
+    }
+
+    /// Say a size change (interface zoom or terminal font) in one notice, replacing the last.
+    pub(super) fn size_notice(&mut self, text: String) {
+        if let Some(id) = self.zoom_notice.take() {
+            self.dismiss_notice(id);
+        }
+        self.inform(text);
+        self.zoom_notice = Some(self.next_notice);
     }
 
     fn push_notice(&mut self, text: String, sticky: bool) {
@@ -1874,8 +1860,13 @@ impl Workspace {
     /// focused terminal.
     pub fn close_search(&mut self, key: &(HostId, String), tx: &mut Tx) {
         if let Some(term) = self.terminals.get_mut(key)
-            && term.search.take().is_some()
+            && let Some(edit) = term.search.take()
         {
+            // Find next and Find previous bring the bar back on this text, in its home corner.
+            term.find.corner = Default::default();
+            if !edit.text.is_empty() {
+                term.find.last = edit.text.clone();
+            }
             term.send(Command::Search(String::new()));
         }
         tx.blur();
@@ -1910,7 +1901,7 @@ impl Workspace {
     }
 
     /// Keep the source host/session/block captured by the action, including pane-menu targets.
-    fn open_terminal(
+    pub(super) fn open_terminal(
         &mut self,
         host: usize,
         method: &str,
@@ -2128,7 +2119,10 @@ impl Workspace {
     pub fn perform(&mut self, action: Intent, tx: &mut Tx) {
         // Applying a theme goes back to Settings itself.
         if !action.opens_followup()
-            && !matches!(action, Intent::Theme(_) | Intent::Chrome(_))
+            && !matches!(
+                action,
+                Intent::Theme(_) | Intent::Chrome(_) | Intent::Choose(_)
+            )
             && self.panel.is_some()
         {
             self.close_panel(tx);
@@ -2184,6 +2178,7 @@ impl Workspace {
                     self.panel.as_mut().unwrap().selected = current;
                 }
             }
+            Intent::Choose(index) => self.choose(index, tx),
             Intent::Chrome(chrome) => {
                 self.set_chrome(chrome, tx);
                 match self.settings_back() {
@@ -2272,49 +2267,33 @@ impl Workspace {
                     model.selected.as_deref(),
                     model.window().and_then(|w| w.window_id.as_deref()),
                 ) {
-                    let (block, session) = (block.to_owned(), session.to_owned());
-                    let anchor =
-                        self.split_anchor(self.active, &session, window, &block, direction);
+                    let (block, session, window) =
+                        (block.to_owned(), session.to_owned(), window.to_owned());
                     let layout = self.new_terminal(self.active);
-                    let payload = split_payload(&anchor, direction, layout);
-                    self.open_terminal(
-                        self.active,
-                        "session.new_split",
-                        payload,
-                        &session,
-                        Some(&block),
-                    );
+                    let payload = self.split_in_tab(self.active, &session, &window, &block, direction, layout);
+                    self.open_terminal(self.active, "session.new_split", payload, &session, Some(&block));
                 }
             }
             Intent::RenameSession => {
-                let label = self
-                    .model()
-                    .view()
-                    .and_then(|v| v.label.clone())
-                    .unwrap_or_default();
-                self.open_panel(
-                    PanelKind::Form(Form::RenameSession(None)),
-                    "Rename session",
-                    &[("Session name", "", &label)],
-                );
+                let label = self.model().view().and_then(|v| v.label.clone()).unwrap_or_default();
+                self.open_panel(PanelKind::Form(Form::RenameSession(None)), "Rename session", &[("Session name", "", &label)]);
             }
-            Intent::RenameWindow(target) => {
-                let label = self.tab_label(&target).unwrap_or_default();
-                self.open_panel(
-                    PanelKind::Form(Form::RenameWindow(target)),
-                    "Rename tab",
-                    &[("Tab name", "", &label)],
-                );
+            Intent::RenameWindow(id) => {
+                if let Some(target) = self.current_tab(&id) {
+                    self.tab_action(target, super::tabs::TabAction::Rename, tx);
+                }
             }
-            Intent::CloseWindow(target) => {
-                self.confirm(
+            // A tab of the session on screen is named in its confirmation (`tabs.rs`).
+            Intent::CloseWindow(id) => match self.current_tab(&id) {
+                Some(target) => self.tab_action(target, super::tabs::TabAction::Close, tx),
+                None => self.confirm(
                     "Close this tab?",
                     "session.close_window",
-                    json!({"window_id":target.window}),
+                    json!({"window_id":id}),
                     "Ends every program in this tab on the server. Closing the app itself leaves programs running.",
-                );
-                self.panel.as_mut().unwrap().window = Some(target);
-            }
+                ),
+            },
+            Intent::Window(target, action) => self.tab_action(target, action, tx),
             Intent::TabLayout(target) => self.toggle_tab_layout(target),
             Intent::CycleColumnWidth => self.cycle_column_width(),
             Intent::MaximizeColumn => self.maximize_column(),
@@ -2337,6 +2316,10 @@ impl Workspace {
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
             }
             Intent::Updates => self.open_updates_settings(),
+            Intent::About => {
+                self.perform(Intent::Settings, tx);
+                self.open_section(SettingsSection::About);
+            }
             Intent::CheckUpdates => self.check_updates_now(),
             Intent::EditHost(host) => {
                 let h = self.settings.hosts[host].clone();
@@ -2367,6 +2350,7 @@ impl Workspace {
                 );
             }
             Intent::Retry => self.send(self.active, HostCommand::Reconnect),
+            Intent::Command(command) => command.run(self, tx),
         }
     }
 
@@ -2404,24 +2388,6 @@ impl Workspace {
         panel.anchor = Some((anchor.0 / scale, anchor.1 / scale));
     }
 
-    /// A tab's name, while its host still lists it.
-    fn tab_label(&self, target: &WindowTarget) -> Option<String> {
-        let model = &self.hosts[target.host].model;
-        self.target_window(target)
-            .map(|w| super::activity::tab_name(model, w))
-    }
-
-    /// A tab's right-click menu, at the pointer (window points): a toolbar tab's, or a
-    /// sidebar tab's on any host and session.
-    pub fn tab_menu(&mut self, target: WindowTarget, anchor: (f32, f32)) {
-        let title = self.tab_label(&target).unwrap_or_else(|| "Tab".into());
-        let scale = self.ui_scale();
-        self.open_panel(PanelKind::Window(target), &title, &[]);
-        let panel = self.panel.as_mut().unwrap();
-        panel.target = None;
-        panel.anchor = Some((anchor.0 / scale, anchor.1 / scale));
-    }
-
     /// Ctrl Shift W: closes the focused pane of a split tab, or the tab when it has one pane.
     /// Both ask first.
     pub fn close_focused(&mut self, tx: &mut Tx) {
@@ -2434,8 +2400,8 @@ impl Workspace {
             && let Some(target) = self.focused_block().and_then(|b| self.target(&b))
         {
             self.perform(Intent::Pane(target, PaneAction::Close), tx);
-        } else if let Some(target) = id.and_then(|id| self.window_target(id)) {
-            self.perform(Intent::CloseWindow(target), tx);
+        } else if let Some(id) = id {
+            self.perform(Intent::CloseWindow(id), tx);
         }
     }
 
@@ -2480,6 +2446,10 @@ impl Workspace {
         let panel = self.panel.as_mut().unwrap();
         panel.target = Some(target);
         panel.anchor = anchor;
+        // The rows' availability is the target's (Copy needs its selection), known only now.
+        if let Some(first) = self.entries().iter().position(|e| e.enabled) {
+            self.panel.as_mut().unwrap().selected = first;
+        }
     }
 
     /// A sidebar session row's right-click menu, at the pointer (window points).
@@ -2583,20 +2553,24 @@ impl Workspace {
         }
     }
 
-    fn split_anchor(
+    /// The `session.new_split` payload for a split of `block` in a tab. In a scrolling tab a
+    /// side-by-side split makes a new column: its anchor is the whole column holding `block`.
+    fn split_in_tab(
         &self,
         host: usize,
         session: &str,
         window: &str,
         block: &str,
-        direction: &str,
-    ) -> String {
-        if direction != "horizontal"
+        way: super::splits::SplitWay,
+        layout: Value,
+    ) -> Value {
+        let mut payload = self.split_payload(host, block, way, layout);
+        if payload["direction"] != "horizontal"
             || self.tab_layout_for(host, session, window) != TabLayout::Scrolling
         {
-            return block.to_owned();
+            return payload;
         }
-        self.hosts[host]
+        let anchor = self.hosts[host]
             .model
             .views
             .get(session)
@@ -2605,9 +2579,15 @@ impl Workspace {
                     .iter()
                     .find(|candidate| candidate.window_id.as_deref() == Some(window))
             })
-            .and_then(|window| self.strip_for(host, session, window).column_anchor(block))
-            .unwrap_or(block)
-            .to_owned()
+            .and_then(|window| {
+                self.strip_for(host, session, window)
+                    .column_anchor(block)
+                    .map(str::to_owned)
+            });
+        if let Some(anchor) = anchor {
+            payload["anchor_id"] = json!(anchor);
+        }
+        payload
     }
 
     fn pane_action(&mut self, target: PaneTarget, action: PaneAction, tx: &mut Tx) {
@@ -2628,18 +2608,19 @@ impl Workspace {
         };
         match action {
             PaneAction::Split(direction) => {
-                let anchor = self.split_anchor(
+                let layout = self.new_terminal(target.host);
+                let payload = self.split_in_tab(
                     target.host,
                     &target.session,
                     &target.window,
                     &target.block,
                     direction,
+                    layout,
                 );
-                let layout = self.new_terminal(target.host);
                 self.open_terminal(
                     target.host,
                     "session.new_split",
-                    split_payload(&anchor, direction, layout),
+                    payload,
                     &target.session,
                     Some(&target.block),
                 );
@@ -2679,6 +2660,12 @@ impl Workspace {
                 let key = (self.hosts[target.host].id, target.block);
                 self.terminal_command(&key, Command::Reconnect);
             }
+            PaneAction::Copy
+            | PaneAction::Paste
+            | PaneAction::SelectAll
+            | PaneAction::CopyId
+            | PaneAction::Clear
+            | PaneAction::Reset => self.pane_verb(target, action, tx),
         }
     }
 
@@ -2708,7 +2695,7 @@ impl Workspace {
             )
     }
 
-    fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
+    pub(super) fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
         let mut panel = Panel::new(
             PanelKind::Confirm {
@@ -2777,6 +2764,7 @@ impl Workspace {
                     | PanelKind::Pairing { .. }
                     | PanelKind::Themes
                     | PanelKind::Chromes
+                    | PanelKind::Choice(_)
                     | PanelKind::Discover
             ) && previous
                 .as_ref()
@@ -2976,6 +2964,7 @@ impl Workspace {
                     return;
                 }
                 let target = self.panel.as_ref().and_then(|p| p.target.clone());
+                let tab = self.panel.as_ref().and_then(|p| p.tab.clone());
                 let back = self.settings_back();
                 self.close_panel(tx);
                 match form {
@@ -3007,13 +2996,10 @@ impl Workspace {
                     Form::RenameSession(Some(session)) => {
                         self.session_request(&session, "session.set_label", json!({"label":values[0]}))
                     }
-                    Form::RenameWindow(target) => self.send(
-                        target.host,
-                        HostCommand::Request {
-                            method: "session.set_window_label".into(),
-                            payload: json!({"session_id":target.session,"window_id":target.window,"label":values[0]}),
-                        },
-                    ),
+                    Form::RenameWindow(id) => match tab {
+                        Some(tab) => self.set_tab_label(&tab, &values[0]),
+                        None => self.request("session.set_window_label", json!({"window_id":id,"label":values[0]})),
+                    },
                     Form::RenamePane(id) => match target {
                         Some(target) => self.send(
                             target.host,
@@ -3076,16 +3062,14 @@ impl Workspace {
             } => {
                 let target = self.panel.as_ref().and_then(|p| p.target.clone());
                 let session = self.panel.as_ref().and_then(|p| p.session.clone());
-                let window = self.panel.as_ref().and_then(|p| p.window.clone());
+                let tab = self.panel.as_ref().and_then(|p| p.tab.clone());
                 self.close_panel(tx);
-                if let Some(session) = session {
-                    self.session_request(&session, &method, payload);
+                if let Some(tab) = tab {
+                    self.confirmed_tab_close(&tab, &method, payload);
                     return;
                 }
-                if let Some(window) = window {
-                    let mut payload = payload;
-                    payload["session_id"] = json!(window.session);
-                    self.send(window.host, HostCommand::Request { method, payload });
+                if let Some(session) = session {
+                    self.session_request(&session, &method, payload);
                     return;
                 }
                 match target.filter(|_| method == "block.close") {
@@ -3210,6 +3194,26 @@ impl Workspace {
     }
 }
 
-fn split_payload(block: &str, direction: &str, layout: Value) -> Value {
-    json!({"anchor_id":block,"direction":direction,"side":"after","layout":layout,"focus":true})
+/// The window's title, for task switchers: the tab on screen, then its session and host.
+/// Until a session is chosen it is the app's name and the host.
+fn window_title(tab: Option<&str>, session: Option<&str>, host: &str) -> String {
+    match (tab, session) {
+        (Some(tab), Some(session)) => format!("{tab} - {session} · {host}"),
+        (Some(name), None) | (None, Some(name)) => format!("{name} · {host}"),
+        (None, None) => format!("Rex · {host}"),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn window_title_leads_with_the_tab_then_names_session_and_host() {
+    assert_eq!(
+        window_title(Some("vim"), Some("lunar-basin"), "shuvdev"),
+        "vim - lunar-basin · shuvdev"
+    );
+    assert_eq!(
+        window_title(None, Some("lunar-basin"), "shuvdev"),
+        "lunar-basin · shuvdev"
+    );
+    assert_eq!(window_title(None, None, "shuvdev"), "Rex · shuvdev");
 }

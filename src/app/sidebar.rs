@@ -6,8 +6,10 @@ use super::{
         shown_working, tab_activity, tab_name, working_dots,
     },
     activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
-    panel::{Form, Intent, PanelKind, WindowTarget},
+    keycaps::keycaps,
+    panel::Intent,
     panes::divider_handle,
+    tabs::{muted_mark, target_ring},
     theme::*,
     widgets::{chrome_button, glyph},
     workspace::Workspace,
@@ -157,7 +159,14 @@ fn host_prefix(host: &str) -> El {
 fn session_row(s: &Workspace, index: usize, id: &str, label: &str, prefixed: bool) -> El {
     let host = &s.hosts[index];
     let selected = index == s.active && host.model.selected.as_deref() == Some(id);
-    let count = host.model.views.get(id).map(|v| v.windows.len());
+    // A count earns its place only when it says something: a session has one tab unless
+    // told otherwise.
+    let count = host
+        .model
+        .views
+        .get(id)
+        .map(|v| v.windows.len())
+        .filter(|count| *count > 1);
     let target = id.to_owned();
     let menu_id = id.to_owned();
     // The session a session menu, its rename form or its close confirm acts on.
@@ -276,6 +285,8 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str, prefixed: boo
     } else if let Some(count) = count {
         e = e.child(
             text(count.to_string())
+                .key(format!("session-count:{index}:{id}"))
+                .label(format!("{count} tabs"))
                 .font(medium(10.5))
                 .color(rgb(muted())),
         );
@@ -313,22 +324,17 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
             .is_some_and(|v| v.active_window_id.as_deref() == Some(id));
     let activity = tab_activity(model, tab);
     let label = tab_name(model, tab);
-    let target = WindowTarget {
-        host: index,
-        session: session.to_owned(),
-        window: id.to_owned(),
-    };
-    // The tab a tab menu, its rename form or its close confirm acts on.
-    let targeted = s.panel.as_ref().is_some_and(|p| match &p.kind {
-        PanelKind::Window(t) | PanelKind::Form(Form::RenameWindow(t)) => *t == target,
-        PanelKind::Confirm { .. } => p.window.as_ref() == Some(&target),
-        _ => false,
-    });
     let (target_session, target_window) = (session.to_owned(), id.to_owned());
+    let quiet = s.tab_muted(index, id);
     let mut row = row()
         .key(format!("sidebar-tab:{index}:{session}:{id}"))
         .role("tab")
-        .label(label.clone())
+        .focus_selected(active)
+        .label(if quiet {
+            format!("{label} · Muted")
+        } else {
+            label.clone()
+        })
         .h(32.)
         .ml(12.)
         .pl(10.)
@@ -352,12 +358,20 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
                 .grow(1.)
                 .min_w(0.),
         );
-    row = super::toolbar::tab_actions(row, target, move |s, tx| {
-        s.select_window(index, target_session.clone(), target_window.clone(), tx);
-    });
+    row = super::toolbar::tab_actions(
+        row,
+        index,
+        session.to_owned(),
+        id.to_owned(),
+        move |s, tx| {
+            s.select_window(index, target_session.clone(), target_window.clone(), tx);
+        },
+    );
     row = pill(row, active);
     let config = &s.settings.notifications;
-    if let Some((word, tone)) = shown_word(
+    if quiet {
+        row = row.child(muted_mark(id));
+    } else if let Some((word, tone)) = shown_word(
         config,
         &activity,
         s.unseen_on(index, id),
@@ -367,18 +381,11 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
     } else if shown_working(config, &activity) {
         row = row.child(working_dots(format!("sidebar-tab-working:{index}:{id}")));
     }
-    if let Some(progress) = shown_progress(config, &activity) {
+    if let Some(progress) = shown_progress(config, &activity).filter(|_| !quiet) {
         row = row.child(progress_bar(format!("tab-progress:{id}"), progress, 10.));
     }
-    if targeted {
-        // An overlay like a targeted session row's, so the outline never shifts the row.
-        row = row.child(
-            el().key(format!("sidebar-tab-target:{index}:{session}:{id}"))
-                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
-                .radius(10.)
-                .continuous_corners()
-                .border(1.5, rgb(accent())),
-        );
+    if s.tab_targeted(index, id) {
+        row = row.child(target_ring(id, 10.));
     }
     row
 }
@@ -902,9 +909,18 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                 text("Find a session")
                     .font(ui(12.5))
                     .color(rgb(muted()))
-                    .grow(1.),
+                    .truncate()
+                    .grow(1.)
+                    .shrink(),
             )
-            .child(text("⌃K").font(medium(10.5)).color(rgb(muted()))),
+            // The switcher's shortcut as it is bound now; nothing when it is unbound.
+            .child(
+                keycaps(
+                    &s.shortcut_chords("session.switch", &serde_json::Value::Null),
+                    false,
+                )
+                .key("session-search-keys"),
+            ),
     );
     let mut panel = col()
         .w_full()
@@ -970,7 +986,8 @@ pub fn sidebar(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
                     .child(text("Add host").font(ui(12.)).color(rgb(muted()))),
             )
             .child(
-                text(format!("{total} sessions"))
+                text(session_count(total))
+                    .key("sidebar-session-count")
                     .font(ui(11.))
                     .color(rgb(muted()))
                     .pr(6.),
@@ -1011,4 +1028,13 @@ pub fn sidebar_edge(s: &Workspace) -> El {
         s.sidebar.reset_width();
         s.save();
     })
+}
+
+/// How many sessions the saved hosts have between them, for the footer.
+fn session_count(total: usize) -> String {
+    if total == 1 {
+        "1 session".to_owned()
+    } else {
+        format!("{total} sessions")
+    }
 }

@@ -2,7 +2,8 @@
 //! keeping it on after restarts. Every call here is an explicit user action.
 use super::{
     panel::{Form, PanelKind},
-    settings_view::{detail_text, setting, setting_with},
+    settings_kit::{row_frame, setting},
+    settings_view::{detail_text, setting_with},
     theme::*,
     widgets::{Pill, pill},
     workspace::Workspace,
@@ -13,12 +14,12 @@ use rex_linux::connection::{
 };
 use rune::{Color, El, Shape, canvas, col, row, text};
 
-/// The Tailscale rows for saved host `host`: empty unless it is local and its server can run
-/// built-in Tailscale.
-pub(super) fn rows(s: &Workspace, host: usize) -> El {
+/// The Tailscale rows of saved host `host`'s card: none unless it is local and its server can
+/// run built-in Tailscale.
+pub(super) fn rows(s: &Workspace, host: usize) -> Vec<El> {
     let saved = &s.settings.hosts[host];
     let Some(model) = s.hosts.get(host).map(|h| &h.model) else {
-        return col();
+        return Vec::new();
     };
     let pairing = model
         .tailscale
@@ -39,7 +40,7 @@ pub(super) fn rows(s: &Workspace, host: usize) -> El {
             )
         });
     let (Some(status), true) = (model.tailscale.as_ref(), saved.controls_tailscale()) else {
-        return col().children(pairing);
+        return pairing.into_iter().collect();
     };
     let (words, warn) = status_words(status);
     let mut control = row().gap(8.).center_y();
@@ -62,18 +63,22 @@ pub(super) fn rows(s: &Workspace, host: usize) -> El {
             .build(kit())
             .key(format!("tailscale:{host}")),
     );
-    let mut body = col().gap(4.).child(setting_with(
+    let mut rows = vec![setting_with(
         "Tailscale",
         Some(detail_text(&words, if warn { warning() } else { muted() })),
         control,
-    ));
+    )];
     if let Some(problem) = &model.tailscale_problem {
-        body = body.child(
-            text(problem.clone())
-                .font(ui(11.5))
-                .color(rgb(warning()))
-                .wrap()
-                .key(format!("tailscale-problem:{host}")),
+        rows.push(
+            row_frame(false).child(
+                text(problem.clone())
+                    .font(ui(11.5))
+                    .color(rgb(warning()))
+                    .wrap()
+                    .grow(1.)
+                    .min_w(0.)
+                    .key(format!("tailscale-problem:{host}")),
+            ),
         );
     }
     let name = match saved.tailscale_name() {
@@ -82,7 +87,7 @@ pub(super) fn rows(s: &Workspace, host: usize) -> El {
             detail_text(&problem, warning()).key(format!("tailscale-name-problem:{host}"))
         }
     };
-    body.child(setting_with(
+    rows.push(setting_with(
         "Device name",
         Some(name),
         pill(
@@ -92,8 +97,8 @@ pub(super) fn rows(s: &Workspace, host: usize) -> El {
             26.,
             move |s, _| s.open_tailscale_name(host),
         ),
-    ))
-    .child(setting(
+    ));
+    rows.push(setting(
         "Keep on after restarts",
         "Turn Tailscale on under this name now and whenever Rex Linux connects to this server.",
         rune_kit::Switch::new(saved.keep_tailscale)
@@ -102,8 +107,9 @@ pub(super) fn rows(s: &Workspace, host: usize) -> El {
             .on_toggle(move |s: &mut Workspace| s.toggle_keep_tailscale(host))
             .build(kit())
             .key(format!("tailscale-keep:{host}")),
-    ))
-    .children(pairing)
+    ));
+    rows.extend(pairing);
+    rows
 }
 
 /// The address a device on the tailnet reaches this server at, while HTTPS is available.

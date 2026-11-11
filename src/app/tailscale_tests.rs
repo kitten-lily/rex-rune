@@ -15,10 +15,15 @@ fn state(state: &str) -> Status {
 }
 
 /// Settings → Hosts open on `ws`, as a headless runtime.
+/// Settings → Hosts, open and at rest in a window that shows the whole host card.
 fn hosts_settings(mut ws: Workspace) -> Runtime<Workspace> {
     ws.perform(Intent::Settings, &mut rune::Tx::default());
-    ws.settings_section = SettingsSection::Hosts;
-    runtime(ws)
+    ws.open_section(SettingsSection::Hosts);
+    let mut rt = runtime_at(ws, (1440., 1000.));
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
+    rt
 }
 
 fn commands(rx: &flume::Receiver<HostCommand>) -> Vec<HostCommand> {

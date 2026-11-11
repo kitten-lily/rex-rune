@@ -4,23 +4,33 @@ mod actions;
 mod activity;
 mod activity_list;
 mod bindings;
+mod commands;
 mod dialogs;
 mod discover;
+mod find;
+mod font_size;
 mod fonts;
+mod help;
 mod input;
 mod integrations;
+mod keycaps;
 mod keys;
 mod navigation;
 mod notify;
+mod pane_header;
+mod pane_verbs;
 mod panel;
 mod panes;
 mod popups;
 mod remote;
+mod settings_kit;
 mod settings_view;
 mod sidebar;
+mod splits;
 mod sprites;
 mod ssh_setup;
 mod stats;
+mod tabs;
 mod tailscale;
 mod term;
 mod theme;
@@ -77,7 +87,6 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .scale(scale)
         .scale_motion(STILL)
         .fill(rgb(ground()))
-        .on_window_focus(|s: &mut Workspace, focused, _| s.window_focus(focused))
         .child(
             col()
                 .absolute(0., 0.)
@@ -111,6 +120,8 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         })
         // With no focused control, Rune sends releases only to the outermost node.
         .on_key_up(input::on_key_up)
+        // Rune delivers native window focus to the view's first element only.
+        .on_window_focus(|s: &mut Workspace, focused, _| s.window_focus(focused))
         .w_full()
         .h_full()
         .fill(rgb(ground()))
@@ -147,8 +158,10 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     }
     // Reveal the active tab after selection, resize and sidebar changes, and again on the
     // next frame once the strip has its new width.
-    let tab = s.model().view().and_then(|v| v.active_window_id.clone());
-    let reveal = (tab.clone(), s.area[2].round() as i32, s.sidebar.is_open());
+    // A tab that moved within its session's order is revealed again where it now is.
+    let place = s.active_tab_place();
+    let tab = place.as_ref().map(|(id, _)| id.clone());
+    let reveal = (place, s.area[2].round() as i32, s.sidebar.is_open());
     let again = std::mem::take(&mut s.reveal_tab_again);
     if reveal != s.last_tab || again {
         if let Some(id) = &tab {
@@ -214,7 +227,7 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
     rune::text::set_app_font_paths(fonts.paths)
         .map_err(|_| anyhow::anyhow!("terminal fonts were already initialized"))?;
     rune::set_app_id("dev.shuv.rex-linux");
-    if let Err(error) = rune::set_app_icon_png(APP_ICON) {
+    if let Err(error) = rune::set_app_icon(APP_ICON) {
         eprintln!("Could not load the Rex window icon: {error}");
     }
     let rune_args = std::mem::take(&mut options.rune);

@@ -50,9 +50,9 @@ fn focused_block(window: &session::Window) -> Option<&str> {
         .or_else(|| blocks(window).next())
 }
 
-/// What a tab is called: its chosen name, or for a default label, its focused program's
-/// terminal title when there is one.
-pub fn tab_name(model: &HostModel, window: &session::Window) -> String {
+/// Whether a tab still has a default label, so it shows its program's title: no label, the
+/// label this client gives new tabs, or the one the server makes from the window's ID.
+pub fn default_title(window: &session::Window) -> bool {
     let label = window.label.as_deref().filter(|l| !l.is_empty());
     // The server's default uses the last eight ID characters. Match this window's
     // own ID so an explicitly named "Window ..." on another window stays intact.
@@ -65,7 +65,14 @@ pub fn tab_name(model: &HostModel, window: &session::Window) -> String {
                     .as_deref()
                     .is_some_and(|id| id.ends_with(suffix))
         });
-    let title = (generated || label.is_none_or(|l| l == DEFAULT_TAB_LABEL))
+    generated || label.is_none_or(|l| l == DEFAULT_TAB_LABEL)
+}
+
+/// What a tab is called: its chosen name, or for a default label, its focused program's
+/// terminal title when there is one.
+pub fn tab_name(model: &HostModel, window: &session::Window) -> String {
+    let label = window.label.as_deref().filter(|l| !l.is_empty());
+    let title = default_title(window)
         .then(|| focused_block(window).and_then(|b| model.title(b)))
         .flatten();
     title.or(label).unwrap_or("Terminal").to_owned()
@@ -467,12 +474,21 @@ impl Workspace {
     pub fn unread(&self) -> (usize, bool) {
         let config = &self.settings.notifications;
         let (mut count, mut trouble) = (0, false);
-        for host in self.hosts.iter().filter(|h| h.model.connected) {
+        for (index, host) in self.hosts.iter().enumerate() {
+            if !host.model.connected {
+                continue;
+            }
             let model = &host.model;
+            // A muted tab keeps quiet here too.
             let panes: std::collections::HashSet<&str> = model
                 .views
                 .values()
                 .flat_map(|v| &v.windows)
+                .filter(|w| {
+                    !w.window_id
+                        .as_deref()
+                        .is_some_and(|id| self.tab_muted(index, id))
+                })
                 .flat_map(blocks)
                 .collect();
             for block in panes {
@@ -522,7 +538,8 @@ impl Workspace {
         let Some(channels) = self.settings.notifications.channels(state) else {
             return;
         };
-        if !channels.desktop {
+        // A muted tab stays quiet whatever its programs do.
+        if !channels.desktop || self.tab_muted(index, &window) {
             return;
         }
         let sound = if channels.sound {
@@ -585,10 +602,9 @@ impl Workspace {
                         .find(|w| blocks(w).any(|b| b == notice.block))
                         .and_then(|w| w.window_id.clone())
                 });
-            if window
-                .as_deref()
-                .is_some_and(|w| self.tab_seen(index, &notice.session, w))
-            {
+            if window.as_deref().is_some_and(|w| {
+                self.tab_seen(index, &notice.session, w) || self.tab_muted(index, w)
+            }) {
                 continue;
             }
             let (tab, place) = self.describe_tab(index, &notice.session, window.as_deref());
@@ -658,8 +674,8 @@ impl Workspace {
             return;
         };
         if let Some(block) = &target.block {
-            if let Some(window) = self.pane_window(index, &target.session, block) {
-                self.focus_pane(index, target.session, window, block.clone(), tx);
+            if let Some(window) = self.pane_tab(index, &target.session, block) {
+                self.show_pane(index, target.session, window, block.clone(), tx);
                 return;
             }
             if let Some(window) = target
@@ -678,7 +694,7 @@ impl Workspace {
     }
 
     /// The tab that holds `block` in a session host `index` lists, if any.
-    fn pane_window(&self, index: usize, session: &str, block: &str) -> Option<String> {
+    fn pane_tab(&self, index: usize, session: &str, block: &str) -> Option<String> {
         let model = &self.hosts[index].model;
         if !model.sessions.iter().any(|s| s.session_id == session) {
             return None;
@@ -703,7 +719,7 @@ impl Workspace {
     }
 
     /// Show a session's tab and focus one of its panes.
-    fn focus_pane(
+    fn show_pane(
         &mut self,
         index: usize,
         session: String,
@@ -737,14 +753,14 @@ impl Workspace {
             return;
         }
         let live = self.host_index(target.host).and_then(|index| {
-            self.pane_window(index, &target.session, &target.block)
+            self.pane_tab(index, &target.session, &target.block)
                 .map(|window| (index, window))
         });
         let Some((index, window)) = live else {
             self.inform("That pane has closed.");
             return;
         };
-        self.focus_pane(
+        self.show_pane(
             index,
             target.session.clone(),
             window,

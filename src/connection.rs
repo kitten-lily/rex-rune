@@ -17,8 +17,10 @@ use std::{
 
 pub mod activity;
 pub mod clipboard;
+pub mod downloads;
 mod prefetch;
 mod probes;
+pub mod server_info;
 pub mod tailscale;
 
 /// The label new tabs get. A tab that still has it shows its program's terminal title.
@@ -112,6 +114,11 @@ pub enum Command {
     SearchStep(bool),
     TakeControl,
     Reconnect,
+    /// `terminal.reset`: the terminal back to its starting state, screen and scrollback
+    /// cleared, the program left running. Sent once, to this block only.
+    Reset,
+    /// `terminal.clear`: the screen and scrollback cleared, the current line kept.
+    Clear,
 }
 
 #[derive(Default)]
@@ -195,6 +202,8 @@ pub struct HostModel {
     /// Taken once before cloning the worker model into the UI.
     pub client_actions: Vec<actions::Queued>,
     pub performs: Vec<perform::Pending>,
+    /// This launch's downloads from the host, oldest first; see [`crate::download`].
+    pub downloads: Vec<crate::download::Transfer>,
     pub connection_epoch: u64,
     pub protocol: ProtocolStats,
     pub sessions: Vec<session::Session>,
@@ -236,6 +245,8 @@ pub struct HostModel {
     pub tailscale: Option<tailscale::Status>,
     /// Why the last Tailscale call failed, until the next one succeeds or the host reconnects.
     pub tailscale_problem: Option<String>,
+    /// What the server says about itself; see [`server_info`].
+    pub server_info: server_info::ServerInfo,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -415,6 +426,9 @@ pub enum HostCommand {
         outcome: perform::Outcome,
     },
     Keymap(Box<keymap::Declaration>),
+    /// Read the server's version once on each connection from now on, and its status again
+    /// when the server says it changed; see [`server_info`]. Read-only, and a refusal is quiet.
+    Identify,
     Action {
         generation: u64,
         request: Box<rexrs::api::client::Action>,
@@ -427,6 +441,9 @@ pub enum HostCommand {
         blocks: Vec<String>,
     },
     Select(String),
+    /// Read the session list and the selected session's layout again, on request. Read-only:
+    /// nothing is attached, created or closed.
+    RefreshSessions,
     /// Select a session and optionally focus a window as one correlated navigation.
     Navigate {
         id: u64,
@@ -472,6 +489,13 @@ pub enum HostCommand {
         block: String,
         files: Vec<crate::upload::File>,
     },
+    /// Download a file from the block's machine into a folder here (API revision 13). The
+    /// transfer appears in `HostModel::downloads` under the request's id.
+    Download(Box<downloads::Request>),
+    /// Start the stream of a download that is `AwaitingConfirmation`.
+    DownloadConfirm(u64),
+    /// Stop a download at any point; its partial file is deleted.
+    DownloadCancel(u64),
     Reconnect,
     /// The terminal theme to declare from now on, also while disconnected; none declares
     /// nothing (Follow server).
@@ -722,6 +746,44 @@ impl Drop for PaneWorker {
     }
 }
 
+/// The host worker threads that have started and not yet ended, named by their model's address.
+static RUNNING_HOSTS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+fn running_hosts() -> std::sync::MutexGuard<'static, Vec<usize>> {
+    RUNNING_HOSTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Lists one host worker thread for as long as it lives, runtime and tasks included.
+struct HostThread(usize);
+impl Drop for HostThread {
+    fn drop(&mut self) {
+        running_hosts().retain(|host| *host != self.0);
+    }
+}
+
+fn wait_until(timeout: Duration, done: impl Fn(&[usize]) -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if done(&running_hosts()) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Waits until every host worker thread has ended, or `timeout` has passed; returns whether they
+/// all have. To exit cleanly: drop the [`HostConnection`]s (each sends `HostCommand::Shutdown`),
+/// then call this. A host that ends drops its transfers, and a transfer's partial file is deleted
+/// as it drops, so a download in flight leaves nothing behind. The threads are detached: a
+/// process that exits without waiting ends them mid-transfer, and the partial files stay for
+/// [`crate::download::Records::clean_up_leftovers`] at the next launch.
+pub fn wait_for_hosts(timeout: Duration) -> bool {
+    wait_until(timeout, |hosts| hosts.is_empty())
+}
+
 impl HostConnection {
     pub fn spawn(
         endpoint: String,
@@ -780,9 +842,13 @@ impl HostConnection {
             label,
             keep_tailscale,
         };
+        let alive = HostThread(Arc::as_ptr(&model) as usize);
+        running_hosts().push(alive.0);
         std::thread::Builder::new()
             .name("rex-host".into())
             .spawn(move || {
+                // Ends after the runtime and its tasks are gone, which deletes partial files.
+                let _alive = alive;
                 let result = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
@@ -1180,6 +1246,7 @@ fn apply_bootstrap(
     state.tailscale_seq = reply.seq;
     let boot = reply.value;
     shared.update(|m| {
+        m.server_info.bootstrapped(&boot.server_status);
         m.sessions = boot.attach_all.sessions;
         m.tailscale = boot.server_status.tailscale;
     });
@@ -1391,6 +1458,7 @@ async fn run_host(
     let mut prefetch = prefetch::Prefetch::default();
     let mut probes = probes::Probes::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;
+    let mut server_reads = server_info::Reader::default();
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
     let ssh = crate::ssh::Target::parse(&configured)?;
@@ -1416,6 +1484,7 @@ async fn run_host(
                 m.performs.clear();
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
+                m.server_info = server_info::ServerInfo::welcomed(control.welcome());
                 m.views.clear();
                 // Reports made while disconnected were missed; queries refill what's shown.
                 m.activity.clear();
@@ -1429,6 +1498,7 @@ async fn run_host(
                 m.tailscale_problem = None;
             });
             let mut state = ControlState::default();
+            let mut downloads = downloads::Downloads::default();
             let mut busy_since = Some(Instant::now());
             let boot = bootstrap_request(wanted.as_deref(), create.is_some(), workers.values().map(|w| w.session.clone()));
             let started = Instant::now();
@@ -1500,6 +1570,8 @@ async fn run_host(
             // Restore terminal sizes and state before a best-effort keymap can wait.
             if let Some(declaration) = &keymap { keymap::refresh(&mut control, shared, declaration).await; }
             if let Some(call) = startup_call { tailscale_call(&mut control, shared, &mut state, &call).await?; }
+            server_reads.reset();
+            server_reads.start(&mut control).await?;
             retry = 0;
             prefetch.reset();
             probes.reset();
@@ -1515,7 +1587,9 @@ async fn run_host(
                     // than MAX_WAIT. They must not gain another five seconds in the UI queue.
                     use futures_util::FutureExt;
                     if let Some(event) = control.next_event().now_or_never() {
-                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
+                        let event = event?;
+                        if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
+                        handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
@@ -1570,9 +1644,12 @@ async fn run_host(
                             }
                         }
                     }
+                    reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
-                        handle_event(event?, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
+                        let event = event?;
+                        if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
+                        handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
                         declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
@@ -1609,6 +1686,11 @@ async fn run_host(
                             }
                             continue;
                         }
+                        if let HostCommand::Identify = command {
+                            server_reads.want();
+                            server_reads.start(&mut control).await?;
+                            continue;
+                        }
                         if let HostCommand::Upload { session, block, files } = command {
                             if let Err(error) = upload(&mut control, shared, &endpoint, &session, &block, files).await {
                                 shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
@@ -1616,6 +1698,12 @@ async fn run_host(
                             }
                             continue;
                         }
+                        if let HostCommand::Download(request) = command {
+                            downloads.start(&mut control, shared, &endpoint, *request, crate::download::new_ref).await?;
+                            continue;
+                        }
+                        if let HostCommand::DownloadConfirm(id) = command { downloads.signal(id, downloads::Signal::Confirm); continue; }
+                        if let HostCommand::DownloadCancel(id) = command { downloads.signal(id, downloads::Signal::Cancel); continue; }
                         if let HostCommand::Navigate { id, deadline, .. } = &command
                             && Instant::now() >= *deadline
                         {
@@ -1676,8 +1764,11 @@ async fn run_host(
                     Ok(HostCommand::Theme(new)) => theme = new,
                     Ok(HostCommand::KeepTailscale(new)) => keep_tailscale = new,
                     Ok(HostCommand::Keymap(new)) => keymap = Some(new),
+                    Ok(HostCommand::Identify) => server_reads.want(),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
+                    Ok(HostCommand::Download(request)) => downloads::refuse(shared, *request, crate::download::Failure::Disconnected),
+                    Ok(HostCommand::DownloadConfirm(_) | HostCommand::DownloadCancel(_)) => {}
                     Ok(HostCommand::Terminal { block, command: Command::Selection(input), .. }) => {
                         if let Some(worker) = workers.get(&block) { let _ = worker.commands.send(DataCommand::Selection(input)); }
                     }
@@ -1700,6 +1791,7 @@ async fn run_host(
                 HostCommand::Theme(new) => theme = new,
                 HostCommand::KeepTailscale(new) => keep_tailscale = new,
                 HostCommand::Keymap(new) => keymap = Some(new),
+                HostCommand::Identify => server_reads.want(),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
@@ -1708,6 +1800,9 @@ async fn run_host(
                 }
                 HostCommand::Terminal { block, command, .. } => {
                     forward_search(&workers, &block, &command);
+                }
+                HostCommand::Download(request) => {
+                    downloads::refuse(shared, *request, crate::download::Failure::Disconnected)
                 }
                 _ => {}
             }
@@ -1905,6 +2000,12 @@ async fn handle_command(
                 m.notice = None;
             });
         }
+        HostCommand::RefreshSessions => {
+            list(control, shared, state).await?;
+            // A selected session that has gone is forgotten by the list, not re-read.
+            let selected = shared.model.lock().expect("host model").selected.clone();
+            after_request(control, shared, workers, state, selected.as_deref()).await?;
+        }
         HostCommand::CreateSession { label, shell } => {
             let layout = crate::layout::shell_layout(
                 shell.as_deref(),
@@ -2014,6 +2115,22 @@ async fn handle_command(
                 Command::Reconnect => {
                     let _ = worker.commands.send(DataCommand::Reconnect);
                 }
+                // Neither is input: the block is not claimed. A refusal becomes the host's
+                // notice and a transport failure reconnects; either way it is not sent again.
+                verb @ (Command::Reset | Command::Clear) => {
+                    let method = match verb {
+                        Command::Reset => "com.superlogical.terminal.reset",
+                        _ => "com.superlogical.terminal.clear",
+                    };
+                    request(
+                        control,
+                        method,
+                        json!({"session_id":session,"block_id":block,"args":{}}),
+                    )
+                    .await?;
+                    // The history the view may have been scrolled into is gone.
+                    let _ = worker.commands.send(DataCommand::Bottom);
+                }
                 input => {
                     let (connected, owner) = {
                         let m = shared.model.lock().expect("host model");
@@ -2119,6 +2236,10 @@ async fn handle_command(
         | HostCommand::Keymap(_)
         | HostCommand::KeepTailscale(_)
         | HostCommand::Tailscale(_)
+        | HostCommand::Identify
+        | HostCommand::Download(_)
+        | HostCommand::DownloadConfirm(_)
+        | HostCommand::DownloadCancel(_)
         | HostCommand::Upload { .. } => {
             unreachable!()
         }

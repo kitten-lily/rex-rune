@@ -527,6 +527,7 @@ impl InstallChannel {
 
     /// Channel-specific update instructions for `version`.
     pub fn guidance(&self, version: &str) -> ChannelGuidance {
+        let version = &crate::format_version(version);
         let deb_arch = match std::env::consts::ARCH {
             "aarch64" => "arm64",
             _ => "amd64",
@@ -1068,7 +1069,7 @@ fn xdg_data_dir() -> PathBuf {
         })
 }
 
-fn xdg_state_dir() -> PathBuf {
+pub(crate) fn xdg_state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
