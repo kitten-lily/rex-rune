@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -260,6 +261,45 @@ class SigningTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("refusing unsigned release", result.stderr)
             self.assertEqual(list(self.dist.glob("*.minisig")), [])
+
+
+class LocalThemesGuardTests(unittest.TestCase):
+    def load(self):
+        spec = importlib.util.spec_from_file_location("local_themes", SCRIPTS / "local_themes.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def tarball(self, path, data, member="rex-linux-0.5.0-x86_64-linux-gnu/bin/rex-linux"):
+        binary = path.parent / "binary"
+        binary.write_bytes(data)
+        with tarfile.open(path, "w:gz") as archive:
+            archive.add(binary, arcname=member)
+
+    def test_packaging_refuses_a_local_dracula_pro_build(self):
+        themes = self.load()
+        marked = b"\x7fELF" + themes.MARKER + b"\0tail"
+        clean = b"\x7fELF plain build"
+        with tempfile.TemporaryDirectory() as temp:
+            temp = Path(temp)
+            with self.assertRaises(SystemExit) as raised:
+                themes.refuse_local_themes(marked, "target/release/rex-linux")
+            self.assertIn("contains local Dracula Pro themes and must not be packaged or published",
+                          str(raised.exception))
+            self.assertIn("REX_DRACULA_PRO=0 cargo build --locked --release --bin rex-linux",
+                          str(raised.exception))
+            themes.refuse_local_themes(clean, "target/release/rex-linux")
+            tar = temp / "marked.tar.gz"
+            self.tarball(tar, marked)
+            with self.assertRaises(SystemExit):
+                themes.refuse_in_tarball(tar)
+            tar = temp / "clean.tar.gz"
+            self.tarball(tar, clean)
+            themes.refuse_in_tarball(tar)
+            tar = temp / "nobinary.tar.gz"
+            self.tarball(tar, marked, member="rex-linux-0.5.0-x86_64-linux-gnu/README.md")
+            with self.assertRaises(SystemExit):
+                themes.refuse_in_tarball(tar)
 
 
 if __name__ == "__main__":

@@ -11,8 +11,12 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from local_themes import refuse_in_tarball  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 ARCH_IMAGE = 'archlinux:latest@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899'
@@ -26,6 +30,7 @@ def package(dist, version):
     recipe = (ROOT / 'packaging/arch/PKGBUILD.in').read_text().replace('@VERSION@', version)
     for arch in ARCHES:
         source = dist / f'rex-linux-{version}-{arch}-linux-gnu.tar.gz'
+        refuse_in_tarball(source)
         with source.open('rb') as stream:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         recipe = recipe.replace(f'@SHA256_{arch.upper()}@', digest)

@@ -23,6 +23,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -33,6 +34,11 @@ SCALE = 1.25
 W, H = 1920, 1080
 PROBE = os.environ.get("DEMO_PROBE") == "1"
 APP = Path(os.environ.get("REX_BIN") or ROOT / "target/release/rex-linux")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from local_themes import refuse_local_themes  # noqa: E402
+
+if APP.is_file():
+    refuse_local_themes(APP.read_bytes(), str(APP))
 
 # Evdev key codes on a US layout: (code, needs shift).
 KEYS = {"Enter": (28, False), "Escape": (1, False), "Tab": (15, False), "BackSpace": (14, False),

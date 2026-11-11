@@ -47,6 +47,7 @@ jobs:
   build:
     env:
       REX_LINUX_CHANNEL: official
+      REX_DRACULA_PRO: "0"
     permissions:
       contents: read
     strategy:

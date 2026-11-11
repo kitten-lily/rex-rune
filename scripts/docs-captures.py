@@ -29,12 +29,18 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP = Path(os.environ.get("REX_BIN") or ROOT / "target/release/rex-linux")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from local_themes import refuse_local_themes  # noqa: E402
+
+if APP.is_file():
+    refuse_local_themes(APP.read_bytes(), str(APP))
 SIZE, SCALE = "1440x900", "1.5"
 PS1 = r"\[\e[38;5;110m\]rex-linux\[\e[0m\] \[\e[38;5;245m\]❯\[\e[0m\] "
 # `cargo test -q` in the fixture shell prints fixed text, never a real run: timings, test counts

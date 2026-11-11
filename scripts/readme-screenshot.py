@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -22,6 +23,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = Path(os.environ.get("SHOT_OUT", ROOT / "docs/screenshot.png"))
 APP = Path(os.environ.get("REX_BIN") or ROOT / "target/release/rex-linux")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from local_themes import refuse_local_themes  # noqa: E402
+
+if APP.is_file():
+    refuse_local_themes(APP.read_bytes(), str(APP))
 W, H, SCALE = 2160, 1350, 1.5
 # `cargo test` in the fixture shell prints only the suites that ran tests, one line per result.
 CARGO = r"""cargo() { command cargo "$@" 2>/dev/null | grep -E '^(running [1-9]|\.+$|test result: ok\. [1-9])' | sed -E 's/; 0 ignored.*finished in/ in/'; }"""

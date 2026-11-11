@@ -13,9 +13,13 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from local_themes import refuse_in_tarball, refuse_local_themes  # noqa: E402
 
 
 def run(*args, **kwargs):
@@ -30,6 +34,7 @@ def main():
     version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
     arch, deb_arch = {"x86_64": ("x86_64", "amd64"), "aarch64": ("aarch64", "arm64")}[platform.machine()]
     binary = root / "target/release/rex-linux"
+    refuse_local_themes(binary.read_bytes(), str(binary))
     actual = run(str(binary), "--version")
     if actual != f"rex-linux {version}":
         raise SystemExit(f"Rebuild before packaging: {actual!r}, expected rex-linux {version}")

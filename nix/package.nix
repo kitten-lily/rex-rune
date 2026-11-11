@@ -85,6 +85,7 @@ rustPlatform.buildRustPackage {
     wayland
   ];
   REX_LINUX_CHANNEL = "nix";
+  REX_DRACULA_PRO = "0";
   passthru = { inherit runtimeLibraries; };
   cargoBuildFlags = [ "--bins" ];
   cargoTestFlags = [ "--all-features" ];
