@@ -2013,9 +2013,12 @@ impl Workspace {
             TerminalThemeChoice::FollowServer => "Follow server",
             TerminalThemeChoice::RexDefault => "Rex default colours",
             TerminalThemeChoice::FollowChrome => "Follow chrome",
-            TerminalThemeChoice::Named(id) => {
-                rex_linux::terminal_theme::builtin(id).map_or(id, |b| b.name)
-            }
+            TerminalThemeChoice::Named(id) => match rex_linux::terminal_theme::builtin(id) {
+                Some(b) => b.name,
+                // A Dracula Pro theme this build lacks follows the chrome.
+                None if id.starts_with("rex/dracula-pro") => "Follow chrome",
+                None => id,
+            },
         }
     }
 

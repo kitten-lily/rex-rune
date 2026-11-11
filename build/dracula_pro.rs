@@ -84,6 +84,7 @@ pub fn generate(dir: Option<&Path>) -> Output {
         watch: Vec::new(),
     };
     let mut entries = String::new();
+    let mut builtins = String::new();
     if let Some(dir) = dir {
         if dir.is_dir() {
             out.watch.push(dir.to_owned());
@@ -122,6 +123,7 @@ pub fn generate(dir: Option<&Path>) -> Output {
                     }
                 }
             };
+            let index = out.themes;
             out.themes += 1;
             out.chromes += usize::from(chrome.is_some());
             let _ = write!(
@@ -130,8 +132,22 @@ pub fn generate(dir: Option<&Path>) -> Output {
                 source_code(&source),
                 chrome.as_ref().map_or("None".to_owned(), chrome_code),
             );
+            let paired = if chrome.is_some() {
+                format!("Some(crate::settings::ChromeTheme::Generated({index}))")
+            } else {
+                "None".to_owned()
+            };
+            let _ = write!(
+                builtins,
+                "crate::terminal_theme::Builtin {{ id: {id:?}, name: {name:?}, chrome: {paired}, theme: || crate::dracula_pro::terminal(&crate::dracula_pro::THEMES[{index}]) }}, ",
+            );
         }
     }
-    out.code = format!("pub static THEMES: &[Theme] = &[{}];\n", entries.trim_end());
+    out.code = format!(
+        "pub static THEMES: &[Theme] = &[{}];\n\
+         pub static BUILTINS: &[crate::terminal_theme::Builtin] = &[{}];\n",
+        entries.trim_end(),
+        builtins.trim_end(),
+    );
     out
 }

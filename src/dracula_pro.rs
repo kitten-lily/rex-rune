@@ -110,6 +110,24 @@ mod generate_tests {
     }
 
     #[test]
+    fn builtins_pair_chromes_by_index() {
+        let (pro, alucard) = (fixture("pro"), fixture("alucard"));
+        let c = Checkout::new("builtins", &[("pro", &pro), ("alucard", &alucard)]);
+        let out = generate(Some(&c.0));
+        assert!(out.code.contains("pub static BUILTINS"));
+        assert!(
+            out.code
+                .contains("chrome: Some(crate::settings::ChromeTheme::Generated(0))")
+        );
+        assert!(out.code.contains("chrome: None, theme: ||"));
+        assert!(
+            generate(None)
+                .code
+                .contains("BUILTINS: &[crate::terminal_theme::Builtin] = &[]")
+        );
+    }
+
+    #[test]
     fn a_light_file_is_terminal_only() {
         let c = Checkout::new("light", &[("alucard", &fixture("alucard"))]);
         let out = generate(Some(&c.0));

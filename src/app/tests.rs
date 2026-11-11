@@ -2379,20 +2379,23 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
             .collect::<Vec<_>>()
     };
     let row = |label: &str, group: &str, current| (label.to_owned(), group.to_owned(), current);
-    assert_eq!(
-        rows(&rt.state),
-        [
-            row("Follow server", "Server", true),
-            row("Rex default colours", "Server", false),
-            row("Follow chrome", "Built in", false),
-            row("Midnight", "Built in", false),
-            row("Rosé Pine", "Built in", false),
-            row("Rosé Pine Moon", "Built in", false),
-            row("Gruvbox Dark", "Built in", false),
-            row("Rex Test Mocha", "Dark", false),
-            row("Paper", "Light", false),
-        ]
+    let mut expected = vec![
+        row("Follow server", "Server", true),
+        row("Rex default colours", "Server", false),
+        row("Follow chrome", "Built in", false),
+        row("Midnight", "Built in", false),
+        row("Rosé Pine", "Built in", false),
+        row("Rosé Pine Moon", "Built in", false),
+        row("Gruvbox Dark", "Built in", false),
+    ];
+    expected.extend(
+        rex_linux::dracula_pro::BUILTINS
+            .iter()
+            .map(|b| row(b.name, "Built in", false)),
     );
+    expected.push(row("Rex Test Mocha", "Dark", false));
+    expected.push(row("Paper", "Light", false));
+    assert_eq!(rows(&rt.state), expected);
     press(&mut rt, Key::Escape);
     assert!(
         matches!(

@@ -48,7 +48,8 @@ pub struct Builtin {
     /// Its id in the `terminal_theme` setting, after [`BUILTIN_PREFIX`].
     pub id: &'static str,
     pub name: &'static str,
-    pub chrome: ChromeTheme,
+    /// The chrome palette it pairs with; `None` for a theme no palette follows.
+    pub chrome: Option<ChromeTheme>,
     pub theme: fn() -> TerminalTheme,
 }
 
@@ -59,44 +60,44 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin {
         id: "midnight",
         name: "Midnight",
-        chrome: ChromeTheme::Midnight,
+        chrome: Some(ChromeTheme::Midnight),
         theme: TerminalTheme::midnight,
     },
     Builtin {
         id: "rose-pine",
         name: "Rosé Pine",
-        chrome: ChromeTheme::RosePine,
+        chrome: Some(ChromeTheme::RosePine),
         theme: TerminalTheme::rose_pine,
     },
     Builtin {
         id: "rose-pine-moon",
         name: "Rosé Pine Moon",
-        chrome: ChromeTheme::RosePineMoon,
+        chrome: Some(ChromeTheme::RosePineMoon),
         theme: TerminalTheme::rose_pine_moon,
     },
     Builtin {
         id: "gruvbox-dark",
         name: "Gruvbox Dark",
-        chrome: ChromeTheme::GruvboxDark,
+        chrome: Some(ChromeTheme::GruvboxDark),
         theme: TerminalTheme::gruvbox_dark,
     },
 ];
 
+/// Every built-in theme: the shipped ones, then any generated from a Dracula Pro checkout.
+pub fn builtins() -> impl Iterator<Item = &'static Builtin> {
+    BUILTINS.iter().chain(crate::dracula_pro::BUILTINS)
+}
+
 /// The built-in theme a `named:` id refers to, if it names one.
 pub fn builtin(id: &str) -> Option<&'static Builtin> {
     let id = id.strip_prefix(BUILTIN_PREFIX)?;
-    BUILTINS.iter().find(|b| b.id == id)
+    builtins().find(|b| b.id == id)
 }
 
 /// The built-in theme paired with `chrome`: its background is the chrome's ground.
 pub fn paired(chrome: ChromeTheme) -> &'static Builtin {
-    // Generated palettes use Midnight's until they have a pairing of their own.
-    let chrome = match chrome.effective() {
-        ChromeTheme::Generated(_) => ChromeTheme::Midnight,
-        other => other,
-    };
-    BUILTINS
-        .iter()
+    let chrome = Some(chrome.effective());
+    builtins()
         .find(|b| b.chrome == chrome)
         .expect("every chrome palette has a paired theme")
 }
@@ -340,6 +341,8 @@ impl ThemeDirs {
             TerminalThemeChoice::FollowChrome => Some((paired(chrome).theme)()),
             TerminalThemeChoice::Named(id) => Some(match builtin(id) {
                 Some(builtin) => (builtin.theme)(),
+                // A Dracula Pro theme this build lacks follows the chrome instead of failing.
+                None if id.starts_with("rex/dracula-pro") => (paired(chrome).theme)(),
                 None => self.load(id)?,
             }),
         })
@@ -515,12 +518,42 @@ selection-foreground = #1e1e2e
     }
 
     #[test]
+    fn an_unavailable_dracula_pro_theme_follows_the_chrome() {
+        let dirs = ThemeDirs {
+            user: None,
+            system: vec![],
+        };
+        let named = TerminalThemeChoice::Named("rex/dracula-pro-nonexistent".into());
+        assert_eq!(
+            dirs.resolve(&named, ChromeTheme::RosePine).unwrap(),
+            Some(TerminalTheme::rose_pine())
+        );
+    }
+
+    #[test]
+    fn unavailable_chrome_pairs_with_midnight() {
+        assert_eq!(paired(ChromeTheme::Unavailable("x")).id, "midnight");
+    }
+
+    #[test]
+    fn every_generated_builtin_is_found_by_id() {
+        for b in crate::dracula_pro::BUILTINS {
+            let found = builtin(&format!("rex/{}", b.id)).expect("found by id");
+            assert_eq!(found.name, b.name);
+        }
+        assert_eq!(
+            builtins().count(),
+            BUILTINS.len() + crate::dracula_pro::BUILTINS.len()
+        );
+    }
+
+    #[test]
     fn follow_chrome_declares_the_palettes_paired_theme() {
         let dirs = ThemeDirs {
             user: None,
             system: vec![],
         };
-        for chrome in ChromeTheme::ALL {
+        for chrome in ChromeTheme::all() {
             let builtin = paired(chrome);
             assert_eq!(builtin.name, chrome.name());
             let theme = dirs

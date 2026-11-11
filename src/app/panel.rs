@@ -5,7 +5,7 @@ use super::theme::{MONITOR, SERVER};
 use super::workspace::Workspace;
 use rex_linux::{
     settings::{ChromeTheme, TabLayout, TerminalThemeChoice},
-    terminal_theme::{BUILTIN_PREFIX, BUILTINS, paired},
+    terminal_theme::{BUILTIN_PREFIX, builtins, paired},
 };
 use rune::TextEdit;
 use serde_json::Value;
@@ -710,7 +710,7 @@ impl Workspace {
             "Built in",
             TerminalThemeChoice::FollowChrome,
         );
-        for builtin in BUILTINS {
+        for builtin in builtins() {
             let id = format!("{BUILTIN_PREFIX}{}", builtin.id);
             add(builtin.name, "", "Built in", TerminalThemeChoice::Named(id));
         }
