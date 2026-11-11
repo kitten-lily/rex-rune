@@ -1,4 +1,11 @@
+use std::path::Path;
 use std::process::Command;
+
+#[allow(dead_code)]
+#[path = "src/dracula_pro/derive.rs"]
+mod derive;
+#[path = "build/dracula_pro.rs"]
+mod dracula_pro;
 
 fn output(command: &mut Command) -> Option<String> {
     let result = command.output().ok()?;
@@ -41,4 +48,38 @@ fn main() {
         "cargo:rustc-env=REX_BUILD_DATE={}",
         date.as_deref().unwrap_or("unknown")
     );
+    dracula_pro();
+}
+
+/// Generates `$OUT_DIR/dracula_pro.rs` from the local Dracula Pro checkout, if there is one.
+fn dracula_pro() {
+    for name in [
+        "REX_DRACULA_PRO",
+        "REX_DRACULA_PRO_DIR",
+        "XDG_DATA_HOME",
+        "HOME",
+    ] {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
+    println!("cargo:rerun-if-changed=build");
+    println!("cargo::rustc-check-cfg=cfg(rex_dracula_pro)");
+    println!("cargo::rustc-check-cfg=cfg(rex_dracula_pro_chrome)");
+    let dir = dracula_pro::source_dir(|name| std::env::var(name).ok());
+    let out = dracula_pro::generate(dir.as_deref());
+    for path in &out.watch {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    for warning in &out.warnings {
+        println!("cargo:warning=Dracula Pro: {warning}");
+    }
+    let target = Path::new(&std::env::var_os("OUT_DIR").expect("OUT_DIR")).join("dracula_pro.rs");
+    if std::fs::read_to_string(&target).ok().as_deref() != Some(out.code.as_str()) {
+        std::fs::write(&target, &out.code).expect("write dracula_pro.rs");
+    }
+    if out.themes > 0 {
+        println!("cargo:rustc-cfg=rex_dracula_pro");
+    }
+    if out.chromes > 0 {
+        println!("cargo:rustc-cfg=rex_dracula_pro_chrome");
+    }
 }
