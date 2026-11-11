@@ -220,9 +220,11 @@ as little as possible:
 ## Known consequence
 
 The in-app update notice points at official signed builds. Installing one replaces this
-local build with one that has no Dracula Pro themes, so a saved Dracula Pro chrome shows
-as Midnight until the user rebuilds with `mise run install`, when it comes back (see §5).
-That's acceptable. Changing the update notice is out of scope.
+local build with one that has none of this fork's code. Its `#[serde(other)]` reads a
+Dracula Pro chrome as Midnight, and its next routine save writes `"midnight"`, so the
+choice is **lost**, not just hidden. The preservation in §5 protects only builds that
+contain it (this fork's builds, with or without the themes). Changing the update notice
+is out of scope. Accepted by the user (2026-11-11); no upstream change.
 
 ## Testing
 
