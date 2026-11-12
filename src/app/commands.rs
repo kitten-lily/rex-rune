@@ -20,7 +20,10 @@ use super::{
     splits::SplitWay,
     workspace::Workspace,
 };
-use rex_linux::{connection::HostCommand, settings::PaneDensity};
+use rex_linux::{
+    connection::HostCommand,
+    settings::{PaneDensity, TabLayout},
+};
 use rune::Tx;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -506,12 +509,112 @@ impl Workspace {
                 }),
             );
         }
+        if let Some(target) = id
+            .as_ref()
+            .and_then(|id| self.current_tab(id))
+            .map(|tab| super::panel::WindowTarget::from(&tab))
+        {
+            rows.push(
+                Command::new(
+                    "tab.layout",
+                    G,
+                    match self.tab_layout_of(&target) {
+                        TabLayout::Tiled => "Use scrolling layout",
+                        TabLayout::Scrolling => "Use tiled layout",
+                    },
+                    Intent::TabLayout(target),
+                )
+                .enabled(in_session)
+                .keywords("tiled scrolling columns")
+                .section(1),
+            );
+        }
+        rows.extend(self.column_commands());
+        // The arrangement rows go before what ends tabs, which stays last.
+        rows.sort_by_key(|row| row.entry.section);
         if let Some(id) = id {
             rows.push(
                 Command::new("tab.close", G, "Close tab…", Intent::CloseWindow(id)).destructive(),
             );
         }
         rows
+    }
+
+    /// The scrolling tab's column actions, for the focused pane's column; unavailable while
+    /// the tab on screen is tiled.
+    fn column_commands(&self) -> Vec<Command> {
+        use Group::Tab as G;
+        let width = self.active_column_width();
+        let actions = width.map(|_| self.column_actions()).unwrap_or_default();
+        let scrolling = width.is_some();
+        [
+            (
+                "tab.column.cycle_width",
+                "Cycle column width",
+                Intent::CycleColumnWidth,
+                scrolling,
+            ),
+            (
+                "tab.column.maximize",
+                if width.is_some_and(|w| w >= 0.99) {
+                    "Restore column width"
+                } else {
+                    "Maximize column"
+                },
+                Intent::MaximizeColumn,
+                scrolling,
+            ),
+            (
+                "tab.column.center",
+                "Center column",
+                Intent::CenterColumn,
+                scrolling,
+            ),
+            (
+                "tab.column.move_left",
+                "Move column left",
+                Intent::MoveColumn(-1),
+                actions.move_left,
+            ),
+            (
+                "tab.column.move_right",
+                "Move column right",
+                Intent::MoveColumn(1),
+                actions.move_right,
+            ),
+            (
+                "tab.column.consume_left",
+                "Consume pane into left column",
+                Intent::ConsumePane(-1),
+                actions.consume_left,
+            ),
+            (
+                "tab.column.consume_right",
+                "Consume pane into right column",
+                Intent::ConsumePane(1),
+                actions.consume_right,
+            ),
+            (
+                "tab.column.expel_left",
+                "Expel pane to new column left",
+                Intent::ExpelPane(-1),
+                actions.expel,
+            ),
+            (
+                "tab.column.expel_right",
+                "Expel pane to new column right",
+                Intent::ExpelPane(1),
+                actions.expel,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, label, action, enabled)| {
+            Command::new(id, G, label, action)
+                .enabled(enabled)
+                .keywords("scrolling")
+                .section(1)
+        })
+        .collect()
     }
 
     /// The pane the list was opened for, else the focused one; none without a pane.

@@ -4,7 +4,7 @@ use super::tabs::{TabAction, TabTarget};
 use super::theme::{MONITOR, SERVER};
 use super::workspace::Workspace;
 use rex_linux::{
-    settings::{ChromeTheme, TerminalThemeChoice},
+    settings::{ChromeTheme, TabLayout, TerminalThemeChoice},
     terminal_theme::{BUILTIN_PREFIX, builtins, paired},
 };
 use rune::TextEdit;
@@ -39,6 +39,14 @@ pub enum Intent {
     RenameSession,
     RenameWindow(String),
     CloseWindow(String),
+    /// Switch this tab between tiled and scrolling.
+    TabLayout(WindowTarget),
+    CycleColumnWidth,
+    MaximizeColumn,
+    CenterColumn,
+    MoveColumn(i8),
+    ConsumePane(i8),
+    ExpelPane(i8),
     Zoom,
     Sidebar,
     /// Open the sidebar on the Activity list.
@@ -123,6 +131,12 @@ impl Intent {
                 PaneAction::Reset => ("pane.reset", Value::Null),
                 PaneAction::Rename => ("pane.rename", Value::Null),
             },
+            Self::CycleColumnWidth => (super::actions::CYCLE_COLUMN, Value::Null),
+            Self::MaximizeColumn => (super::actions::MAXIMIZE_COLUMN, Value::Null),
+            Self::MoveColumn(step) => (
+                super::actions::MOVE_COLUMN,
+                json!({"direction": if *step < 0 { "left" } else { "right" }}),
+            ),
             _ => return None,
         })
     }
@@ -193,6 +207,24 @@ pub struct SessionTarget {
     pub label: String,
 }
 
+/// A tab of any host and session whose layout a menu switches.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowTarget {
+    pub host: usize,
+    pub session: String,
+    pub window: String,
+}
+
+impl From<&TabTarget> for WindowTarget {
+    fn from(target: &TabTarget) -> Self {
+        Self {
+            host: target.host,
+            session: target.session.clone(),
+            window: target.window.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum SessionAction {
     Rename,
@@ -206,6 +238,7 @@ pub struct PaneTarget {
     pub host: usize,
     pub session: String,
     pub block: String,
+    pub window: String,
     /// The server's label for the pane, which Rename starts from.
     pub label: String,
     /// What the pane is called on screen (`activity::pane_name`).
@@ -572,6 +605,70 @@ impl Workspace {
         entries
     }
 
+    fn column_entries(&self, group: &str) -> Vec<Entry> {
+        let Some(width) = self.active_column_width() else {
+            return Vec::new();
+        };
+        let actions = self.column_actions();
+        let mut entries = vec![
+            Entry::new("Cycle column width", "", group, Intent::CycleColumnWidth),
+            Entry::new(
+                if width >= 0.99 {
+                    "Restore column width"
+                } else {
+                    "Maximize column"
+                },
+                "",
+                group,
+                Intent::MaximizeColumn,
+            ),
+            Entry::new("Center column", "", group, Intent::CenterColumn),
+        ];
+        for (label, key, action, enabled) in [
+            (
+                "Move column left",
+                "",
+                Intent::MoveColumn(-1),
+                actions.move_left,
+            ),
+            (
+                "Move column right",
+                "",
+                Intent::MoveColumn(1),
+                actions.move_right,
+            ),
+            (
+                "Consume pane into left column",
+                "",
+                Intent::ConsumePane(-1),
+                actions.consume_left,
+            ),
+            (
+                "Consume pane into right column",
+                "",
+                Intent::ConsumePane(1),
+                actions.consume_right,
+            ),
+            (
+                "Expel pane to new column left",
+                "",
+                Intent::ExpelPane(-1),
+                actions.expel,
+            ),
+            (
+                "Expel pane to new column right",
+                "",
+                Intent::ExpelPane(1),
+                actions.expel,
+            ),
+        ] {
+            let mut entry = Entry::new(label, key, group, action);
+            entry.enabled = enabled;
+            entries.push(entry);
+        }
+        entries
+    }
+
     /// A sidebar host header's menu, in groups: New session; Retry while offline and Start
     /// personal server… when it applies; Default shell… and Edit host…; Remove host…, last and
     /// destructive (not for the only host).
@@ -674,6 +771,15 @@ impl Workspace {
             }
         }
         entries
+    }
+
+    /// The entry that switches tab `window` to the other layout.
+    fn layout_entry(&self, window: &WindowTarget, group: &str) -> Entry {
+        let label = match self.tab_layout_of(window) {
+            TabLayout::Tiled => "Use scrolling layout",
+            TabLayout::Scrolling => "Use tiled layout",
+        };
+        Entry::new(label, "", group, Intent::TabLayout(window.clone()))
     }
 
     pub fn entries(&self) -> Vec<Entry> {
@@ -799,6 +905,27 @@ impl Workspace {
         }
         if let (PanelKind::Window, Some(target)) = (&panel.kind, &panel.tab) {
             let mut entries = self.tab_entries(target);
+            // The layout switch, and for the tab on screen in a scrolling layout its column
+            // actions, follow the moves: they arrange the tab too. Another session's tab gets
+            // no column actions, which would act on the session on screen.
+            let window = WindowTarget::from(target);
+            let moves = entries
+                .iter()
+                .rposition(|e| e.section == 1)
+                .map_or(entries.len(), |i| i + 1);
+            let mut arrange = vec![self.layout_entry(&window, "")];
+            let active = self.tab_on_screen(target)
+                && self.model().window().and_then(|w| w.window_id.as_deref())
+                    == Some(target.window.as_str());
+            if active && self.tab_layout_of(&window) == TabLayout::Scrolling {
+                arrange.extend(self.column_entries(""));
+            }
+            let connected = self.hosts[target.host].model.connected;
+            for e in &mut arrange {
+                e.section = 1;
+                e.enabled &= connected;
+            }
+            entries.splice(moves..moves, arrange);
             // The shortcuts act on the session on screen; another session's tab shows none.
             if self.tab_on_screen(target) {
                 self.shortcut_details(&mut entries);
@@ -830,12 +957,21 @@ impl Workspace {
                 ("Paste", 0, PaneAction::Paste),
                 ("Select all", 0, PaneAction::SelectAll),
             ];
+            // In a scrolling tab, a split to the right makes a new column after this one.
+            let scrolling = self.tab_layout(&target.window) == TabLayout::Scrolling;
             // The split that picks a side is in Commands only.
             rows.extend(
                 SplitWay::ALL
                     .into_iter()
                     .filter(|way| *way != SplitWay::BestFit)
-                    .map(|way| (way.label(), 1, PaneAction::Split(way))),
+                    .map(|way| {
+                        let label = if scrolling && way == SplitWay::Right {
+                            "New column right"
+                        } else {
+                            way.label()
+                        };
+                        (label, 1, PaneAction::Split(way))
+                    }),
             );
             rows.extend([
                 (

@@ -12,7 +12,7 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 - Notification sounds, off by default: `sound-name` from the sound theme when on, `suppress-sound` when off. Nothing is played locally, so a sound needs its desktop notification, and the notification server decides whether it plays. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - Settings → Notifications is now a channels × states table (Tabs, Desktop, Count, Sound × Needs you, Fails, Finishes, Works, plus messages from programs). `notifications` in workspace.json has a new shape; older files migrate with their behaviour unchanged. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - OSC 7501 status records keep their `owner` and `updated_at`. A report without an app is named after the process in the foreground when it reported, for icons, Activity rows and notifications. When records tie on state and progress, the latest report by the server's clock speaks for the pane, tab or session; it is never compared with this computer's clock. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
-- With upstream's tab management and Commands: a muted tab's panes also leave the unread count; Commands lists View Activity and its three actions and Reload config. Settings → Interface gains Session list, Notifications keeps its channels × states table, and Hosts keeps each local host's Tailscale rows, all in the new card layout.
+- With upstream's tab management and Commands: a muted tab's panes also leave the unread count; the tab menu has Use scrolling layout / Use tiled layout and, for the tab on screen while it scrolls, the column actions; Commands lists View Activity and its three actions, Reload config, the layout switch and every column action (unavailable while the tab is tiled). Settings → Interface gains Session list and a Tab layout section (Default layout, Focus centering), Notifications keeps its channels × states table, and Hosts keeps each local host's Tailscale rows, all in the new card layout.
 
 ### Added
 
@@ -256,6 +256,7 @@ Changes since the 0.2.0 public release on 2026-11-01. Many of them come from two
 
 - Chrome palettes, switchable live in Settings → Interface → Theme: Midnight (the default, unchanged), Rosé Pine, Rosé Pine Moon and Gruvbox Dark. (@joegoldin, @kitten-lily)
 - Program activity on tabs (OSC 7501: "Needs approval", "Error", "Done" and so on), program icons, and desktop notifications for tabs you aren't looking at.
+- Tabs can use a local horizontally scrolling column layout while preserving server-owned split order and ratios inside each column. Column widths persist; controls resize, maximize, center, reorder, consume and expel panes, with horizontal gesture snapping and focus reveal. (@kitten-lily)
 - Settings in sections (Interface, Terminal, Notifications, Integrations, Remote Hosts, Shortcuts), including adding, editing and removing hosts.
 - A single pane draws edge to edge; tabs and toolbar restyled.
 - Tabs in the sidebar: Settings → Interface → Tab position → Sidebar lists each session's tabs under it while the sidebar is open. (@joegoldin)

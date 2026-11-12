@@ -391,6 +391,8 @@ pub fn defaults() -> KeymapDefault {
         ("ctrl+shift+up", "client.prompt.previous"),
         ("ctrl+shift+down", "client.prompt.next"),
         ("ctrl+shift+r", "pane.reconnect"),
+        ("ctrl+shift+s", "client.column.cycle_width"),
+        ("ctrl+shift+m", "client.column.maximize"),
         // Of an action's bindings the last is the one Commands and menus show: the main
         // block's key, not the numpad's.
         ("ctrl+[NumpadAdd]", "client.zoom.in"),
@@ -406,6 +408,15 @@ pub fn defaults() -> KeymapDefault {
     }
     for (keys, direction) in [("ctrl+shift+d", "right"), ("ctrl+alt+d", "down")] {
         bindings.push(Binding::new([keys], "pane.split").args(json!({"direction": direction})));
+    }
+    for direction in ["left", "right"] {
+        bindings.push(
+            Binding::new(
+                [format!("ctrl+alt+shift+{direction}")],
+                "client.column.move",
+            )
+            .args(json!({"direction": direction})),
+        );
     }
     for direction in ["left", "right", "up", "down"] {
         bindings.push(
@@ -819,7 +830,7 @@ mod tests {
         let layer = defaults();
         assert_eq!(layer.name, "linux");
         assert!(layer.removals.is_empty());
-        assert_eq!(layer.bindings.len(), 38);
+        assert_eq!(layer.bindings.len(), 42);
         // The terminal font size actions have no default: Ctrl Alt + / - / 0 belong to the
         // program in the terminal until the user binds them.
         assert!(

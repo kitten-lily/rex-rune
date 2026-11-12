@@ -22,6 +22,7 @@ fn sample_args(name: &str) -> Value {
         "pane.focus" => json!({"direction": "up"}),
         "pane.scroll" => json!({"lines": 3}),
         "client.tab.goto" => json!({"index": 2}),
+        "client.column.move" => json!({"direction": "left"}),
         "pane.send_key" => json!({"key": "ctrl+c"}),
         _ => Value::Null,
     }

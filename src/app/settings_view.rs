@@ -13,7 +13,8 @@ use super::{
     workspace::Workspace,
 };
 use rex_linux::settings::{
-    Channels, NoticePosition, NotificationsConfig, PaneDensity, PaneHeader, SessionList,
+    Channels, FocusCentering, NoticePosition, NotificationsConfig, PaneDensity, PaneHeader,
+    SessionList, TabLayout,
     interface::{InterfaceConfig, ToolbarBehavior},
 };
 use rune::{El, KeyEvent, PointerButton, ScrollPos, ScrollSpec, Tx, col, el, row, text};
@@ -87,6 +88,15 @@ fn interface(s: &Workspace) -> El {
     let corner = match s.settings.notice_position {
         NoticePosition::TopRight => 0,
         NoticePosition::BottomRight => 1,
+    };
+    let layout = match s.settings.tab_layout {
+        TabLayout::Tiled => 0,
+        TabLayout::Scrolling => 1,
+    };
+    let centering = match s.settings.focus_centering {
+        FocusCentering::Never => 0,
+        FocusCentering::OnOverflow => 1,
+        FocusCentering::Always => 2,
     };
     page([
         section(
@@ -328,6 +338,41 @@ fn interface(s: &Workspace) -> El {
                     })
                 },
             )])],
+        ),
+        section(
+            "Tab layout",
+            [card([
+                setting(
+                    "Default layout",
+                    "Tiled to the window, or columns that scroll sideways. A tab's menu can change it.",
+                    segmented(
+                        "tab-layout",
+                        &[Segment::new("Tiled"), Segment::new("Scrolling")],
+                        Some(layout),
+                        |s, i, _| {
+                            s.set_tab_layout(if i == 0 {
+                                TabLayout::Tiled
+                            } else {
+                                TabLayout::Scrolling
+                            })
+                        },
+                    ),
+                ),
+                select_row(
+                    "focus-centering",
+                    "Focus centering",
+                    "When focus moves in a scrolling tab. On overflow centers when both columns can't fit.",
+                    &["Never", "On overflow", "Always"],
+                    centering,
+                    |s, i, _| {
+                        s.set_focus_centering(match i {
+                            1 => FocusCentering::OnOverflow,
+                            2 => FocusCentering::Always,
+                            _ => FocusCentering::Never,
+                        })
+                    },
+                ),
+            ])],
         ),
     ])
 }
