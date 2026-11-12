@@ -68,7 +68,7 @@ pub fn modal_layer(s: &Workspace, surface: El, under: bool, top: f32) -> El {
     layer.child(panel)
 }
 
-fn title(t: &str) -> El {
+pub(super) fn title(t: &str) -> El {
     text(t.to_owned()).font(strong(17.)).color(rgb(ink()))
 }
 
@@ -137,27 +137,27 @@ fn form(s: &Workspace, form: &Form) -> El {
                 .wrap(),
         );
     }
+    if let Form::DownloadFolder = form {
+        body = body.child(
+            text("Where Download file… saves. Empty uses the system's Downloads folder. The folder must exist; nothing is overwritten.")
+                .font(ui(12.))
+                .color(rgb(muted()))
+                .wrap(),
+        );
+    }
     // A tab the user named can go back to the title its program sets.
     let named_tab = matches!(form, Form::RenameWindow(_))
         && panel.tab.as_ref().is_some_and(|tab| s.tab_named(tab));
     if let Form::RenameWindow(_) = form {
         body = body.child(
             text(if named_tab {
-                "Use default title shows the title this tab's program sets again."
+                "Use default title restores the program's title or your preferred generated title."
             } else {
-                "This tab shows the title its program sets. A name saved here replaces it."
+                "This tab follows the program's title or your preferred generated title. A name saved here replaces it."
             })
             .font(ui(12.))
             .color(rgb(muted()))
             .wrap(),
-        );
-    }
-    if let Form::Fonts = form {
-        body = body.child(
-            text("Applied when you reopen the client. --font and --font-fallback override saved choices for that launch. Server sessions keep running.")
-                .font(ui(12.))
-                .color(rgb(muted()))
-                .wrap(),
         );
     }
     let primary = if matches!(form, Form::AddHost | Form::Discovered(_) | Form::AddSsh(_)) {
@@ -251,8 +251,15 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
                 "Remove host",
             )
         }
+        PanelKind::ResetShortcuts => confirm_with(
+            &panel.title,
+            &s.reset_shortcuts_words(),
+            "Keep shortcuts",
+            "Reset all",
+        ),
         PanelKind::StartSsh { endpoint } => super::ssh_setup::dialog(s, endpoint),
         PanelKind::Pairing { endpoint } => super::tailscale::pairing(s, endpoint),
+        PanelKind::Download(d) => super::downloads_view::dialog(s, d),
         PanelKind::AgentChange { change, steps } => {
             super::integrations::confirm(s, &panel.title, change, steps)
         }
@@ -315,7 +322,12 @@ pub fn toasts(s: &Workspace) -> Option<El> {
     }
     let region = col().key("toasts").role("status").w(340.).gap(8.);
     let mut region = match s.settings.notice_position {
-        NoticePosition::TopRight => region.pin(None, Some(TOOLBAR + 4.), Some(MARGIN + 6.), None),
+        NoticePosition::TopRight => region.pin(
+            None,
+            Some((super::toolbar_reveal::shown_height(s) + 4.).max(MARGIN)),
+            Some(MARGIN + 6.),
+            None,
+        ),
         NoticePosition::BottomRight => region.pin(None, None, Some(MARGIN + 6.), Some(MARGIN + 6.)),
     };
     if let Some(card) = update {

@@ -5,10 +5,15 @@ mod activity;
 mod activity_list;
 mod bindings;
 mod commands;
+mod compatibility;
 mod dialogs;
 mod discover;
+mod downloads;
+mod downloads_view;
 mod dracula_pro;
 mod find;
+mod font_page;
+mod font_picker;
 mod font_size;
 mod fonts;
 mod help;
@@ -19,13 +24,19 @@ mod keys;
 mod navigation;
 mod notify;
 mod pane_header;
+mod pane_moves;
 mod pane_verbs;
 mod panel;
 mod panes;
 mod popups;
+mod recorder;
 mod remote;
+mod select_copy;
 mod settings_kit;
+mod settings_nav;
+mod settings_shell;
 mod settings_view;
+mod shortcuts_page;
 mod sidebar;
 mod splits;
 mod sprites;
@@ -34,8 +45,11 @@ mod stats;
 mod tabs;
 mod tailscale;
 mod term;
+mod terminal_page;
 mod theme;
+mod titles;
 mod toolbar;
+mod toolbar_reveal;
 mod updates;
 mod upload;
 mod widgets;
@@ -72,10 +86,11 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     set_palette(palette_of(s.settings.chrome_theme));
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
+    let maximized = cx.window_maximized();
     let mut body = row().key("body").grow(1.).w_full().min_h(0.);
     if s.sidebar.is_open() {
         body = body
-            .child(sidebar::sidebar(s, cx))
+            .child(sidebar::sidebar(s, cx).pt(toolbar_reveal::top_margin(s)))
             .child(sidebar::sidebar_edge(s));
     }
     // Device pixels per point, so terminal box drawing lands on whole pixels.
@@ -87,20 +102,39 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .origin(0., 0.)
         .scale(scale)
         .scale_motion(STILL)
-        .fill(rgb(ground()))
-        .child(
-            col()
-                .absolute(0., 0.)
-                .size(viewport[0], viewport[1])
-                .pt(TOOLBAR)
-                .child(body),
-        )
-        .child(toolbar::toolbar(s).absolute(0., 0.));
+        .fill(rgb(ground()));
+    // Hover tracks position even behind content. Keep the band below both panes and
+    // toolbar so secondary presses reach their context menus rather than this sibling.
+    if s.settings.interface.toolbar == rex_linux::settings::interface::ToolbarBehavior::OnHover {
+        root = root.child(toolbar_reveal::band(s));
+    }
+    root = root.child(
+        col()
+            .absolute(0., 0.)
+            .size(viewport[0], viewport[1])
+            .pt(toolbar_reveal::row_height(s))
+            .child(body),
+    );
+    root = match toolbar_reveal::placement(s) {
+        toolbar_reveal::Placement::Row => root.child(toolbar::toolbar(s).absolute(0., 0.)),
+        toolbar_reveal::Placement::Floating => {
+            root.child(toolbar_reveal::floating(toolbar::toolbar(s)))
+        }
+        toolbar_reveal::Placement::None => {
+            root.children(toolbar::floating_status(s).map(toolbar_reveal::sequence_float))
+        }
+    };
     if let Some(toasts) = dialogs::toasts(s) {
         root = root.child(toasts);
     }
     let open = match &s.panel {
+        Some(panel) if matches!(panel.kind, panel::PanelKind::Fonts(_)) => {
+            Some(font_picker::popup(s, viewport))
+        }
         Some(panel) if panel.is_list() => Some(popups::list_popup(s, viewport)),
+        Some(panel) if matches!(panel.kind, panel::PanelKind::Downloads) => {
+            Some(downloads_view::popover(s, viewport))
+        }
         Some(_) => dialogs::dialog(s, viewport),
         None => None,
     };
@@ -126,7 +160,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .w_full()
         .h_full()
         .fill(rgb(ground()))
-        .on_layout(|s: &mut Workspace, r| s.viewport = [r[2], r[3]])
+        .on_layout(move |s: &mut Workspace, r| s.window_resized([r[2], r[3]], maximized))
         .child(root);
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
@@ -150,7 +184,9 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
     let remote_changed = s.poll_remote_navigation(now);
     let updates_changed = s.poll_updates(now, tx);
-    let mut changed = s.poll_navigation(now, tx) || remote_changed || updates_changed;
+    let settings_changed = s.poll_settings(now, tx);
+    let mut changed =
+        s.poll_navigation(now, tx) || remote_changed || updates_changed || settings_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {
@@ -162,7 +198,12 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     // A tab that moved within its session's order is revealed again where it now is.
     let place = s.active_tab_place();
     let tab = place.as_ref().map(|(id, _)| id.clone());
-    let reveal = (place, s.area[2].round() as i32, s.sidebar.is_open());
+    let reveal = (
+        place,
+        s.area[2].round() as i32,
+        s.sidebar.is_open(),
+        s.bar_chips(),
+    );
     let again = std::mem::take(&mut s.reveal_tab_again);
     if reveal != s.last_tab || again {
         if let Some(id) = &tab {
@@ -173,6 +214,13 @@ fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
         changed = true;
     }
     if s.expire_notices() {
+        changed = true;
+    }
+    let saving_size = s.resized.is_some();
+    if let Some(next) = s.save_window_size() {
+        tx.wake_after(next);
+    } else if saving_size {
+        // Saving may have added a Preferences not saved notice.
         changed = true;
     }
     let failed: Vec<String> = s
@@ -213,16 +261,7 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
         Some(path) => (Settings::load(path)?, path.clone()),
         None => Settings::load_default()?,
     };
-    let size = options
-        .window_size
-        .split_once('x')
-        .and_then(|(w, h)| {
-            Some((
-                w.parse::<f32>().ok()?.max(640.),
-                h.parse::<f32>().ok()?.max(480.),
-            ))
-        })
-        .unwrap_or((1440., 900.));
+    let size = options.startup_size(&settings);
     let (family, fallbacks) = options.fonts(&settings);
     let fonts = fonts::load(family, fallbacks);
     rune::text::set_app_font_paths(fonts.paths)
@@ -231,6 +270,7 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
     if let Err(error) = rune::set_app_icon(APP_ICON) {
         eprintln!("Could not load the Rex window icon: {error}");
     }
+    Workspace::clean_up_download_leftovers();
     let rune_args = std::mem::take(&mut options.rune);
     let app = rune::App::new(AppSpec {
         min_size: Some((640., 480.)),
@@ -262,5 +302,17 @@ pub fn run(mut options: Options) -> anyhow::Result<()> {
         app = app.on_frame_encoded(move |f| frames.record(f));
     }
     app.run();
+    // The window is gone and the workspace with it: every host connection has been told to shut
+    // down. Give the host threads a moment to drop their transfers, so a download in flight
+    // deletes its partial file before the process ends (the next launch sweeps whatever a host
+    // stuck connecting leaves behind).
+    wait_for_hosts_at_exit();
     Ok(())
+}
+
+/// The longest the app waits for its host threads once the window is closed.
+const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn wait_for_hosts_at_exit() {
+    rex_linux::connection::wait_for_hosts(EXIT_WAIT);
 }

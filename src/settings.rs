@@ -1,4 +1,8 @@
+pub mod interface;
+pub mod recorded;
 pub mod shortcuts;
+pub mod terminal;
+pub mod typography;
 
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -347,6 +351,16 @@ impl Default for UpdatesConfig {
     }
 }
 
+/// Where downloaded files are saved.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadsConfig {
+    /// The folder, absolute or starting with `~`, as the person wrote it. None is the XDG
+    /// download folder (`xdg-user-dir DOWNLOAD`, else `~/Downloads`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+}
+
 /// The palette the chrome is drawn in. A value this version doesn't know is kept as
 /// `Unavailable`, drawn as Midnight and saved back unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -504,17 +518,23 @@ pub struct Settings {
     pub sidebar_open: bool,
     pub sidebar_mode: SidebarMode,
     pub sidebar_sessions: SessionList,
+    /// The last non-maximized window size in window points, independent of interface zoom.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window_size: Option<[f32; 2]>,
+    pub interface: interface::InterfaceConfig,
     pub vertical_tabs: bool,
     pub pane_density: PaneDensity,
     pub pane_header: PaneHeader,
     pub pane_padding: f32,
     pub font_size: f32,
+    pub terminal: terminal::TerminalConfig,
     pub font_family: String,
     pub font_fallbacks: Vec<String>,
     pub ui_scale: f32,
     pub notice_position: NoticePosition,
     pub notifications: NotificationsConfig,
     pub updates: UpdatesConfig,
+    pub downloads: DownloadsConfig,
     /// Passed to `rex skill setup` as `--session-naming`, always explicitly.
     pub agent_session_naming: bool,
     pub chrome_theme: ChromeTheme,
@@ -529,9 +549,14 @@ pub struct Settings {
     pub activity_grouping: ActivityGrouping,
     /// The Activity view lists agents that have records but are all idle.
     pub activity_show_idle: bool,
+    /// Prefer foreground program and directory over shell-set titles. Display only.
+    pub generated_titles: bool,
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
+    /// Shortcuts recorded in Settings → Shortcuts: a keymap layer above `shortcut_file`.
+    #[serde(skip_serializing_if = "recorded::Recorded::is_empty")]
+    pub recorded_shortcuts: recorded::Recorded,
     /// Read-only sibling file, never serialized into workspace.json.
     #[serde(skip)]
     pub shortcut_file: shortcuts::Shortcuts,
@@ -558,17 +583,21 @@ impl Default for Settings {
             sidebar_open: false,
             sidebar_mode: SidebarMode::default(),
             sidebar_sessions: SessionList::default(),
+            window_size: None,
+            interface: interface::InterfaceConfig::default(),
             vertical_tabs: false,
             pane_density: PaneDensity::default(),
             pane_header: PaneHeader::default(),
             pane_padding: 8.,
             font_size: 15.,
+            terminal: Default::default(),
             font_family: "JetBrainsMono Nerd Font".into(),
             font_fallbacks: Vec::new(),
             ui_scale: 1.,
             notice_position: NoticePosition::default(),
             notifications: NotificationsConfig::default(),
             updates: UpdatesConfig::default(),
+            downloads: DownloadsConfig::default(),
             agent_session_naming: false,
             chrome_theme: ChromeTheme::default(),
             terminal_theme: TerminalThemeChoice::default(),
@@ -576,7 +605,9 @@ impl Default for Settings {
             terminal_theme_declared: false,
             activity_grouping: ActivityGrouping::default(),
             activity_show_idle: false,
+            generated_titles: false,
             muted_tabs: Vec::new(),
+            recorded_shortcuts: recorded::Recorded::default(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }
     }
@@ -628,6 +659,7 @@ impl Settings {
             normalize_font_preferences(&settings.font_family, &settings.font_fallbacks)?;
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
+        settings.interface.normalize();
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
         // Import before the first save loses nivox's unknown keybindings field.
@@ -989,6 +1021,25 @@ mod tests {
     }
 
     #[test]
+    fn generated_titles_default_off_for_old_files_and_round_trip() {
+        let old: Settings =
+            serde_json::from_str(r#"{"font_size":17,"vertical_tabs":true}"#).unwrap();
+        assert!(!old.generated_titles);
+        assert_eq!(old.font_size, 17.);
+        assert!(old.vertical_tabs);
+        for generated_titles in [true, false] {
+            let settings = Settings {
+                generated_titles,
+                ..Settings::default()
+            };
+            let saved = serde_json::to_value(&settings).unwrap();
+            assert_eq!(saved["generated_titles"], generated_titles);
+            let back: Settings = serde_json::from_value(saved).unwrap();
+            assert_eq!(back.generated_titles, generated_titles);
+        }
+    }
+
+    #[test]
     fn the_terminal_theme_round_trips_and_unknown_values_follow_the_server() {
         let old: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.terminal_theme, TerminalThemeChoice::FollowServer);
@@ -1043,6 +1094,48 @@ mod tests {
             let back: Settings = serde_json::from_value(json).unwrap();
             assert_eq!(back.pane_density, density);
         }
+    }
+
+    #[test]
+    fn the_downloads_directory_defaults_to_none_and_round_trips() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.downloads.directory, None);
+        assert!(
+            serde_json::to_value(&old).unwrap()["downloads"]
+                .get("directory")
+                .is_none(),
+            "an unset folder is not written"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "rex-downloads-settings-{}.json",
+            std::process::id()
+        ));
+        for directory in [Some("~/Downloads/rex"), Some("/srv/files"), None] {
+            let mut settings = Settings::default();
+            settings.downloads.directory = directory.map(str::to_owned);
+            settings.save(&path).unwrap();
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(saved.contains("\"directory\""), directory.is_some());
+            assert_eq!(
+                Settings::load(&path)
+                    .unwrap()
+                    .downloads
+                    .directory
+                    .as_deref(),
+                directory
+            );
+        }
+        std::fs::write(&path, r#"{"downloads":{"directory":"/a/b"}}"#).unwrap();
+        assert_eq!(
+            Settings::load(&path)
+                .unwrap()
+                .downloads
+                .directory
+                .as_deref(),
+            Some("/a/b"),
+            "the key is downloads.directory"
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

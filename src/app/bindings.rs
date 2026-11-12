@@ -123,6 +123,67 @@ pub fn matches(chord: &Chord, input: Input<'_>) -> bool {
     }
 }
 
+/// The chord a key press spells, for recording a shortcut: one [`matches`] finds this press
+/// by. A named key by its name, a character as the layout's own when that is ASCII, else as
+/// the key's US character, so a shortcut recorded on any layout is spelled as the defaults
+/// are; a key with neither by its physical code. None for a modifier on its own, a dead key
+/// and a key that has no spelling.
+pub fn chord_of(input: Input<'_>) -> Option<Chord> {
+    if matches!(input.event.key, Key::Modifier { .. } | Key::Dead(_)) {
+        return None;
+    }
+    let m = input.event.mods;
+    let modifiers = Modifiers {
+        ctrl: m.ctrl || m.cmd,
+        alt: m.alt,
+        shift: m.shift,
+        logo: m.logo,
+    };
+    let typed = character(&input.event.key);
+    let mut spellings: Vec<String> = Vec::new();
+    match &input.event.key {
+        Key::Enter => spellings.push("enter".into()),
+        Key::Escape => spellings.push("escape".into()),
+        Key::Tab => spellings.push("tab".into()),
+        Key::Backspace => spellings.push("backspace".into()),
+        Key::Delete => spellings.push("delete".into()),
+        Key::Left => spellings.push("left".into()),
+        Key::Right => spellings.push("right".into()),
+        Key::Up => spellings.push("up".into()),
+        Key::Down => spellings.push("down".into()),
+        Key::Home => spellings.push("home".into()),
+        Key::End => spellings.push("end".into()),
+        Key::PageUp => spellings.push("pageup".into()),
+        Key::PageDown => spellings.push("pagedown".into()),
+        Key::Function(n) => spellings.push(format!("f{n}")),
+        _ if typed == Some(' ') => spellings.push("space".into()),
+        _ => {}
+    }
+    let characters = [input.base, typed, input.code.and_then(us_character)];
+    for ascii in [true, false] {
+        for c in characters.into_iter().flatten() {
+            if c.is_ascii() == ascii {
+                spellings.extend(c.to_lowercase().next().map(String::from));
+            }
+        }
+    }
+    if let Some(code) = input.code {
+        spellings.push(match code {
+            Code::SuperLeft => "[MetaLeft]".into(),
+            Code::SuperRight => "[MetaRight]".into(),
+            code => format!("[{code:?}]"),
+        });
+    }
+    spellings
+        .iter()
+        .filter_map(|key| {
+            let mut chord = Chord::parse(key).ok()?;
+            chord.modifiers = modifiers;
+            Some(chord)
+        })
+        .find(|chord| matches(chord, input))
+}
+
 #[derive(Default)]
 pub struct Sequence {
     candidates: Vec<usize>,
@@ -225,10 +286,76 @@ pub struct Context {
 
 #[derive(Default)]
 pub struct State {
+    pub modes: Vec<(String, bool)>,
+    /// Map used for the current sequence, including mode blocks and priority.
+    pub mode_map: Option<Resolved>,
     pub sequence: Sequence,
     pub context: Option<Context>,
     /// Consumed presses, even repeating actions, keep releases local.
     pub consumed: std::collections::HashMap<Identity, bool>,
+}
+
+impl State {
+    pub fn pending_label(&self, map: &Resolved) -> Option<String> {
+        self.sequence.label(self.mode_map.as_ref().unwrap_or(map))
+    }
+
+    pub fn enter_mode(&mut self, name: &str, once: bool) {
+        self.sequence.clear();
+        self.modes.push((name.into(), once));
+    }
+    pub fn exit_mode(&mut self) {
+        self.sequence.clear();
+        self.modes.pop();
+    }
+    pub fn clear_modes(&mut self) {
+        self.sequence.clear();
+        self.modes.clear();
+        self.mode_map = None;
+    }
+}
+
+/// Highest active mode first; its explicit bindings beat blocks. Unbound keys fall through
+/// to the next mode and then the ordinary map, unless a mode is exclusive.
+pub fn mode_map(
+    map: &Resolved,
+    active: &[(String, bool)],
+    modes: &[rexrs::api::client::Mode],
+) -> Resolved {
+    let mut result = Resolved::default();
+    for (name, _) in active.iter().rev() {
+        result.bindings.extend(
+            map.bindings
+                .iter()
+                .filter(|b| b.binding.mode.as_deref() == Some(name))
+                .cloned(),
+        );
+        if let Some(mode) = modes.iter().find(|m| m.name == *name) {
+            for keys in mode.blocked.iter().flatten() {
+                result.bindings.push(
+                    rexrs::api::client::Binding::new(keys.clone(), "linux.mode.block")
+                        .mode(name.clone())
+                        .into(),
+                );
+            }
+        }
+        // Escape leaves the top mode unless it explicitly binds Escape.
+        result.bindings.push(
+            rexrs::api::client::Binding::new(["escape"], "client.mode.exit")
+                .mode(name.clone())
+                .into(),
+        );
+        if modes.iter().any(|m| m.name == *name && m.exclusive) {
+            return result;
+        }
+    }
+    result.bindings.extend(
+        map.bindings
+            .iter()
+            .filter(|b| b.binding.mode.is_none())
+            .cloned(),
+    );
+    result
 }
 
 #[cfg(test)]

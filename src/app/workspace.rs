@@ -16,7 +16,7 @@ use rex_linux::{
     layout::{Divider, shell_layout},
     settings::{
         ChromeTheme, Host, NoticePosition, SessionList, Settings, SidebarMode, TerminalThemeChoice,
-        normalize_font_preferences, validate_host,
+        validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
@@ -90,9 +90,12 @@ pub struct Workspace {
     pub drop_hover: Option<String>,
     /// Pane headers brought out by the pointer or by Reveal pane headers.
     pub header_reveal: super::pane_header::Reveal,
+    pub toolbar_reveal: super::toolbar_reveal::Reveal,
     /// The pane area in window points, for divider drags and target outlines.
     pub area: [f32; 4],
     pub viewport: [f32; 2],
+    /// Last resize awaiting the one-second settle delay before saving preferences.
+    pub resized: Option<std::time::Instant>,
     pub sidebar: rune_kit::PaneState,
     /// The resolved terminal family, or None when the requested one isn't installed.
     pub terminal_family: Option<&'static str>,
@@ -101,12 +104,13 @@ pub struct Workspace {
     /// The saved family when the client started, to tell a pending font change from the
     /// active one.
     pub launch_saved_font: String,
+    pub fonts: super::font_picker::FontState,
     pub title: String,
     #[cfg(test)]
     pub opened_links: Vec<String>,
-    /// (active tab and its place, pane width, sidebar open) when the active tab was last
-    /// revealed.
-    pub last_tab: (Option<(String, usize)>, i32, bool),
+    /// (active tab and its place, pane width, sidebar open, chips in the bar) when the active
+    /// tab was last revealed.
+    pub last_tab: (Option<(String, usize)>, i32, bool, u8),
     pub reveal_tab_again: bool,
     pub tab_strip: TabStrip,
     pub tab_pos: rune::Live<[f32; 2]>,
@@ -115,10 +119,15 @@ pub struct Workspace {
     pub switcher_fx: ScrollFx,
     /// The Settings page's scroll thumb.
     pub settings_fx: ScrollFx,
+    /// What is typed in Settings → Shortcuts' filter.
+    pub shortcut_filter: TextEdit,
+    /// The Shortcuts row that is taking a new key.
+    pub recorder: Option<super::recorder::Recorder>,
     pub sidebar_drag_start: Option<f32>,
     scratch: TextEdit,
     next_host: u64,
     pub settings_section: SettingsSection,
+    pub settings_nav: super::settings_nav::Nav,
     /// Each pane's activity state when last synced, by host and block.
     pub pane_states: PaneStates,
     /// Panes whose programs finished while the user wasn't looking, by host and block.
@@ -146,6 +155,8 @@ pub struct Workspace {
     /// The Ghostty themes the theme picker lists, read when it opens.
     pub themes: Vec<ThemeInfo>,
     pub updates: super::updates::Updates,
+    /// What this launch's downloads have told the person, and what finished rows may offer.
+    pub downloads: super::downloads::Downloads,
 }
 
 #[derive(Default)]
@@ -169,6 +180,7 @@ impl Workspace {
     ) -> Self {
         let launch_font = options.fonts(&settings).0.to_owned();
         let launch_saved_font = settings.font_family.clone();
+        let fonts = super::font_picker::FontState::new(&options, &settings);
         let explicit = options.session.is_some()
             || options.new.is_some()
             || options.endpoint != rex_linux::transport::local_endpoint();
@@ -216,7 +228,7 @@ impl Workspace {
                 Ok(theme) => (theme, None),
                 Err(error) => (None, Some(error)),
             };
-        let local_keymap = super::actions::resolve(&settings.shortcut_file.overrides);
+        let local_keymap = super::recorder::local_keymap(&settings);
         let mut this = Self {
             logo: None,
             images: None,
@@ -244,16 +256,19 @@ impl Workspace {
             window_focused: true,
             drop_hover: None,
             header_reveal: Default::default(),
+            toolbar_reveal: Default::default(),
             area: [0.; 4],
             viewport: [1440., 900.],
+            resized: None,
             sidebar,
             terminal_family,
             launch_font,
             launch_saved_font,
+            fonts,
             title: "Rex".into(),
             #[cfg(test)]
             opened_links: Vec::new(),
-            last_tab: (None, 0, false),
+            last_tab: (None, 0, false, 0),
             reveal_tab_again: false,
             tab_strip: TabStrip::default(),
             tab_pos: rune::Live::new([0.; 2]),
@@ -261,10 +276,13 @@ impl Workspace {
             sidebar_fx: ScrollFx::default(),
             switcher_fx: ScrollFx::default(),
             settings_fx: ScrollFx::default(),
+            shortcut_filter: TextEdit::new(""),
+            recorder: None,
             sidebar_drag_start: None,
             scratch: TextEdit::new(""),
             next_host: 0,
             settings_section: SettingsSection::default(),
+            settings_nav: Default::default(),
             pane_states: HashMap::new(),
             unseen_panes: HashSet::new(),
             unseen_done: HashSet::new(),
@@ -281,6 +299,7 @@ impl Workspace {
             theme_dirs,
             themes: Vec::new(),
             updates: Default::default(),
+            downloads: Default::default(),
         };
         this.init_updates();
         if let Some(error) = theme_error {
@@ -460,7 +479,7 @@ impl Workspace {
     pub fn sync(&mut self, index: usize, tx: &mut Tx) {
         let id = self.hosts[index].id;
         let old_session = self.hosts[index].model.selected.clone();
-        let (model, notices, clipboard, bells, client_actions, performs) = {
+        let (mut model, notices, clipboard, bells, client_actions, performs) = {
             let mut shared = self.hosts[index]
                 .connection
                 .model
@@ -491,11 +510,12 @@ impl Workspace {
                     .spawn(move || {
                         while receiver.recv().is_ok() {
                             let key = wake_key.clone();
-                            handle.update(move |s, _| s.refresh_terminal(&key));
+                            handle.update(move |s, tx| s.terminal_woke(&key, tx));
                         }
                     })
                     .expect("terminal wake thread");
                 let mut term = Term::new(connection.clone());
+                term.set_cursor_style(self.settings.terminal.cursor_style.shape());
                 term.cache_images(self.images.as_ref());
                 self.terminals.insert(key, term);
             }
@@ -523,6 +543,17 @@ impl Workspace {
         {
             self.bindings.sequence.clear();
         }
+        if let Some(snapshot) = &mut model.keymap
+            && snapshot
+                .resolved
+                .bindings
+                .iter()
+                .any(|row| super::compatibility::unsupported(&row.binding.action).is_some())
+        {
+            super::actions::diagnose_compatibility(
+                &mut std::sync::Arc::make_mut(snapshot).resolved,
+            );
+        }
         self.hosts[index].model = model;
         self.announce_keymap_problems(index);
         self.poll_remote_navigation(std::time::Instant::now());
@@ -535,6 +566,11 @@ impl Workspace {
             self.keymap_generation,
         );
         for queued in client_actions {
+            // Only this person's own key or click starts a download, whatever a host returns.
+            if super::actions::find(&queued.action.action).is_some_and(|s| s.starts_download()) {
+                self.inform("Returned client action skipped: a host cannot start a download.");
+                continue;
+            }
             // Focus events following the reply may legitimately move to another pane.
             // Keep host/session/generation guards, and never act behind a popup or dialog.
             if self.panel.is_some()
@@ -583,6 +619,7 @@ impl Workspace {
             self.inform("That pane is no longer available.");
         }
         self.sync_tabs(index, tx);
+        self.process_downloads(index, tx);
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
         }
@@ -590,10 +627,10 @@ impl Workspace {
             self.save();
         }
         self.claim_visible();
-        let font = self.settings.font_size;
+        let cell = self.metrics().cell;
         for ((host, _), term) in self.terminals.iter_mut() {
             if *host == id {
-                term.resize_if_owner(font);
+                term.resize_if_owner(cell);
             }
         }
         self.sync_prefetch();
@@ -650,7 +687,7 @@ impl Workspace {
         }
     }
 
-    fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
+    pub(super) fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
         let overrides = self.settings.shortcut_file.overrides.clone();
         rex_linux::connection::keymap::Declaration {
             generation: self.keymap_generation,
@@ -658,7 +695,7 @@ impl Workspace {
                 .actions(super::actions::declarations())
                 .server_actions("all")
                 .defaults([rex_linux::keymap::defaults()])
-                .overrides([overrides.layer.clone()]),
+                .overrides(super::recorder::layers(&self.settings)),
             overrides,
         }
     }
@@ -757,23 +794,16 @@ impl Workspace {
         if previous == self.settings.shortcut_file.overrides {
             return false;
         }
-        self.local_keymap = super::actions::resolve(&self.settings.shortcut_file.overrides);
-        self.keymap_generation += 1;
-        self.bindings.sequence.clear();
-        // Disconnected workers retain the declaration for their next successful connect too.
-        let declaration = self.keymap_declaration();
-        for index in 0..self.hosts.len() {
-            self.send(index, HostCommand::Keymap(Box::new(declaration.clone())));
-        }
+        self.keymap_changed();
         true
     }
 
     pub fn refresh_terminal(&mut self, key: &(HostId, String)) {
-        let font = self.settings.font_size;
+        let cell = self.metrics().cell;
         if let Some(term) = self.terminals.get_mut(key) {
             term.refresh();
             term.cache_images(self.images.as_ref());
-            term.resize_if_owner(font);
+            term.resize_if_owner(cell);
         }
         self.place_find(key);
     }
@@ -783,7 +813,7 @@ impl Workspace {
         let title = window_title(
             model
                 .window()
-                .map(|tab| super::activity::tab_name(model, tab))
+                .map(|tab| super::activity::tab_name(model, tab, self.generated_titles()))
                 .as_deref(),
             model.view().and_then(|v| v.label.as_deref()),
             &self.settings.hosts[self.active].label,
@@ -913,6 +943,33 @@ impl Workspace {
             .expect("host model")
             .notice = None;
         self.hosts[host].model.notice = None;
+    }
+
+    /// Keep window points, not zoomed content points. Maximizing leaves the saved normal
+    /// size alone and cancels any pending save from the preceding resize.
+    pub fn window_resized(&mut self, size: [f32; 2], maximized: bool) {
+        self.viewport = size;
+        if maximized || self.settings.window_size == Some(size.map(f32::round)) {
+            self.resized = None;
+            return;
+        }
+        if self.resized.is_none() {
+            self.handle.wake();
+        }
+        self.resized = Some(std::time::Instant::now());
+    }
+
+    /// A drag writes preferences once, after the window has kept its size for a second.
+    pub fn save_window_size(&mut self) -> Option<std::time::Duration> {
+        const SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+        let left = SETTLE.saturating_sub(self.resized?.elapsed());
+        if !left.is_zero() {
+            return Some(left);
+        }
+        self.resized = None;
+        self.settings.window_size = Some(self.viewport.map(f32::round));
+        self.save();
+        None
     }
 
     pub fn save(&mut self) {
@@ -1081,6 +1138,7 @@ impl Workspace {
             self.term_theme.as_ref(),
             palette_of(self.settings.chrome_theme),
         )
+        .with_selection(super::term::SelectionLook::of(&self.settings.terminal))
     }
 
     /// Declare the theme the user chose, `choice`, from now on, on every host, and remember
@@ -1263,7 +1321,11 @@ impl Workspace {
         if !action.opens_followup()
             && !matches!(
                 action,
-                Intent::Theme(_) | Intent::Chrome(_) | Intent::Choose(_)
+                Intent::Theme(_)
+                    | Intent::Chrome(_)
+                    | Intent::Choose(_)
+                    | Intent::Shortcuts(_)
+                    | Intent::Font(_)
             )
             && self.panel.is_some()
         {
@@ -1272,7 +1334,7 @@ impl Workspace {
         // Only pane actions carry a captured pane, and session actions a captured session,
         // into the panel they open.
         if let Some(panel) = &mut self.panel {
-            if !matches!(action, Intent::Pane(..)) {
+            if !matches!(action, Intent::Pane(..) | Intent::MovePaneTo(_)) {
                 panel.target = None;
             }
             if !matches!(action, Intent::Session(..)) {
@@ -1292,6 +1354,8 @@ impl Workspace {
             Intent::Switcher => self.picker(true),
             Intent::NewSession => self.create_session(self.active, None, tx),
             Intent::CreateOn(host, name) => self.create_session(host, name, tx),
+            Intent::SwitchHost(host) => { self.close_panel(tx); self.activate_host(host, tx); }
+            Intent::MovePaneTo(id) => self.move_pane_to_tab(&id, tx),
             Intent::ChooseHost(query) => {
                 let title = if query.is_empty() {
                     "Create session on…".to_owned()
@@ -1335,22 +1399,9 @@ impl Workspace {
                 },
                 Err(error) => self.notify(format!("{error:#}")),
             },
-            Intent::Fonts => {
-                let family = self.settings.font_family.clone();
-                let fallbacks = self.settings.font_fallbacks.join(", ");
-                self.open_panel(
-                    PanelKind::Form(Form::Fonts),
-                    "Terminal fonts",
-                    &[
-                        ("Font family", "JetBrainsMono Nerd Font", &family),
-                        (
-                            "Fallback families (comma-separated)",
-                            "Automatic system fallbacks when empty",
-                            &fallbacks,
-                        ),
-                    ],
-                );
-            }
+            Intent::Fonts => self.open_fonts(super::font_picker::FontPurpose::Terminal),
+            Intent::AddFallback => self.open_fonts(super::font_picker::FontPurpose::Fallback),
+            Intent::Font(family) => self.pick_font(family, tx),
             Intent::RemoteControl(host) => self.toggle_remote_control(host),
             Intent::ClientLabel => {
                 let label = self.settings.client_label();
@@ -1367,6 +1418,14 @@ impl Workspace {
                     PanelKind::Form(Form::HostShell(host)),
                     &title,
                     &[("Shell", "Server default — e.g. zsh or /bin/zsh", &shell)],
+                );
+            }
+            Intent::DownloadFolder => {
+                let text = self.download_folder_text();
+                self.open_panel(
+                    PanelKind::Form(Form::DownloadFolder),
+                    "Download folder",
+                    &[("Folder", "/path/to/folder or ~/folder", &text)],
                 );
             }
             Intent::Pane(target, action) => self.pane_action(target, action, tx),
@@ -1439,6 +1498,9 @@ impl Workspace {
             Intent::Settings => {
                 self.bindings.sequence.clear();
                 self.reload_shortcuts();
+                self.shortcut_filter = TextEdit::new("");
+                self.settings_nav.opened();
+                self.recorder = None;
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
@@ -1449,6 +1511,7 @@ impl Workspace {
                 self.open_section(SettingsSection::About);
             }
             Intent::CheckUpdates => self.check_updates_now(),
+            Intent::Downloads => self.open_panel(PanelKind::Downloads, "Downloads", &[]),
             Intent::EditHost(host) => {
                 let h = self.settings.hosts[host].clone();
                 self.open_panel(
@@ -1479,6 +1542,7 @@ impl Workspace {
             }
             Intent::Retry => self.send(self.active, HostCommand::Reconnect),
             Intent::Command(command) => command.run(self, tx),
+            Intent::Shortcuts(item) => self.shortcut_menu(item, tx),
         }
     }
 
@@ -1540,11 +1604,7 @@ impl Workspace {
             block: block.into(),
             label: self.block_label(block),
             name: self.pane_name(block),
-            tab: model
-                .window()?
-                .label
-                .clone()
-                .unwrap_or_else(|| "Terminal".into()),
+            tab: super::activity::tab_name(model, model.window()?, self.generated_titles()),
         })
     }
 
@@ -1742,6 +1802,7 @@ impl Workspace {
                 let key = (self.hosts[target.host].id, target.block);
                 self.terminal_command(&key, Command::Reconnect);
             }
+            PaneAction::Download => self.download_dialog(target),
             PaneAction::Copy
             | PaneAction::Paste
             | PaneAction::SelectAll
@@ -1773,7 +1834,7 @@ impl Workspace {
             .find(|b| b.block_id.as_deref() == Some(id))
             .map_or_else(
                 || "Terminal".into(),
-                |b| super::activity::pane_name(model, b),
+                |b| super::activity::pane_name(model, b, self.generated_titles()),
             )
     }
 
@@ -1845,9 +1906,12 @@ impl Workspace {
                     | PanelKind::StartSsh { .. }
                     | PanelKind::Pairing { .. }
                     | PanelKind::Themes
+                    | PanelKind::Fonts(_)
                     | PanelKind::Chromes
                     | PanelKind::Choice(_)
                     | PanelKind::Discover
+                    | PanelKind::ShortcutMenu
+                    | PanelKind::ResetShortcuts
             ) && previous
                 .as_ref()
                 .is_some_and(|p| matches!(p.kind, PanelKind::Settings)))
@@ -1885,7 +1949,9 @@ impl Workspace {
 
     /// Show a Settings section; Integrations reads the agents' state when first shown.
     pub fn open_section(&mut self, section: SettingsSection) {
+        self.settings_nav.sub = None;
         self.settings_section = section;
+        self.recorder = None;
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();
         }
@@ -1904,6 +1970,8 @@ impl Workspace {
     }
 
     pub fn close_panel(&mut self, tx: &mut Tx) {
+        self.recorder = None;
+        self.leave_download_dialog();
         self.bindings.sequence.clear();
         self.panel = None;
         tx.blur();
@@ -1911,6 +1979,10 @@ impl Workspace {
 
     /// Escape on a modal: back to the panel it came from, or closed.
     pub fn cancel_panel_quiet(&mut self) {
+        if self.leave_folder_field() {
+            return;
+        }
+        self.leave_download_dialog();
         if let Some(mut back) = self.panel.as_mut().and_then(|p| p.back.take()) {
             if let Some(input) = back.inputs.first_mut() {
                 input.focused = true;
@@ -1922,6 +1994,10 @@ impl Workspace {
     }
 
     pub fn cancel_panel(&mut self, tx: &mut Tx) {
+        if self.leave_folder_field() {
+            return;
+        }
+        self.leave_download_dialog();
         if let Some(mut back) = self.panel.as_mut().and_then(|p| p.back.take()) {
             if let Some(input) = back.inputs.first_mut() {
                 input.focused = true;
@@ -1986,18 +2062,7 @@ impl Workspace {
         }
         match kind {
             PanelKind::Form(form) => {
-                let font_preferences = matches!(form, Form::Fonts).then(|| {
-                    let fallbacks = values[1]
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    normalize_font_preferences(&values[0], &fallbacks)
-                });
-                let error = if let Some(result) = &font_preferences {
-                    result.as_ref().err().map(ToString::to_string)
-                } else if let Form::HostShell(_) = form {
+                let error = if let Form::HostShell(_) = form {
                     // Empty clears it; the server takes one program name, never arguments.
                     values[0]
                         .chars()
@@ -2008,6 +2073,9 @@ impl Workspace {
                         "Use 1–63 letters, digits and hyphens, not starting or ending with a hyphen."
                             .to_owned()
                     })
+                } else if let Form::DownloadFolder = form {
+                    // Empty goes back to the system's Downloads folder.
+                    super::downloads::folder_error(&values[0]).map(str::to_owned)
                 } else if values.first().is_none_or(|s| s.is_empty()) {
                     Some("Enter a name".to_owned())
                 } else if let Form::AddSsh(index) = form {
@@ -2050,19 +2118,6 @@ impl Workspace {
                 let back = self.settings_back();
                 self.close_panel(tx);
                 match form {
-                    Form::Fonts => {
-                        let (family, fallbacks) = font_preferences
-                            .expect("font form")
-                            .expect("validated above");
-                        let changed = family != self.settings.font_family
-                            || fallbacks != self.settings.font_fallbacks;
-                        self.settings.font_family = family;
-                        self.settings.font_fallbacks = fallbacks;
-                        self.save();
-                        if changed {
-                            self.inform("Fonts saved. Reopen the client to use them.");
-                        }
-                    }
                     Form::ClientLabel => {
                         self.settings.client_label = Some(values[0].clone());
                         self.save();
@@ -2074,6 +2129,7 @@ impl Workspace {
                         self.save();
                     }
                     Form::TailscaleName(host) => self.set_tailscale_name(host, values[0].clone()),
+                    Form::DownloadFolder => self.set_download_folder(&values[0]),
                     Form::RenameSession(None) => self.request("session.set_label", json!({"label":values[0]})),
                     Form::RenameSession(Some(session)) => {
                         self.session_request(&session, "session.set_label", json!({"label":values[0]}))
@@ -2133,7 +2189,13 @@ impl Workspace {
                 self.remove_host(host, tx);
                 self.panel = back;
             }
+            PanelKind::ResetShortcuts => {
+                let back = self.settings_back();
+                self.reset_recorded();
+                self.panel = back;
+            }
             PanelKind::StartSsh { endpoint } => self.start_ssh(endpoint),
+            PanelKind::Download(_) => self.start_download(),
             PanelKind::AgentChange { change, .. } => {
                 let back = self.settings_back();
                 self.apply_agents(change);
@@ -2155,6 +2217,9 @@ impl Workspace {
                     return;
                 }
                 match target.filter(|_| method == "block.close") {
+                    Some(target) if payload.get("block_ids").is_some() => {
+                        self.confirmed_pane_close(&target, &payload);
+                    }
                     Some(target) => {
                         self.send(target.host, HostCommand::Request { method, payload })
                     }
@@ -2167,13 +2232,7 @@ impl Workspace {
 
     pub fn change_font(&mut self, delta: f32) {
         self.settings.font_size = (self.settings.font_size + delta).clamp(8., 48.);
-        for term in self.terminals.values_mut() {
-            term.last_size = None;
-        }
-        let font = self.settings.font_size;
-        for term in self.terminals.values_mut() {
-            term.resize_if_owner(font);
-        }
+        self.resize_terminals();
         self.save();
     }
 

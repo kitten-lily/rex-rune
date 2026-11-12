@@ -3070,15 +3070,17 @@ dependencies = [
 
 [[package]]
 name = "rex-linux"
-version = "0.6.0"
+version = "0.7.3"
 dependencies = [
  "anyhow",
+ "arboard",
  "base64 0.22.1",
  "clap",
  "flume",
  "futures-util",
  "gethostname",
  "ghostty-vt",
+ "image",
  "libc",
  "log",
  "qrcode",

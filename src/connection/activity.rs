@@ -2,6 +2,7 @@
 //! progress, the bell, the foreground process, the terminal title, and OSC 9 / OSC 777 desktop
 //! notifications. All of it arrives as the terminal creator's `block_event`s, or from its
 //! `program_status`, `process`, `title` and `pwd` methods.
+use super::titles::Place;
 use serde_json::Value;
 
 pub const TERMINAL: &str = "com.superlogical.terminal";
@@ -263,6 +264,8 @@ pub enum BlockEvent {
     Process {
         name: Option<String>,
         pids: Vec<u64>,
+        /// Foreground directory and the terminal's own shell, for display-only titles.
+        place: Place,
     },
     /// A program set the terminal's title (empty: cleared), with the pid that set it.
     Title {
@@ -340,6 +343,7 @@ pub fn parse_process(body: &Value) -> BlockEvent {
     BlockEvent::Process {
         name: program_name(foreground),
         pids,
+        place: Place::parse(body),
     }
 }
 

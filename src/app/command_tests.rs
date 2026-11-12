@@ -53,13 +53,30 @@ const IDS: &[&str] = &[
     "pane.focus.right",
     "pane.focus.up",
     "pane.focus.down",
+    "pane.move.left",
+    "pane.move.right",
+    "pane.move.up",
+    "pane.move.down",
+    "pane.resize.left",
+    "pane.resize.right",
+    "pane.resize.up",
+    "pane.resize.down",
+    "pane.balance",
+    "pane.move_to_tab",
+    "pane.prompt_previous",
+    "pane.prompt_next",
+    "pane.page_up",
+    "pane.page_down",
     "pane.rename",
     "pane.copy_id",
+    "pane.download",
     "pane.clear",
     "pane.reset",
     "pane.reconnect",
     "pane.close_focused",
+    "pane.close_others",
     "pane.close",
+    "host.switch",
     "host.add",
     "host.edit",
     "host.shell",
@@ -74,6 +91,7 @@ const IDS: &[&str] = &[
     "view.activity.by_priority",
     "view.tab_position",
     "view.pane_density",
+    "view.toolbar",
     "view.pane_headers",
     "view.terminal_theme",
     "view.interface_theme",
@@ -83,14 +101,19 @@ const IDS: &[&str] = &[
     "view.font.increase",
     "view.font.decrease",
     "view.font.reset",
+    "app.shortcuts",
     "app.settings",
-    "app.reload_config",
+    "app.downloads",
     "app.check_updates",
     "app.about",
     "app.help",
     "app.report_issue",
     "app.copy_version",
     "app.copy_debug",
+    "app.config_reload",
+    "app.config_path",
+    "app.mode_exit",
+    "app.mode_exit_all",
     "app.close",
 ];
 
@@ -317,6 +340,7 @@ fn a_search_is_one_list_with_the_best_match_first() {
             "Close other tabs…",
             "Close tab…",
             "Close pane or tab…",
+            "Close other panes…",
             "Close pane…",
             "Close app"
         ]
@@ -331,7 +355,10 @@ fn a_search_is_one_list_with_the_best_match_first() {
     );
     // The command named exactly comes before a longer one that starts the same way.
     search(&mut ws, "close pane");
-    assert_eq!(labels(&ws), ["Close pane…", "Close pane or tab…"]);
+    assert_eq!(
+        labels(&ws),
+        ["Close pane…", "Close pane or tab…", "Close other panes…"]
+    );
     // Words in any order; each must be found.
     search(&mut ws, "size font");
     assert_eq!(
@@ -346,10 +373,11 @@ fn a_search_is_one_list_with_the_best_match_first() {
     search(&mut ws, "quit");
     assert_eq!(labels(&ws), ["Close app"]);
     search(&mut ws, "view");
-    assert_eq!(labels(&ws).len(), 16, "every View command");
+    assert_eq!(labels(&ws).len(), 17, "every View command");
     // A shortcut is found as typed, not by its letters.
     search(&mut ws, "ctrl shift d");
-    assert_eq!(labels(&ws), ["Split right"]);
+    // The exact D shortcut ranks ahead of the Down prefix.
+    assert_eq!(labels(&ws), ["Split right", "Next prompt"]);
     // What is on screen is not a keyword for the commands that act on it.
     search(&mut ws, "editor");
     assert!(labels(&ws).is_empty());
@@ -395,10 +423,12 @@ fn hints_are_the_effective_bindings() {
         ("pane.split.right", "Ctrl Shift D"),
         ("pane.focus.left", "Ctrl Alt Left"),
         ("pane.copy", "Ctrl Shift C"),
+        ("pane.prompt_previous", "Ctrl Shift Up"),
+        ("pane.prompt_next", "Ctrl Shift Down"),
         ("pane.close_focused", "Ctrl Shift W"),
         ("view.sidebar", "Ctrl Shift B"),
         // The main block's keys, not the numpad's.
-        ("view.zoom.in", "Ctrl +"),
+        ("view.zoom.in", "Ctrl Plus"),
         ("view.zoom.out", "Ctrl -"),
         ("view.zoom.reset", "Ctrl 0"),
         ("app.settings", "Ctrl ,"),

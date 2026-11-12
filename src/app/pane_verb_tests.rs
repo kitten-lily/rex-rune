@@ -186,6 +186,7 @@ fn the_pane_menu_lists_the_verbs_in_groups_and_marks_what_cannot_run() {
             ("Zoom pane", 1),
             ("Rename pane…", 2),
             ("Copy pane ID", 2),
+            ("Download file…", 2),
             ("Clear terminal", 3),
             ("Reset terminal", 3),
             ("Reconnect terminal", 3),
@@ -663,7 +664,10 @@ impl Camera {
     }
 
     pub(super) fn snap(&mut self, rt: &mut Runtime<Workspace>, name: &str) {
-        let (w, h) = (2048, 1400);
+        let (w, h) = (
+            (rt.viewport.0 * rt.env.scale).round() as u32,
+            (rt.viewport.1 * rt.env.scale).round() as u32,
+        );
         let (device, queue) = (&self.gpu.device, &self.gpu.queue);
         self.painter.upload_images(device, queue, &mut rt.images);
         self.painter

@@ -17,6 +17,29 @@ pub const DESKTOP_ID: &str = "dev.shuv.rex-linux";
 const LAUNCHER_PATH: &str = "/dev/shuv/rex_linux/LauncherEntry";
 const LAUNCHER_INTERFACE: &str = "com.canonical.Unity.LauncherEntry";
 
+/// The picture each notification shows. GNOME draws only a small, plain app icon without one.
+const IMAGE: &[u8] = include_bytes!("../../resources/icons/128x128/apps/dev.shuv.rex-linux.png");
+
+/// `IMAGE` as the spec's `image-data` hint, `(iiibiiay)`: width, height, row stride, alpha,
+/// bits per sample, channels and RGBA bytes. Sent with every notification, so it needs no
+/// installed icon file.
+fn image_data() -> Option<Variant<'static>> {
+    let image = image::load_from_memory_with_format(IMAGE, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let (width, height) = (width as i32, height as i32);
+    Some(Variant::from((
+        width,
+        height,
+        width * 4,
+        true,
+        8i32,
+        4i32,
+        image.into_raw(),
+    )))
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NoteTarget {
     pub host: HostId,
@@ -110,6 +133,7 @@ async fn run(notes: flume::Receiver<Message>, handle: AppHandle<Workspace>) -> z
     let mut targets: HashMap<u32, NoteTarget> = HashMap::new();
     let mut order: VecDeque<u32> = VecDeque::new();
     let mut tokens: HashMap<u32, String> = HashMap::new();
+    let image = image_data();
     loop {
         tokio::select! {
             message = notes.recv_async() => {
@@ -129,7 +153,10 @@ async fn run(notes: flume::Receiver<Message>, handle: AppHandle<Workspace>) -> z
                     }
                     Err(_) => return Ok(()),
                 };
-                let hints = note_hints(note.sound);
+                let mut hints = note_hints(note.sound);
+                if let Some(image) = &image {
+                    hints.insert("image-data", image.try_clone()?);
+                }
                 // Without a notification service the badge still works, so go on.
                 let id: u32 = match proxy
                     .call(
@@ -209,5 +236,23 @@ mod tests {
         assert_eq!(three["count"], Variant::from(3i64));
         assert_eq!(three["count-visible"], Variant::from(true));
         assert_eq!(badge_properties(0)["count-visible"], Variant::from(false));
+    }
+
+    #[test]
+    fn the_notification_picture_matches_the_freedesktop_image_data_format() {
+        let image = super::image_data().expect("embedded Rex icon decodes");
+        let (width, height, stride, alpha, bits, channels, pixels): (
+            i32,
+            i32,
+            i32,
+            bool,
+            i32,
+            i32,
+            Vec<u8>,
+        ) = image.try_into().expect("image-data is (iiibiiay)");
+        assert_eq!((width, height, stride), (128, 128, 128 * 4));
+        assert_eq!((alpha, bits, channels), (true, 8, 4));
+        assert_eq!(pixels.len(), (stride * height) as usize);
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 }

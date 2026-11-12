@@ -573,6 +573,7 @@ mod tests {
                 BlockEvent::Process {
                     name: Some("live".into()),
                     pids: vec![],
+                    place: Default::default(),
                 },
                 json!({"foreground":{"pid":1,"name":"old"}}),
             ),

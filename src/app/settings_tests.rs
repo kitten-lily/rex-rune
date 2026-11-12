@@ -239,6 +239,9 @@ fn a_picker_opens_over_settings_against_its_control_and_gives_focus_back() {
 #[test]
 fn a_select_row_lists_its_values_and_applies_the_chosen_one() {
     let mut rt = settings_at(SettingsSection::Interface, 1., (1440., 1000.));
+    rt.pointer_move(900., 500.);
+    rt.wheel(900., 500., -4000.);
+    settle(&mut rt);
     click(&mut rt, "notice-position");
     settle(&mut rt);
     let Some(PanelKind::Choice(choice)) = kind(&rt) else {
@@ -260,7 +263,10 @@ fn a_select_row_lists_its_values_and_applies_the_chosen_one() {
     );
     let (control, list) = (rect(&rt, "notice-position"), rect(&rt, "menu-surface"));
     assert!(close(list[0] + list[2], control[0] + control[2]));
-    assert!(close(list[1], control[1] + control[3] + 4.), "{list:?}");
+    assert!(
+        close(list[1], control[1] + control[3] + 4.) || close(list[1] + list[3], control[1] - 4.),
+        "list {list:?}, control {control:?}"
+    );
     assert!(
         !rt.elements()
             .iter()
@@ -360,9 +366,9 @@ fn disclosure_rows_and_segments_work_from_the_keyboard() {
     let mut rt = settings_at(SettingsSection::Terminal, 1., (1440., 1000.));
     press(&mut rt, Key::Tab); // Close
     press(&mut rt, Key::Tab); // Font family
-    assert!(focused(&rt).unwrap().ends_with("font-change"));
+    assert!(focused(&rt).unwrap().ends_with("font-choose"));
     press(&mut rt, Key::Enter);
-    assert!(matches!(kind(&rt), Some(PanelKind::Form(Form::Fonts))));
+    assert!(matches!(kind(&rt), Some(PanelKind::Fonts(_))));
     press(&mut rt, Key::Escape);
     assert!(matches!(kind(&rt), Some(PanelKind::Settings)));
 
@@ -372,6 +378,9 @@ fn disclosure_rows_and_segments_work_from_the_keyboard() {
         "{:?}",
         element_text(&rt, "host-shell:0")
     );
+    // Terminal now includes cursor and selection cards; bring the shell row into view.
+    rt.update(|_, tx| tx.scroll_center("host-shell:1"));
+    settle(&mut rt);
     click(&mut rt, "host-shell:1");
     assert!(matches!(
         kind(&rt),
@@ -389,6 +398,9 @@ fn disclosure_rows_and_segments_work_from_the_keyboard() {
         "segmented controls share both edges: {density:?} {tabs:?}"
     );
     assert!(!rt.state.settings.vertical_tabs);
+    // Panes includes two fading switches; the following group may now be below the fold.
+    rt.update(|_, tx| tx.scroll_center("tab-position"));
+    settle(&mut rt);
     let sidebar = rt
         .elements()
         .into_iter()
@@ -469,71 +481,6 @@ fn a_long_row_label_is_cut_short_before_its_value() {
         .find(|v| v[1] >= short[1] && v[1] + v[3] <= short[1] + short[3])
         .expect("the first row's value");
     assert!(close(other[0] + other[2], value[0] + value[2]));
-    std::fs::remove_file(&rt.state.settings_path).ok();
-}
-
-#[test]
-fn a_shortcut_row_names_its_action_on_the_left_and_shows_keycaps_on_the_right() {
-    let rt = settings_at(SettingsSection::Shortcuts, 1., (1440., 1000.));
-    let elements = rt.elements();
-    let rows: Vec<_> = elements
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            !e.exiting
-                && e.key
-                    .as_deref()
-                    .is_some_and(|k| k.starts_with("shortcut-") && !k.contains("-keys-"))
-        })
-        .collect();
-    assert!(rows.len() > 20, "the default bindings: {}", rows.len());
-    for (_, row) in &rows {
-        let key = row.key.as_deref().unwrap();
-        let keys = rect(&rt, &key.replacen("shortcut-", "shortcut-keys-", 1));
-        assert!(
-            close(keys[0] + keys[2], row.rect[0] + row.rect[2] - 12.),
-            "{key}: keys end at the card's inset: {keys:?} in {:?}",
-            row.rect
-        );
-        assert!(
-            keys[0] > row.rect[0] + row.rect[2] / 2.,
-            "{key}: keys are on the right"
-        );
-    }
-    // The first row: its title starts at the inset and ends before its keys.
-    let (_, first) = rows[0];
-    let title = text_rects(&rt, "Next tab")[0];
-    let keys = rect(&rt, "shortcut-keys-Navigate-0");
-    assert!(close(title[0], first.rect[0] + 12.) && title[0] + title[2] < keys[0]);
-    // The keys are the keycaps menus and Commands draw: 17 pt chips with a hairline, on a
-    // 7% white fill, never the kit's tinted Keybind.
-    let chip = crate::app::theme::white(crate::app::theme::KEYCAP_FILL);
-    let caps: Vec<_> = elements
-        .iter()
-        .filter(|e| !e.exiting && e.fill == chip && close(e.rect[3], 17.))
-        .collect();
-    assert!(caps.len() >= rows.len(), "a chip a key: {}", caps.len());
-    // Named as Commands and the menus name them.
-    for title in [
-        "Split right",
-        "Split down",
-        "Move tab left",
-        "Move tab right",
-        "Close pane or tab",
-        "Focus adjacent pane",
-    ] {
-        assert_eq!(text_rects(&rt, title).len(), 1, "{title}");
-    }
-    for old in [
-        "Split pane · down",
-        "Move tab · left",
-        "Close focused pane or tab",
-    ] {
-        assert!(text_rects(&rt, old).is_empty(), "{old}");
-    }
-    // The numpad twins fold into the row's one helper line, and the pointer's row is words.
-    assert_eq!(text_rects(&rt, "Also on the numpad").len(), 3);
-    assert_eq!(text_rects(&rt, "Mouse Back / Forward").len(), 1);
     std::fs::remove_file(&rt.state.settings_path).ok();
 }
 

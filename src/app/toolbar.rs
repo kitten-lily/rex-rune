@@ -136,6 +136,17 @@ fn identity(s: &Workspace) -> El {
     ))
 }
 
+/// The fill-mode floor reserves 40 pt of name, the existing icon and padding, and
+/// whole activity/mute marks. Status words are short; 7 pt per character is generous.
+fn fill_floor(word: Option<&str>, quiet: bool) -> f32 {
+    (28. + 15.
+        + 8.
+        + 40.
+        + word.map_or(0., |word| 8. + word.chars().count() as f32 * 7.)
+        + if quiet { 8. + 14. } else { 0. })
+    .max(96.)
+}
+
 /// The session's tabs on their track. With no tab to show (no session on screen, or one whose
 /// view hasn't arrived) there is no track: an empty one would be a sliver of chip.
 fn tab_track(s: &Workspace) -> El {
@@ -147,6 +158,8 @@ fn tab_track(s: &Workspace) -> El {
         return el();
     }
     let session = model.selected.clone().unwrap_or_default();
+    let fill = s.settings.interface.tabs_fill_available_space;
+    let mut floors = -2.;
     let mut names = row()
         .key("tab-names")
         .h(28.)
@@ -158,7 +171,7 @@ fn tab_track(s: &Workspace) -> El {
                 continue;
             };
             let active = view.active_window_id.as_ref() == Some(&id);
-            let label = tab_name(model, tab);
+            let label = tab_name(model, tab, s.generated_titles());
             let activity = tab_activity(model, tab);
             let quiet = s.tab_muted(s.active, &id);
             let word = shown_word(
@@ -182,8 +195,6 @@ fn tab_track(s: &Workspace) -> El {
                     None => label.clone(),
                 })
                 .h_full()
-                .min_w(96.)
-                .max_w(240.)
                 .px(14.)
                 .gap(8.)
                 .center_y()
@@ -197,6 +208,13 @@ fn tab_track(s: &Workspace) -> El {
                     s.perform(Intent::Tab(press_id.clone()), tx);
                 },
             );
+            tab_el = if fill {
+                let floor = fill_floor(word.as_ref().map(|(word, _)| word.as_ref()), quiet);
+                floors += floor + 2.;
+                tab_el.grow(1.).min_w(floor).justify_center()
+            } else {
+                tab_el.min_w(96.).max_w(240.)
+            };
             if active {
                 tab_el = tab_el.child(
                     el().pin(Some(0.), Some(0.), Some(0.), Some(0.))
@@ -262,9 +280,12 @@ fn tab_track(s: &Workspace) -> El {
             names = names.child(tab_el);
         }
     }
+    if fill {
+        names = names.grow(1.).min_w(floors.max(0.));
+    }
     let overflow = s.tab_strip.overflows();
     let (fade, pos) = (s.tab_fade.clone(), s.tab_pos.clone());
-    let strip = row()
+    let mut strip = row()
         .key("tabs")
         .min_w(0.)
         .shrink()
@@ -290,6 +311,10 @@ fn tab_track(s: &Workspace) -> El {
         .center_y()
         .min_w(0.)
         .shrink();
+    if fill {
+        track = track.grow(1.);
+        strip = strip.grow(1.);
+    }
     if overflow {
         track = track.child(
             chrome_button(
@@ -364,7 +389,100 @@ fn bar_button(
         )
 }
 
+/// One chip while a transfer receives, `↓ build.log 42%` or `↓ 3 files`, and none otherwise,
+/// like the pending-sequence chip. When the bar is short of room it is `↓ 42%` (see
+/// `downloads_view::chip_label`). A press opens the Downloads popover under the chip.
+fn download_chip(s: &Workspace) -> El {
+    let Some(text_of) = super::downloads_view::chip_label(s) else {
+        return el();
+    };
+    let super::downloads_view::ChipText {
+        label,
+        short,
+        compact,
+        percent,
+    } = text_of;
+    let spoken = match &percent {
+        Some(percent) => format!("{label} {percent}"),
+        None => label.clone(),
+    };
+    let spoken = format!("Downloads: {}", spoken.trim_start_matches("↓ "));
+    let shown = if compact { short } else { label };
+    chip_press(chip(
+        row()
+            .key("download-chip")
+            .role("button")
+            .label(spoken.clone())
+            .h(28.)
+            .max_w(190.)
+            .px(8.)
+            .gap(5.)
+            .center_y()
+            .hover(white(0.08))
+            .help(format!("{spoken} · click for the list"))
+            .on_layout(|s: &mut Workspace, r| s.downloads.chip = r)
+            .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+                s.open_downloads_from_chip(tx);
+                tx.blur();
+            })
+            // Cut by width in the middle, so a long name keeps its extension and the percent
+            // keeps its place.
+            .child(
+                text(shown)
+                    .font(medium(11.5))
+                    .color(rgb(ink()))
+                    .truncate_middle()
+                    .shrink(),
+            )
+            .children(percent.map(|p| text(p).font(medium(11.5)).color(rgb(muted())))),
+    ))
+}
+
+/// A pending key sequence remains visible even without the toolbar row.
+pub fn sequence_chip(s: &Workspace) -> Option<El> {
+    if !s.settings.terminal.key_sequence_hints {
+        return None;
+    }
+    let label = s.bindings.pending_label(s.effective_keymap())?;
+    Some(chip(
+        el().key("pending-sequence")
+            .h(28.)
+            .max_w(170.)
+            .px(8.)
+            .center_y()
+            .help(format!(
+                "{label} — waiting for the next key; Escape cancels"
+            ))
+            .child(
+                text(format!("{label} …"))
+                    .font(medium(11.5))
+                    .color(rgb(ink()))
+                    .truncate(),
+            ),
+    ))
+}
+
+/// Only live status chips float when the toolbar is absent, never invisible bar controls.
+pub fn floating_status(s: &Workspace) -> Option<El> {
+    let sequence = sequence_chip(s);
+    let download = super::downloads_view::chip_label(s).is_some();
+    if sequence.is_none() && !download {
+        return None;
+    }
+    Some(
+        row()
+            .gap(8.)
+            .children(sequence)
+            .children(download.then(|| download_chip(s))),
+    )
+}
+
 pub fn toolbar(s: &Workspace) -> El {
+    let fill = s.settings.interface.tabs_fill_available_space
+        && !s.sidebar_tabs()
+        && s.model()
+            .view()
+            .is_some_and(|v| v.windows.iter().any(|t| t.window_id.is_some()));
     row()
         .key("toolbar")
         .w_full()
@@ -383,27 +501,15 @@ pub fn toolbar(s: &Workspace) -> El {
         ))
         .child(identity(s))
         .child(if s.sidebar_tabs() { el() } else { tab_track(s) })
-        .child(match s.bindings.sequence.label(s.effective_keymap()) {
-            Some(label) => chip(
-                el().key("pending-sequence")
-                    .h(28.)
-                    .max_w(170.)
-                    .px(8.)
-                    .center_y()
-                    .help(format!(
-                        "{label} — waiting for the next key; Escape cancels"
-                    ))
-                    .child(
-                        text(format!("{label} …"))
-                            .font(medium(11.5))
-                            .color(rgb(ink()))
-                            .truncate(),
-                    ),
-            ),
-            None => el(),
-        })
+        .child(sequence_chip(s).unwrap_or_else(el))
+        .child(download_chip(s))
         // Always at least 48pt of window to drag, outside the tabs.
-        .child(el().key("title-drag").grow(1.).min_w(48.).h_full())
+        .child(
+            el().key("title-drag")
+                .grow(if fill { 0. } else { 1. })
+                .min_w(48.)
+                .h_full(),
+        )
         .child(
             row()
                 .center_y()

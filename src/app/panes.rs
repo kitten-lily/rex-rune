@@ -31,9 +31,9 @@ fn inner(s: &Workspace) -> [f32; 4] {
     }
     [
         MARGIN,
-        0.,
+        super::toolbar_reveal::top_margin(s),
         (aw - 2. * MARGIN).max(0.),
-        (ah - MARGIN).max(0.),
+        (ah - MARGIN - super::toolbar_reveal::top_margin(s)).max(0.),
     ]
 }
 
@@ -106,6 +106,7 @@ fn header(
     let menu_id = block.to_owned();
     let h = row()
         .key(format!("pane-header:{block}"))
+        .hover_group()
         .w_full()
         .h(CARD_HEADER)
         .pl(14.)
@@ -128,8 +129,13 @@ fn header(
         })
         .child(
             text(label.clone())
+                .key(format!("pane-name:{block}"))
                 .font(medium(11.5))
-                .color(rgb(if focused { ink() } else { muted() }))
+                .color(
+                    rgb(if focused { ink() } else { muted() })
+                        .alpha(pane_header::header_opacity(s, block)),
+                )
+                .group_color(rgb(if focused { ink() } else { muted() }))
                 .truncate()
                 .help_when_truncated(label)
                 .shrink(),
@@ -219,6 +225,10 @@ fn strip(s: &Workspace, block: &str, width: f32, m: &Metrics) -> Option<El> {
     })
 }
 
+pub(super) fn outlines(s: &Workspace, window: &Window, flat: bool) -> bool {
+    s.settings.highlights_active_pane() && (!flat || layout::placements(window, None).0.len() > 1)
+}
+
 /// `bleed` draws the pane flat, with no card around it (a single pane, or Compact density).
 #[allow(clippy::too_many_arguments)]
 fn pane_card(
@@ -265,16 +275,17 @@ fn pane_card(
             s.drop_hover = None;
             s.drop_files(&drop_id, paths);
         });
-    if bleed && s.drop_hover.as_deref() == Some(block) {
-        c = c.border(1., rgb(accent()).alpha(0.85));
-    }
+    // A flat single pane has no neighbour to distinguish; cards (including zoomed
+    // cards) retain the existing density-following cue unless explicitly overridden.
+    let outlined = focused && outlines(s, window, bleed);
+    let ring = bleed && (outlined || s.drop_hover.as_deref() == Some(block));
     if !bleed {
         c = c
             .radius(CARD_RADIUS)
             .continuous_corners()
             .clip_rounded(CARD_RADIUS);
         c = match state {
-            CardState::Focused => c
+            CardState::Focused if outlined => c
                 .border_gradient(1., rgb(accent()).alpha(0.85), rgb(accent()).alpha(0.5))
                 .box_shadow(shadow(0., 0., 24., rgb(accent()).alpha(0.2)))
                 .box_shadow(shadow(0., 14., 40., black(0.55))),
@@ -284,7 +295,7 @@ fn pane_card(
                 30.,
                 black(0.45),
             )),
-            CardState::Plain => c
+            CardState::Focused | CardState::Plain => c
                 .border_gradient(1., white(0.10), white(0.035))
                 .box_shadow(shadow(0., 10., 30., black(0.45))),
         };
@@ -304,6 +315,11 @@ fn pane_card(
             let colors = s.term_colors();
             let look = GridLook {
                 cursor: Some(cursor),
+                cursor_force: s
+                    .settings
+                    .terminal
+                    .cursor_force
+                    .then(|| s.settings.terminal.cursor_style.shape()),
                 ime: keyboard,
                 colors,
             };
@@ -333,8 +349,8 @@ fn pane_card(
                 } else {
                     Cursor::Text
                 });
-            // The middle button only presses the grid while a program wants it.
-            if t.tracking() {
+            // Middle presses go to mouse-reporting programs, or opt-in PRIMARY paste.
+            if t.tracking() || s.settings.terminal.primary_selection {
                 grid = grid.pointer_buttons([PointerButton::Middle]);
             }
             let grid = grid
@@ -342,17 +358,29 @@ fn pane_card(
                 // card around it springs. The card clips it.
                 .instant_changes()
                 .motion(STILL)
-                .on_layout(move |s: &mut Workspace, r| {
-                    let font = s.settings.font_size;
-                    if let Some(t) = s.terminals.get_mut(&k1) {
-                        t.rect = r;
-                        t.resize_if_owner(font);
-                    }
+                .on_layout_tx(move |s: &mut Workspace, r, tx| {
+                    let cell = s.metrics().cell;
+                    let Some(t) = s.terminals.get_mut(&k1) else {
+                        return;
+                    };
+                    // Moving the origin or changing unused cell slack needs no second
+                    // view pass. Repeated padding steps otherwise consume Rune's layout
+                    // feedback budget before the next whole row/column changes.
+                    let old_grid = ((t.rect[2] / cell.0).floor(), t.visible_rows(cell));
+                    let old_corner = t.find.corner;
+                    t.rect = r;
+                    t.resize_if_owner(cell);
+                    let same_grid = old_grid == ((r[2] / cell.0).floor(), t.visible_rows(cell));
                     s.place_find(&k1);
+                    if same_grid && s.terminals[&k1].find.corner == old_corner {
+                        tx.live_only();
+                    }
                 })
                 .on_drag(move |s: &mut Workspace, d, tx| {
-                    let cell = term::metrics(s.settings.font_size).cell;
+                    let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k2.1.as_str());
+                    let copies = s.settings.terminal.copy_on_selection
+                        || s.settings.terminal.primary_selection;
                     let Some(t) = s.terminals.get_mut(&k2) else {
                         return;
                     };
@@ -364,6 +392,8 @@ fn pane_card(
                     let mods = tx.mods();
                     let at = t.cell_at(d.x, d.y, cell);
                     if d.phase == Phase::Down {
+                        t.primary_press =
+                            (button == "middle" && !t.tracking()).then_some((d.x, d.y));
                         if !focused {
                             let _ = t.connection.commands.focus();
                         }
@@ -420,6 +450,21 @@ fn pane_card(
                         return;
                     }
                     if button != "left" {
+                        if let Some((x, y)) = t.primary_press
+                            && (d.x - x).hypot(d.y - y) > 3.
+                        {
+                            t.primary_press = None;
+                        }
+                        if d.phase == Phase::Up {
+                            let paste = t.primary_press.take().is_some() && !t.tracking();
+                            if paste {
+                                s.paste_primary(&k2.1);
+                            }
+                        }
+                        return;
+                    }
+                    // Focus loss cancels the gesture, including later motion and release.
+                    if d.phase != Phase::Down && !t.selecting {
                         return;
                     }
                     let i = t.index(d.x, d.y, cell);
@@ -435,12 +480,15 @@ fn pane_card(
                         Phase::Up => SelectionPhase::Up,
                     };
                     t.selection_event(phase, d.x, d.y, cell);
+                    if copies && d.phase == Phase::Up {
+                        t.want_selected_text();
+                    }
                 })
                 // Pointer motion with no button held: Ctrl shows the link under it, and programs
                 // that track every move (1003) hear it (the server drops it for the others).
                 // Only the focused pane reports it.
                 .on_pointer_move_local(move |s: &mut Workspace, p: PointerEvent, tx: &mut Tx| {
-                    let cell = term::metrics(s.settings.font_size).cell;
+                    let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k4.1.as_str());
                     let Some(t) = s.terminals.get_mut(&k4) else {
                         tx.live_only();
@@ -483,7 +531,7 @@ fn pane_card(
                 // Shift+right-click goes to such a program (sent on release, when Rune reports
                 // it).
                 .on_secondary_press_local(move |s: &mut Workspace, p: PointerEvent, tx: &mut Tx| {
-                    let cell = term::metrics(s.settings.font_size).cell;
+                    let cell = s.metrics().cell;
                     let mods = tx.mods();
                     let focused = s.focused_block().as_deref() == Some(k5.1.as_str());
                     if let Some(t) = s.terminals.get_mut(&k5)
@@ -505,7 +553,7 @@ fn pane_card(
                 })
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
                     let scale = if e.precise { s.ui_scale() } else { 1. };
-                    let cell = term::metrics(s.settings.font_size).cell;
+                    let cell = s.metrics().cell;
                     let Some(t) = s.terminals.get_mut(&k3) else {
                         return false;
                     };
@@ -524,14 +572,14 @@ fn pane_card(
                     true
                 })
                 .child(term::grid(&format!("g{block}"), t, m, look));
-            let padding = s.settings.pane_padding;
+            let (pad_x, pad_y) = s.settings.padding();
             // The card draws a background of its own colour, edge included; any other sits
             // inside the card's border, never over it.
             let fill = t.body(&colors);
-            // `side` is from the card's left, right and bottom edges to the grid, and `lead`
-            // from the body's top to where its top padding starts.
-            let (body, top, side, lead) = if fill == card() {
-                (col().w_full().px(padding).pb(padding), padding, padding, 0.)
+            // Keep each inset distinct: the find bar and its apron share the grid's
+            // origin and available size, including a differently coloured body's border.
+            let (body, top, side, lead, foot) = if fill == card() {
+                (col().w_full().px(pad_x).pb(pad_y), pad_y, pad_x, 0., pad_y)
             } else {
                 let (edge, radius) = if bleed {
                     (0., 0.)
@@ -547,14 +595,15 @@ fn pane_card(
                         .mx(edge)
                         .mb(edge)
                         .mt(above)
-                        .px((padding - edge).max(0.))
-                        .pb((padding - edge).max(0.))
+                        .px((pad_x - edge).max(0.))
+                        .pb((pad_y - edge).max(0.))
                         .corners([crown, crown, radius, radius])
                         .continuous_corners()
                         .fill(rgb(fill)),
-                    (padding - above).max(0.),
-                    edge + (padding - edge).max(0.),
+                    (pad_y - above).max(0.),
+                    edge + (pad_x - edge).max(0.),
                     above,
+                    edge + (pad_y - edge).max(0.),
                 )
             };
             let c = c.child(
@@ -573,7 +622,7 @@ fn pane_card(
                     let pane = find::Pane {
                         size: (
                             (rect[2] - 2. * side).max(0.),
-                            (rect[3] - above - side).max(0.),
+                            (rect[3] - above - foot).max(0.),
                         ),
                         cell: m.cell,
                         lowered: find::lowered(s, window, block, t),
@@ -586,7 +635,7 @@ fn pane_card(
                             edit,
                             t,
                             pane,
-                            (side, above, side),
+                            (side, above, foot),
                         ))
                 }
                 None => c,
@@ -603,6 +652,20 @@ fn pane_card(
                 .color(rgb(muted())),
             ),
         ),
+    };
+    // Flat terminal backgrounds cover the card's own paint. Draw the cue over
+    // them without adding an inset or changing the grid when focus moves.
+    let c = if ring {
+        c.child(
+            el().key(format!("pane-outline:{block}"))
+                .absolute(0., 0.)
+                .size(rect[2], rect[3])
+                .border(1., rgb(accent()).alpha(0.85))
+                .inert()
+                .motion(STILL),
+        )
+    } else {
+        c
     };
     // With no header to hold it, the strip floats over the pane's top-right corner.
     let c = match strip(s, block, rect[2], m).filter(|_| placement == Placement::None) {
@@ -717,10 +780,7 @@ fn target_block(s: &Workspace) -> Option<String> {
 
 /// `px` is device pixels per point, for drawing terminal box drawing on whole pixels.
 pub fn area(s: &Workspace, px: f32) -> El {
-    let m = Metrics {
-        px,
-        ..term::metrics(s.settings.font_size)
-    };
+    let m = Metrics { px, ..s.metrics() };
     let mut area = el()
         .key("panes")
         .grow(1.)

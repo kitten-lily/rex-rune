@@ -57,6 +57,56 @@ fn server_map(
 }
 
 #[test]
+fn prompt_shortcuts_consume_presses_repeats_and_releases_but_are_removable() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    let (sender, sent) = flume::unbounded();
+    live_terminal(&mut ws, "block:a", &sender);
+    let mut rt = runtime(ws);
+    for (code, named, older) in [
+        (Code::ArrowUp, Key::Up, true),
+        (Code::ArrowDown, Key::Down, false),
+    ] {
+        let event = KeyEvent {
+            key: named,
+            mods: Mods {
+                ctrl: true,
+                shift: true,
+                ..Mods::default()
+            },
+        };
+        for (pressed, repeat) in [(true, false), (true, true), (false, false)] {
+            key(&mut rt, code, event.clone(), pressed, repeat);
+        }
+        let calls: Vec<_> = sent.try_iter().collect();
+        assert_eq!(calls.len(), 2, "press and repeat only");
+        assert!(calls.iter().all(|c| matches!(c, HostCommand::Terminal {
+            command: Command::PromptStep(direction), ..
+        } if *direction == older)));
+    }
+    assert!(requests(&rx).is_empty());
+    rt.update(|s, _| {
+        overrides(
+            s,
+            json!([
+                {"keys":"ctrl+shift+up", "action":null},
+                {"keys":"ctrl+shift+down", "action":null}
+            ]),
+        )
+    });
+    let event = KeyEvent {
+        key: Key::Up,
+        mods: Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::default()
+        },
+    };
+    key(&mut rt, Code::ArrowUp, event.clone(), true, false);
+    key(&mut rt, Code::ArrowUp, event, false, false);
+    assert_eq!(sent_keys(&sent).len(), 2, "unbound keys flow to client.key");
+}
+
+#[test]
 fn forward_wins_over_local_and_sequence_echoes_original_prefix_with_release() {
     use rexrs::api::client::Binding;
     let (mut ws, rx) = tabbed_workspace("single");
@@ -256,7 +306,13 @@ fn settings_shows_effective_sequences_sources_and_pending_chip_cancels() {
     let words: Vec<_> = rt.elements().into_iter().filter_map(|e| e.text).collect();
     assert!(words.iter().any(|s| s == "then"));
     assert!(words.iter().any(|s| s == "shortcuts.json"));
-    assert!(!words.iter().any(|s| s == "Switch session"));
+    assert!(words.iter().any(|s| s == "Switch session"));
+    assert!(words.iter().any(|s| s == "Not set"));
+    assert!(
+        rt.state
+            .shortcut_chords("session.switch", &Value::Null)
+            .is_empty()
+    );
     assert!(!has(&rt, "shortcut-problem-0"));
     std::fs::remove_file(path).unwrap();
 }
@@ -418,14 +474,8 @@ fn server_config_path_marks_only_missing_files() {
             .iter()
             .find(|e| e.key.as_deref() == Some("server-shortcuts-path"))
             .unwrap();
-        assert_eq!(
-            path.text.as_deref(),
-            Some(if exists {
-                "Server: /server/init.lua"
-            } else {
-                "Server: /server/init.lua (not created)"
-            })
-        );
+        assert_eq!(path.text.as_deref(), Some("/server/init.lua"));
+        assert_eq!(has(&rt, "server-shortcuts-missing"), !exists);
     }
 }
 
@@ -515,7 +565,11 @@ fn config_reload_rereads_shortcuts_now_and_resends_only_changes() {
             .any(|b| b.binding.keys == ["ctrl+k"] && b.binding.action == "client.tab.new")
     );
     for rx in &receivers {
-        let commands: Vec<_> = rx.try_iter().collect();
+        // The active host is also asked to reload its own config (`server.config_reload`).
+        let commands: Vec<_> = rx
+            .try_iter()
+            .filter(|c| !matches!(c, HostCommand::Request { method, .. } if method == "server.config_reload"))
+            .collect();
         assert_eq!(commands.len(), 1, "connected and offline hosts alike");
         let HostCommand::Keymap(declaration) = &commands[0] else {
             panic!("expected keymap declaration");
@@ -533,7 +587,9 @@ fn config_reload_rereads_shortcuts_now_and_resends_only_changes() {
         &mut tx
     ));
     assert_eq!(ws.keymap_generation, old + 1);
-    assert!(receivers.iter().all(|rx| rx.is_empty()));
+    assert!(receivers.iter().all(|rx| rx.try_iter().all(
+        |c| matches!(c, HostCommand::Request { method, .. } if method == "server.config_reload")
+    )));
     assert_eq!(ws.notices.len(), 1);
     assert!(!ws.notices[0].sticky);
     // A file with problems says so every time it is reloaded on request.
@@ -573,7 +629,7 @@ fn config_reload_is_in_commands_and_refused_remotely() {
     let actions::Remote::Never(message) = spec.remote() else {
         panic!("client.config.reload must not be remote");
     };
-    assert!(message.contains("Only the person at this computer"));
+    assert!(message.contains("only to the person at this computer"));
     let rx = capture_host(&mut ws, 0);
     ws.hosts[0].model.connected = true;
     ws.settings.hosts[0].remote_control = true;

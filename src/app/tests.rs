@@ -6,28 +6,52 @@ mod about_tests;
 mod bindings_integration_tests;
 #[path = "command_tests.rs"]
 mod command_tests;
+#[path = "compatibility_tests.rs"]
+mod compatibility_tests;
+#[path = "downloads_tests.rs"]
+mod downloads_tests;
 #[path = "find_tests.rs"]
 mod find_tests;
+#[path = "font_settings_tests.rs"]
+mod font_settings_tests;
+#[path = "header_fading_tests.rs"]
+mod header_fading_tests;
 #[path = "menu_tests.rs"]
 mod menu_tests;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
+#[path = "pane_ergonomics_tests.rs"]
+mod pane_ergonomics_tests;
 #[path = "pane_header_tests.rs"]
 mod pane_header_tests;
 #[path = "pane_verb_tests.rs"]
 mod pane_verb_tests;
 #[path = "polish_tests.rs"]
 mod polish_tests;
+#[path = "recorder_tests.rs"]
+mod recorder_tests;
 #[path = "remote_session_tests.rs"]
 mod remote_session_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
+#[path = "settings_nav_tests.rs"]
+mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
+#[path = "shortcuts_page_tests.rs"]
+mod shortcuts_page_tests;
+#[path = "tab_fill_tests.rs"]
+mod tab_fill_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
 #[path = "tailscale_tests.rs"]
 mod tailscale_tests;
+#[path = "terminal_settings_tests.rs"]
+mod terminal_settings_tests;
+#[path = "titles_tests.rs"]
+mod titles_tests;
+#[path = "toolbar_reveal_tests.rs"]
+mod toolbar_reveal_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]
@@ -90,6 +114,84 @@ fn relaunch(ws: &Workspace) -> Workspace {
     let settings = Settings::load(&ws.settings_path).unwrap();
     let handle = rune::App::new(AppSpec::new("Rex", (1024., 700.), placeholder, view)).handle();
     Workspace::new(options, settings, ws.settings_path.clone(), handle, None)
+}
+
+#[test]
+fn the_window_size_is_saved_once_a_resize_settles_but_not_when_maximized() {
+    use std::time::{Duration, Instant};
+    let mut ws = workspace();
+    ws.window_resized([1920., 1080.], true);
+    assert_eq!(ws.save_window_size(), None);
+    assert_eq!(ws.settings.window_size, None);
+    ws.window_resized([1200.4, 799.6], false);
+    assert!(
+        ws.save_window_size().is_some(),
+        "waits for a drag to settle"
+    );
+    assert!(!ws.settings_path.exists());
+    ws.resized = Some(Instant::now() - Duration::from_secs(2));
+    // A new resize starts the settle delay again.
+    ws.window_resized([1100.4, 749.6], false);
+    assert!(ws.save_window_size().is_some());
+    assert_eq!(ws.settings.window_size, None);
+    ws.resized = Some(Instant::now() - Duration::from_secs(2));
+    assert_eq!(ws.save_window_size(), None);
+    assert_eq!(ws.settings.window_size, Some([1100., 750.]));
+    assert_eq!(relaunch(&ws).settings.window_size, Some([1100., 750.]));
+    ws.window_resized([1100., 750.], false);
+    assert_eq!(ws.resized, None, "the saved size needs no new save");
+    // Maximizing during the delay cancels the pending write.
+    ws.window_resized([1000., 700.], false);
+    ws.window_resized([1920., 1080.], true);
+    assert_eq!(ws.resized, None);
+    assert_eq!(ws.save_window_size(), None);
+    assert_eq!(relaunch(&ws).settings.window_size, Some([1100., 750.]));
+    std::fs::remove_file(&ws.settings_path).unwrap();
+}
+
+#[test]
+fn a_failed_window_size_save_rebuilds_to_show_the_notice() {
+    let mut ws = workspace();
+    let parent = ws.settings_path.clone();
+    std::fs::write(&parent, "not a directory").unwrap();
+    ws.settings_path = parent.join("workspace.json");
+    let mut tx = rune::Tx::default();
+    super::poll(&mut ws, 0., &mut tx);
+    assert!(!super::poll(&mut ws, 0., &mut tx));
+    ws.window_resized([1100., 750.], false);
+    ws.resized = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    assert!(super::poll(&mut ws, 0., &mut tx));
+    assert!(
+        ws.notices
+            .iter()
+            .any(|n| n.text.starts_with("Preferences not saved:"))
+    );
+    assert!(ws.resized.is_none(), "failed writes do not loop");
+    std::fs::remove_file(parent).unwrap();
+}
+
+#[test]
+fn window_layout_remembers_window_points_not_interface_zoom() {
+    let mut ws = workspace();
+    ws.settings.ui_scale = 1.5;
+    let mut rt = runtime_at(ws, (1200., 800.));
+    assert_eq!(rt.state.viewport, [1200., 800.]);
+    assert!(rt.state.resized.is_some());
+    rt.state.resized = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+    rt.state.save_window_size();
+    assert_eq!(rt.state.settings.window_size, Some([1200., 800.]));
+    rt.set_window_maximized(true);
+    rt.set_viewport((1600., 1000.), 1.);
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+    assert_eq!(rt.state.viewport, [1600., 1000.]);
+    assert_eq!(rt.state.resized, None);
+    assert_eq!(
+        relaunch(&rt.state).settings.window_size,
+        Some([1200., 800.])
+    );
+    std::fs::remove_file(&rt.state.settings_path).unwrap();
 }
 
 #[test]
@@ -509,6 +611,13 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
 }
 
 /// Host 0 connected on session "s" with a one-pane tab "single" and a split tab "split".
+/// Nothing went to the host but the Activity view's session prefetch, which is this
+/// client's own read-only bookkeeping, never a server request.
+fn quiet(host: &flume::Receiver<HostCommand>) -> bool {
+    host.try_iter()
+        .all(|c| matches!(c, HostCommand::PrefetchViews(_)))
+}
+
 fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     let mut ws = workspace();
     let rx = capture_host(&mut ws, 0);
@@ -1373,6 +1482,7 @@ fn about_is_keyboard_reachable_and_opens_links_and_copies_details() {
     // The header's two copies come first, then the project links.
     let clipboard = rune::clipboard::memory();
     rt.use_clipboard(&clipboard);
+    press(&mut rt, Key::Tab); // Back (the section visit created history)
     press(&mut rt, Key::Tab); // Close
     press(&mut rt, Key::Tab);
     assert!(focused(&rt).unwrap().ends_with("about-copy"));
@@ -1489,7 +1599,9 @@ fn forms_focus_their_first_field_and_settings_start_on_its_section_list() {
         super::panel::SettingsSection::Terminal
     );
     let font = rt.state.settings.font_size;
-    for _ in 0..4 {
+    // Back joins the tab order once the section visit has created history; Font style
+    // is the additional stop between the family picker and size controls.
+    for _ in 0..6 {
         press(&mut rt, Key::Tab);
     }
     let path = focused(&rt).expect("a focused control");
@@ -1704,6 +1816,10 @@ fn the_theme_picker_filters_declares_to_every_host_and_returns_to_settings() {
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:terminal");
+    rt.update(|_, tx| tx.scroll_into_view("terminal-theme"));
+    for _ in 0..90 {
+        rt.frame(1. / 60.);
+    }
     click(&mut rt, "terminal-theme");
     assert!(matches!(
         rt.state.panel.as_ref().map(|p| &p.kind),
@@ -3690,101 +3806,14 @@ fn pane_padding_changes_every_grid_without_changing_pane_placements() {
     }
 }
 
-#[test]
-fn font_preferences_save_from_settings_without_server_requests() {
-    let mut ws = workspace();
-    let requests = capture_host(&mut ws, 0);
-    ws.perform(Intent::Settings, &mut rune::Tx::default());
-    let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
-    click(&mut rt, "font-change");
-    rt.state.panel.as_mut().unwrap().inputs[0].text = "TX02 Nerd Font Mono".into();
-    rt.state.panel.as_mut().unwrap().inputs[1].text = "Noto Sans CJK JP, Noto Color Emoji".into();
-    click(&mut rt, "save-form");
-    assert!(matches!(
-        rt.state.panel.as_ref().unwrap().kind,
-        PanelKind::Settings
-    ));
-    let saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&rt.state.settings_path).unwrap()).unwrap();
-    assert_eq!(saved["font_family"], "TX02 Nerd Font Mono");
-    assert_eq!(
-        saved["font_fallbacks"],
-        serde_json::json!(["Noto Sans CJK JP", "Noto Color Emoji"])
-    );
-    assert!(
-        requests.try_iter().next().is_none(),
-        "font preferences are entirely local"
-    );
-    std::fs::remove_file(&rt.state.settings_path).unwrap();
-}
+// Font picker, saved preferences, cancellation and fallback ordering are tested in
+// font_settings_tests, replacing the former free-text font form tests.
 
 /// Rendered text containing `needle`.
 fn shown(rt: &Runtime<Workspace>, needle: &str) -> bool {
     rt.elements()
         .iter()
         .any(|e| e.text.as_deref().is_some_and(|t| t.contains(needle)))
-}
-
-#[test]
-fn font_family_row_says_a_saved_font_waits_for_the_next_launch() {
-    let mut ws = workspace();
-    ws.perform(Intent::Settings, &mut rune::Tx::default());
-    let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
-    assert!(shown(
-        &rt,
-        "JetBrainsMono Nerd Font isn't installed, so terminals use IBM Plex Mono (bundled)."
-    ));
-    // The row's helper is one short sentence; what is drawn now is the footnote's.
-    let helper = rt
-        .elements()
-        .into_iter()
-        .filter_map(|e| e.text)
-        .find(|t| t.contains("reopen the client"))
-        .expect("the row's helper");
-    assert_eq!(helper, "Applies when you reopen the client.");
-    assert!(has(&rt, "font-drawn"));
-
-    click(&mut rt, "font-change");
-    rt.state.panel.as_mut().unwrap().inputs[0].text = "MonoLisaCode Variable".into();
-    click(&mut rt, "save-form");
-    assert!(shown(
-        &rt,
-        "MonoLisaCode Variable is saved and applies when you reopen the client."
-    ));
-    let notices: Vec<_> = rt.state.notices.iter().map(|n| n.text.as_str()).collect();
-    assert_eq!(notices, ["Fonts saved. Reopen the client to use them."]);
-
-    // Saving without a change doesn't repeat the notice.
-    click(&mut rt, "font-change");
-    click(&mut rt, "save-form");
-    assert_eq!(rt.state.notices.len(), 1);
-    std::fs::remove_file(&rt.state.settings_path).unwrap();
-}
-
-#[test]
-fn font_preferences_validate_cancel_and_clear_optional_fallbacks() {
-    let mut ws = workspace();
-    ws.settings.font_fallbacks = vec!["Inter".into()];
-    ws.perform(Intent::Settings, &mut rune::Tx::default());
-    let mut rt = runtime(ws);
-    click(&mut rt, "settings-section:terminal");
-    click(&mut rt, "font-change");
-    rt.state.panel.as_mut().unwrap().inputs[0].text.clear();
-    click(&mut rt, "save-form");
-    assert!(rt.state.panel.as_ref().unwrap().error.is_some());
-    assert!(!rt.state.settings_path.exists());
-    press(&mut rt, Key::Escape);
-    assert_eq!(rt.state.settings.font_fallbacks, ["Inter"]);
-    click(&mut rt, "font-change");
-    rt.state.panel.as_mut().unwrap().inputs[1].text.clear();
-    click(&mut rt, "save-form");
-    assert!(rt.state.settings.font_fallbacks.is_empty());
-    let restored = Settings::load(&rt.state.settings_path).unwrap();
-    assert!(restored.font_fallbacks.is_empty());
-    assert_eq!(restored.font_family, "JetBrainsMono Nerd Font");
-    std::fs::remove_file(&rt.state.settings_path).unwrap();
 }
 
 /// A workspace with sessions "s" (selected) and "other", each with two tabs, listing tabs in
@@ -4265,6 +4294,9 @@ fn a_dracula_pro_chrome_applies_and_brings_its_terminal_theme() {
 
 #[test]
 fn a_palette_round_trip_leaves_terminal_output_and_its_selection_alone() {
+    // Compare geometry with this runtime's fonts, not a parallel test's TextSystem.
+    // Runtime construction updates the scoped fonts as well as its own renderer.
+    let _families = rune::text::with_families("Inter", "Inter");
     use rex_linux::{
         connection::{Connection, TerminalSender},
         settings::ChromeTheme,
@@ -4303,11 +4335,7 @@ fn a_palette_round_trip_leaves_terminal_output_and_its_selection_alone() {
     let output = |rt: &Runtime<Workspace>| {
         rt.elements()
             .into_iter()
-            .filter(|e| {
-                e.text
-                    .as_deref()
-                    .is_some_and(|t| t.contains("plain") || t.contains("red"))
-            })
+            .filter(|e| e.path.contains("gblock:a") && e.text.is_some())
             .map(|e| (e.text, format!("{:?}", e.text_color), e.rect))
             .collect::<Vec<_>>()
     };

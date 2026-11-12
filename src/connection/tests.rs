@@ -19,6 +19,38 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
+#[test]
+fn startup_size_prefers_cli_then_saved_size_then_default_and_keeps_the_minimum() {
+    use clap::Parser;
+    let options = Options::parse_from(["rex-linux"]);
+    let legacy: crate::settings::Settings = serde_json::from_str("{}").unwrap();
+    assert_eq!(options.window_size, None);
+    assert_eq!(options.startup_size(&legacy), (1440., 900.));
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("window_size")
+            .is_none()
+    );
+    let mut settings = crate::settings::Settings {
+        window_size: Some([1100., 750.]),
+        ..legacy
+    };
+    assert_eq!(options.startup_size(&settings), (1100., 750.));
+    for (arg, expected) in [
+        ("1280x720", (1280., 720.)),
+        ("320x200", (640., 480.)),
+        ("invalid", (1100., 750.)),
+        ("infx900", (1100., 750.)),
+        ("NaNx900", (1100., 750.)),
+    ] {
+        let options = Options::parse_from(["rex-linux", "--window-size", arg]);
+        assert_eq!(options.startup_size(&settings), expected, "{arg}");
+    }
+    settings.window_size = Some([320., 200.]);
+    assert_eq!(options.startup_size(&settings), (640., 480.));
+}
+
 const SESSION: &str = "session:00000000-0000-0000-0000-000000000001";
 
 fn ticket(session: &str, block: &str, expires_in_ms: u64) -> session::DataTicket {
@@ -576,7 +608,8 @@ fn unknown_states_kinds_and_events_stay_quiet() {
             "b".into(),
             BlockEvent::Process {
                 name: None,
-                pids: Vec::new()
+                pids: Vec::new(),
+                place: Default::default()
             }
         ))
     );
@@ -639,6 +672,7 @@ fn progress_reports_set_and_clear_a_blocks_progress() {
     let process = |name: Option<&str>| activity::BlockEvent::Process {
         name: name.map(str::to_owned),
         pids: name.map(|_| vec![7]).unwrap_or_default(),
+        place: Default::default(),
     };
     model.apply_block_event("s", "b".into(), process(Some("cargo")));
     model.apply_block_event(
@@ -676,6 +710,7 @@ fn progress_goes_when_another_process_of_the_same_name_takes_the_foreground() {
     let python = |pids: Vec<u64>| activity::BlockEvent::Process {
         name: Some("python".into()),
         pids,
+        place: Default::default(),
     };
     let progress = activity::BlockEvent::Progress(Some(Set(Some(42))));
     model.apply_block_event("s", "b".into(), python(vec![11, 1]));
@@ -700,6 +735,7 @@ fn progress_goes_with_the_process_not_just_its_name() {
     let python = |pids: &[u64]| BlockEvent::Process {
         name: Some("python".into()),
         pids: pids.to_vec(),
+        place: Default::default(),
     };
     let report = BlockEvent::Progress(Some(Set(Some(42))));
     model.apply_block_event("s", "b".into(), python(&[11, 1]));
@@ -824,7 +860,7 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
             &mut ws,
             &process,
             4,
-            json!({"foreground":{"name":"node","argv0":"codex"}}),
+            json!({"home":"/home/u", "foreground":{"name":"node","argv0":"codex","cwd":"/home/u/rex"}}),
         )
         .await;
         let pwd = recv(&mut ws).await;
@@ -885,6 +921,10 @@ async fn activity_follows_every_session_and_queries_the_selected_one() {
         assert_eq!(a.app.as_deref(), Some("codex"));
         assert_eq!(m.programs["block:a"], "codex");
         assert_eq!(m.cwds["block:a"], "/srv/app");
+        assert_eq!(
+            m.generated_title("block:a").as_deref(),
+            Some("codex - ~/rex")
+        );
         assert_eq!(m.sessions.len(), 2);
     }
     // Let the second report land before closing.
@@ -2061,6 +2101,8 @@ async fn searching_needs_no_server_while_the_host_reconnects() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     send(Command::Search("needle".into()));
     send(Command::SearchStep(true));
+    send(Command::PromptStep(true));
+    send(Command::PromptStep(false));
     send(Command::Search(String::new()));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(notice(), None, "a search is this client's own");
@@ -2094,6 +2136,8 @@ async fn a_worker_gets_its_search_whatever_the_control_connection_is_doing() {
         &Command::Search("needle".into())
     ));
     assert!(forward_search(&workers, "b", &Command::SearchStep(false)));
+    assert!(forward_search(&workers, "b", &Command::PromptStep(true)));
+    assert!(forward_search(&workers, "b", &Command::PromptStep(false)));
     assert!(
         forward_search(&workers, "gone", &Command::SearchStep(false)),
         "a closed pane's search goes nowhere, and needs no notice"
@@ -2106,6 +2150,14 @@ async fn a_worker_gets_its_search_whatever_the_control_connection_is_doing() {
     assert!(matches!(
         received.try_recv(),
         Ok(DataCommand::SearchStep(false))
+    ));
+    assert!(matches!(
+        received.try_recv(),
+        Ok(DataCommand::PromptStep(true))
+    ));
+    assert!(matches!(
+        received.try_recv(),
+        Ok(DataCommand::PromptStep(false))
     ));
     assert!(received.try_recv().is_err());
 }

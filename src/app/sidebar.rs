@@ -323,7 +323,7 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
             .get(session)
             .is_some_and(|v| v.active_window_id.as_deref() == Some(id));
     let activity = tab_activity(model, tab);
-    let label = tab_name(model, tab);
+    let label = tab_name(model, tab, s.generated_titles());
     let (target_session, target_window) = (session.to_owned(), id.to_owned());
     let quiet = s.tab_muted(index, id);
     let mut row = row()
@@ -655,6 +655,7 @@ fn activity_list(s: &Workspace, empty_height: Option<f32>) -> (El, f32) {
         &s.unseen_panes,
         s.settings.activity_grouping,
         s.settings.activity_show_idle,
+        s.generated_titles(),
     );
     let mut list = col().key("sidebar-content").px(8.);
     if groups.is_empty() {

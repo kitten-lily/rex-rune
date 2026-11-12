@@ -127,6 +127,7 @@ pub fn activity_groups(
     unseen: &HashSet<(HostId, String)>,
     grouping: ActivityGrouping,
     show_idle: bool,
+    generated: bool,
 ) -> Vec<ActivityGroup> {
     let mut drafts = Vec::new();
     for (host, &(id, host_label, model)) in hosts.iter().enumerate() {
@@ -141,7 +142,7 @@ pub fn activity_groups(
                 let Some(window_id) = window.window_id.as_deref() else {
                     continue;
                 };
-                let tab = activity::tab_name(model, window);
+                let tab = activity::tab_name(model, window, generated);
                 for block in window.layers.iter().flat_map(|l| &l.blocks) {
                     let Some(block_id) = block.block_id.as_deref() else {
                         continue;
@@ -199,7 +200,7 @@ pub fn activity_groups(
                                 window: window_id.to_owned(),
                                 block: block_id.to_owned(),
                             },
-                            name: activity::pane_name(model, block),
+                            name: activity::pane_name(model, block, generated),
                             program,
                             activity: a,
                             rank,
@@ -387,7 +388,7 @@ mod tests {
             .iter()
             .map(|(h, w)| (HostId(*h), w.to_string()))
             .collect();
-        activity_groups(&hosts, &unseen, grouping, show_idle)
+        activity_groups(&hosts, &unseen, grouping, show_idle, false)
     }
 
     fn names(groups: &[ActivityGroup]) -> Vec<(&str, Vec<&str>)> {

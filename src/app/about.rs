@@ -368,6 +368,13 @@ pub fn section(s: &Workspace) -> El {
             .key("about-server"),
         );
     }
+    // Finish the metadata section before building Project rows so Settings search
+    // associates each row with the section it is actually drawn under.
+    #[cfg_attr(not(rex_dracula_pro), allow(unused_mut))]
+    let mut build_section = vec![card(build)];
+    #[cfg(rex_dracula_pro)]
+    build_section.push(settings_kit::footnote(LOCAL_THEMES).key("about-local-themes"));
+    let build = settings_kit::section("", build_section);
     let links = [
         (
             "about-repository",
@@ -407,14 +414,17 @@ pub fn section(s: &Workspace) -> El {
             }),
         )
     });
-    #[cfg_attr(not(rex_dracula_pro), allow(unused_mut))]
-    let mut build_section = vec![card(build)];
-    #[cfg(rex_dracula_pro)]
-    build_section.push(settings_kit::footnote(LOCAL_THEMES).key("about-local-themes"));
     page([
         header(s),
-        settings_kit::section("", build_section),
+        build,
         settings_kit::section("Project", [card(links)]),
+        settings_kit::section(
+            "Settings file",
+            [
+                settings_kit::mono_footnote(s.settings_path.display().to_string())
+                    .key("about-settings-path"),
+            ],
+        ),
     ])
 }
 

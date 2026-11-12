@@ -20,11 +20,15 @@ pub enum Intent {
     /// Create a session on a host at once, named when a switcher query gave a name.
     CreateOn(usize, Option<String>),
     ChooseHost(String),
+    SwitchHost(usize),
+    MovePaneTo(String),
     RetryHost(usize),
     /// Review an opt-in, one-time personal server start.
     StartSsh(usize),
     /// The default shell form for a host.
     HostShell(usize),
+    /// The download folder form (Settings).
+    DownloadFolder,
     Pane(PaneTarget, PaneAction),
     Session(SessionTarget, SessionAction),
     /// A tab action on a named tab of any host and session.
@@ -41,6 +45,8 @@ pub enum Intent {
     Activity,
     Settings,
     Fonts,
+    AddFallback,
+    Font(String),
     ClientLabel,
     RemoteControl(usize),
     /// The Add host list: the tailnet's machines, or an endpoint by hand.
@@ -66,12 +72,16 @@ pub enum Intent {
     Updates,
     /// Trigger an immediate release metadata check.
     CheckUpdates,
+    /// The Downloads popover.
+    Downloads,
     /// Open Settings → About.
     About,
     /// Take this option of the open `Choice` list (a Settings `select_row`).
     Choose(usize),
     /// A Commands row that is not a named action.
     Command(super::commands::Run),
+    /// A row of Settings → Shortcuts' Configuration menu.
+    Shortcuts(super::recorder::Menu),
 }
 impl Intent {
     pub(super) fn shortcut(&self) -> Option<(&'static str, Value)> {
@@ -79,6 +89,8 @@ impl Intent {
         Some(match self {
             Self::ClientAction(name, args) => (*name, args.clone()),
             Self::Switcher => ("session.switch", Value::Null),
+            Self::AddHost => ("client.host.add", Value::Null),
+            Self::RemoveHost(_) => ("client.host.remove", Value::Null),
             Self::NewSession => ("session.new", Value::Null),
             Self::NewWindow => ("client.tab.new", Value::Null),
             Self::RenameSession => ("session.rename", Value::Null),
@@ -101,6 +113,7 @@ impl Intent {
                 PaneAction::Split(way) => ("pane.split", json!({"direction":way.arg()})),
                 PaneAction::Zoom => ("pane.zoom", Value::Null),
                 PaneAction::Reconnect => ("pane.reconnect", Value::Null),
+                PaneAction::Download => (super::actions::DOWNLOAD, Value::Null),
                 PaneAction::Close => ("pane.close", Value::Null),
                 PaneAction::Copy => ("pane.copy", Value::Null),
                 PaneAction::Paste => ("pane.paste", Value::Null),
@@ -108,7 +121,7 @@ impl Intent {
                 PaneAction::CopyId => ("pane.copy_id", Value::Null),
                 PaneAction::Clear => ("pane.clear", Value::Null),
                 PaneAction::Reset => ("pane.reset", Value::Null),
-                _ => return None,
+                PaneAction::Rename => ("pane.rename", Value::Null),
             },
             _ => return None,
         })
@@ -121,16 +134,24 @@ impl Intent {
             self,
             Intent::Switcher
                 | Intent::ClientAction(
-                    "client.settings" | "session.switch" | super::about::ABOUT,
+                    "client.settings" | "session.switch" | super::about::ABOUT | super::recorder::EDIT,
                     _
                 )
+                | Intent::Shortcuts(super::recorder::Menu::ResetAll)
                 // Each asks or lists before anything happens.
                 | Intent::ClientAction(
-                    "client.close" | super::commands::CLOSE_SESSION | super::commands::CHOOSE_THEME,
+                    "client.close"
+                        | "client.host.switch"
+                        | "pane.move_to_tab"
+                        | "pane.close_others"
+                        | super::commands::CLOSE_SESSION
+                        | super::commands::CHOOSE_THEME,
                     _
                 )
+                | Intent::MovePaneTo(_)
                 | Intent::ChooseHost(_)
                 | Intent::HostShell(_)
+                | Intent::DownloadFolder
                 | Intent::StartSsh(_)
                 | Intent::RenameSession
                 | Intent::RenameWindow(_)
@@ -141,8 +162,10 @@ impl Intent {
                 )
                 | Intent::Settings
                 | Intent::Updates
+                | Intent::Downloads
                 | Intent::About
                 | Intent::Fonts
+                | Intent::AddFallback
                 | Intent::ClientLabel
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
@@ -152,7 +175,10 @@ impl Intent {
                 | Intent::AddHostManually
                 | Intent::EditHost(_)
                 | Intent::RemoveHost(_)
-                | Intent::Pane(_, PaneAction::Rename | PaneAction::Close)
+                | Intent::Pane(
+                    _,
+                    PaneAction::Rename | PaneAction::Close | PaneAction::Download
+                )
                 | Intent::Session(_, SessionAction::Rename | SessionAction::Close)
         )
     }
@@ -194,6 +220,8 @@ pub enum PaneAction {
     Rename,
     Close,
     Reconnect,
+    /// Open the Download from <host> dialog for this pane.
+    Download,
     /// The pane's selected text to the clipboard.
     Copy,
     /// The clipboard into the pane, as Ctrl Shift V does for the focused one.
@@ -210,12 +238,13 @@ pub enum PaneAction {
 
 #[derive(Clone, Debug)]
 pub enum Form {
-    Fonts,
     ClientLabel,
     /// A host's default shell for new terminals.
     HostShell(usize),
     /// A local host's built-in Tailscale device name.
     TailscaleName(usize),
+    /// Where downloads are saved: `downloads.directory`.
+    DownloadFolder,
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
     RenameSession(Option<SessionTarget>),
     RenameWindow(String),
@@ -255,10 +284,10 @@ impl SettingsSection {
     pub const ALL: [SettingsSection; 8] = [
         SettingsSection::Interface,
         SettingsSection::Terminal,
-        SettingsSection::Notifications,
-        SettingsSection::Integrations,
-        SettingsSection::Hosts,
         SettingsSection::Shortcuts,
+        SettingsSection::Integrations,
+        SettingsSection::Notifications,
+        SettingsSection::Hosts,
         SettingsSection::Updates,
         SettingsSection::About,
     ];
@@ -293,6 +322,8 @@ pub enum PanelKind {
     /// `true`: the session switcher; `false`: Commands.
     Picker(bool),
     Hosts(String),
+    SwitchHost,
+    MovePane,
     Pane,
     Session,
     /// A sidebar host header's right-click menu.
@@ -303,6 +334,7 @@ pub enum PanelKind {
     Settings,
     /// The terminal themes, filtered by the search field.
     Themes,
+    Fonts(super::font_picker::FontPick),
     /// The chrome palettes.
     Chromes,
     /// The values of one setting, from a Settings `select_row`.
@@ -324,11 +356,19 @@ pub enum PanelKind {
     Pairing {
         endpoint: String,
     },
+    /// Configuration menu anchored beside the Shortcuts filter.
+    ShortcutMenu,
+    /// Confirmation for forgetting the app-owned shortcut layer.
+    ResetShortcuts,
     /// The preview of a `rex skill` change, waiting for Keep or Apply.
     AgentChange {
         change: super::integrations::AgentChange,
         steps: Vec<super::integrations::Step>,
     },
+    /// Download a file from the captured pane's machine; see `downloads.rs`.
+    Download(super::downloads::Dialog),
+    /// The Downloads popover: this launch's transfers.
+    Downloads,
 }
 
 pub struct Panel {
@@ -386,16 +426,20 @@ impl Panel {
     pub fn is_list(&self) -> bool {
         matches!(
             self.kind,
-            PanelKind::Picker(_)
+            PanelKind::SwitchHost
+                | PanelKind::MovePane
+                | PanelKind::Picker(_)
                 | PanelKind::Hosts(_)
                 | PanelKind::Pane
                 | PanelKind::Session
                 | PanelKind::Host(_)
                 | PanelKind::Window
                 | PanelKind::Themes
+                | PanelKind::Fonts(_)
                 | PanelKind::Chromes
                 | PanelKind::Choice(_)
                 | PanelKind::Discover
+                | PanelKind::ShortcutMenu
         )
     }
 }
@@ -638,6 +682,9 @@ impl Workspace {
         };
         let query = self.query();
         let lower = query.to_lowercase();
+        if let PanelKind::Fonts(pick) = panel.kind {
+            return self.font_entries(pick);
+        }
         if matches!(panel.kind, PanelKind::Themes) {
             return self.theme_entries(&lower);
         }
@@ -666,6 +713,62 @@ impl Workspace {
                     e
                 })
                 .collect();
+        }
+        if matches!(panel.kind, PanelKind::SwitchHost) {
+            return self
+                .hosts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    self.settings.hosts[*i]
+                        .label
+                        .to_lowercase()
+                        .contains(&lower)
+                })
+                .map(|(i, _)| {
+                    let mut entry = Entry::new(
+                        self.settings.hosts[i].label.clone(),
+                        "",
+                        "",
+                        Intent::SwitchHost(i),
+                    );
+                    entry.current = i == self.active;
+                    entry
+                })
+                .collect();
+        }
+        if matches!(panel.kind, PanelKind::MovePane) {
+            let Some(target) = &panel.target else {
+                return Vec::new();
+            };
+            return self.hosts[target.host]
+                .model
+                .views
+                .get(&target.session)
+                .into_iter()
+                .flat_map(|v| &v.windows)
+                .filter(|w| {
+                    !w.layers
+                        .iter()
+                        .flat_map(|l| &l.blocks)
+                        .any(|b| b.block_id.as_deref() == Some(&target.block))
+                })
+                .filter_map(|w| {
+                    let id = w.window_id.clone()?;
+                    let title = super::activity::tab_name(
+                        &self.hosts[target.host].model,
+                        w,
+                        self.generated_titles(),
+                    );
+                    title
+                        .to_lowercase()
+                        .contains(&lower)
+                        .then(|| Entry::new(title, "", "", Intent::MovePaneTo(id)))
+                })
+                .collect();
+        }
+        if matches!(panel.kind, PanelKind::ShortcutMenu) {
+            return self.shortcut_menu_entries();
         }
         if let PanelKind::Hosts(name) = &panel.kind {
             return self
@@ -742,6 +845,7 @@ impl Workspace {
                 ),
                 ("Rename pane…", 2, PaneAction::Rename),
                 ("Copy pane ID", 2, PaneAction::CopyId),
+                ("Download file…", 2, PaneAction::Download),
                 ("Clear terminal", 3, PaneAction::Clear),
                 ("Reset terminal", 3, PaneAction::Reset),
                 ("Reconnect terminal", 3, PaneAction::Reconnect),
@@ -852,7 +956,7 @@ impl Workspace {
                         view.label.as_deref().unwrap_or("Session")
                     );
                     let mut e = Entry::new(
-                        super::activity::tab_name(model, tab),
+                        super::activity::tab_name(model, tab, self.generated_titles()),
                         "Tab",
                         format!("Tabs · {place}"),
                         Intent::Tab(id.clone()),

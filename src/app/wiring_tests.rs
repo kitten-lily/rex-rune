@@ -17,6 +17,8 @@ fn sample_args(name: &str) -> Value {
     match name {
         "session.select" => json!({"session_id": "s"}),
         "pane.split" | "client.tab.move" => json!({"direction": "right"}),
+        "pane.move" | "pane.resize" => json!({"direction": "right"}),
+        "client.mode.enter" => json!({"name":"resize"}),
         "pane.focus" => json!({"direction": "up"}),
         "pane.scroll" => json!({"lines": 3}),
         "client.tab.goto" => json!({"index": 2}),
@@ -27,7 +29,7 @@ fn sample_args(name: &str) -> Value {
 
 /// A two-chord sequence no default uses, different for each `index`.
 fn chord(index: usize) -> String {
-    const SECOND: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    const SECOND: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     format!(
         "ctrl+alt+shift+f{}>{}",
         9 + index / SECOND.len(),
@@ -62,7 +64,10 @@ fn all_bound() -> Workspace {
     ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
     ws.keymap_generation += 1;
     assert!(
-        ws.effective_keymap().diagnostics.is_empty(),
+        ws.effective_keymap().diagnostics.iter().all(|d| d
+            .action
+            .as_deref()
+            .is_some_and(|a| crate::app::compatibility::unsupported(a).is_some())),
         "{:?}",
         ws.effective_keymap().diagnostics
     );
@@ -88,8 +93,13 @@ fn every_action_has_a_title_a_shortcuts_heading_and_a_reason_when_it_is_refused_
 #[test]
 fn a_bound_action_is_listed_on_settings_shortcuts_by_its_title() {
     let mut ws = all_bound();
+    let overrides = ws.settings.shortcut_file.overrides.clone();
     ws.perform(Intent::Settings, &mut rune::Tx::default());
     ws.open_section(SettingsSection::Shortcuts);
+    // Opening Settings reloads the absent file. Restore this test's in-memory map.
+    ws.settings.shortcut_file.overrides = overrides;
+    ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
+    ws.keymap_generation += 1;
     let mut rt = runtime_at(ws, (1440., 1000.));
     for _ in 0..30 {
         rt.frame(1. / 60.);
@@ -104,8 +114,30 @@ fn a_bound_action_is_listed_on_settings_shortcuts_by_its_title() {
             "the {heading} heading"
         );
     }
+    assert_eq!(
+        rt.state
+            .settings
+            .shortcut_file
+            .overrides
+            .layer
+            .bindings
+            .len(),
+        actions::SPECS.len()
+    );
     for binding in &rt.state.settings.shortcut_file.overrides.layer.bindings {
-        let title = actions::binding_title(binding);
+        let row = rt
+            .state
+            .shortcut_rows()
+            .into_iter()
+            .find(|r| r.action == binding.action && r.args == binding.args)
+            .expect("bound action row");
+        assert!(has(&rt, &format!("shortcut:{}", row.id())));
+        assert!(
+            !row.keys.is_empty(),
+            "{}: its keys are visible",
+            binding.action
+        );
+        let title = row.title;
         assert!(
             words.contains(&title),
             "{}: no row titled {title:?}",

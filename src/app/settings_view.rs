@@ -1,13 +1,12 @@
 //! Settings: a section list on the left and the chosen section's page on the right. Pages are
 //! built from `settings_kit` (sections, cards, rows and their controls).
+use super::settings_nav::{HEADER, PAGE_INSET};
 use super::{
     dialogs::modal_layer,
-    keycaps::{Chords, keycaps, spell},
     panel::{Intent, SettingsSection},
     settings_kit::{
-        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote,
-        mono_footnote, page, row_frame, section, segmented, select_row, setting, stepper,
-        unavailable, value, value_popup, words,
+        NAV_WIDTH, PANEL_HEIGHT, PANEL_WIDTH, Segment, button, card, disclosure, footnote, page,
+        row_frame, section, segmented, select_row, setting, stepper, unavailable, value_popup,
     },
     theme::*,
     widgets::{Pill, glyph},
@@ -15,9 +14,10 @@ use super::{
 };
 use rex_linux::settings::{
     Channels, NoticePosition, NotificationsConfig, PaneDensity, PaneHeader, SessionList,
+    interface::{InterfaceConfig, ToolbarBehavior},
 };
-use rune::{Cursor, El, ScrollPos, ScrollSpec, Tx, col, el, row, text};
-use rune_kit::{Checkbox, IconButton, Switch};
+use rune::{El, KeyEvent, PointerButton, ScrollPos, ScrollSpec, Tx, col, el, row, text};
+use rune_kit::{Checkbox, Switch};
 
 /// A setting's explanation, in `muted()` or, for a problem, `warning()`.
 pub(super) fn detail_text(detail: &str, color: u32) -> El {
@@ -46,12 +46,8 @@ pub(super) fn setting_with(label: &str, detail: Option<El>, control: El) -> El {
     row_frame(helper).child(words).child(control)
 }
 
-/// The page's header row, above its scroll region.
-const HEADER: f32 = 56.;
 /// The least space between the dialog and the toolbar above it, and the window's bottom edge.
 const CLEARANCE: f32 = 12.;
-/// The page's inset from the section list and from the dialog's trailing edge.
-const PAGE_INSET: f32 = 20.;
 
 /// The Pane headers choices, in the order the control lists them.
 const PANE_HEADERS: [PaneHeader; 4] = [
@@ -60,6 +56,30 @@ const PANE_HEADERS: [PaneHeader; 4] = [
     PaneHeader::OnHover,
     PaneHeader::Hidden,
 ];
+
+const TOOLBARS: [ToolbarBehavior; 3] = [
+    ToolbarBehavior::Always,
+    ToolbarBehavior::OnHover,
+    ToolbarBehavior::Hidden,
+];
+
+fn header_fade_switch(
+    key: &str,
+    label: &str,
+    on: bool,
+    field: fn(&mut InterfaceConfig) -> &mut bool,
+) -> El {
+    Switch::new(on)
+        .label(label.to_owned())
+        .hide_label()
+        .on_toggle(move |s: &mut Workspace| {
+            let value = field(&mut s.settings.interface);
+            *value = !*value;
+            s.save();
+        })
+        .build(kit())
+        .key(key.to_owned())
+}
 
 fn interface(s: &Workspace) -> El {
     let k = kit();
@@ -100,49 +120,121 @@ fn interface(s: &Workspace) -> El {
             ])],
         ),
         section(
+            "Toolbar",
+            [
+                card([select_row(
+                    "toolbar-behavior",
+                    "Toolbar visibility",
+                    "Show on hover and Hidden give its row to the terminals.",
+                    &["Always show", "Show on hover", "Hidden"],
+                    TOOLBARS
+                        .iter()
+                        .position(|t| *t == s.settings.interface.toolbar)
+                        .unwrap_or_default(),
+                    |s, i, tx| s.set_toolbar(TOOLBARS[i.min(TOOLBARS.len() - 1)], tx),
+                )]),
+                {
+                    let keys =
+                        s.shortcut_detail(super::toolbar_reveal::TOGGLE, &serde_json::Value::Null);
+                    let reveal = if keys.is_empty() {
+                        "Reveal toolbar, in Commands,".to_owned()
+                    } else {
+                        format!("Reveal toolbar ({keys}, and in Commands)")
+                    };
+                    footnote(format!("{reveal} floats the toolbar until run again. Window-manager Move and Close still work."))
+                        .key("toolbar-reveal-note")
+                },
+            ],
+        ),
+        section(
             "Panes",
-            [card([
-                setting(
-                    "Pane density",
-                    "Compact joins panes edge to edge, with no gaps.",
-                    segmented(
-                        "pane-density",
-                        &[
-                            Segment::new("Compact").icon(&PANES_JOINED),
-                            Segment::new("Comfortable").icon(&PANES_APART),
-                        ],
-                        Some(usize::from(
-                            s.settings.pane_density == PaneDensity::Comfortable,
-                        )),
+            [
+                card([
+                    setting(
+                        "Pane density",
+                        "Compact joins panes edge to edge, with no gaps.",
+                        segmented(
+                            "pane-density",
+                            &[
+                                Segment::new("Compact").icon(&PANES_JOINED),
+                                Segment::new("Comfortable").icon(&PANES_APART),
+                            ],
+                            Some(usize::from(
+                                s.settings.pane_density == PaneDensity::Comfortable,
+                            )),
+                            |s, i, tx| {
+                                s.settings.pane_density = if i == 0 {
+                                    PaneDensity::Compact
+                                } else {
+                                    PaneDensity::Comfortable
+                                };
+                                s.save();
+                                tx.instant();
+                            },
+                        ),
+                    ),
+                    select_row(
+                        "pane-header",
+                        "Pane headers",
+                        "Auto shows them on split panes in Comfortable density.",
+                        &["Auto", "Always", "On hover", "Hidden"],
+                        PANE_HEADERS
+                            .iter()
+                            .position(|h| *h == s.settings.pane_header)
+                            .unwrap_or_default(),
                         |s, i, tx| {
-                            s.settings.pane_density = if i == 0 {
-                                PaneDensity::Compact
-                            } else {
-                                PaneDensity::Comfortable
+                            s.settings.pane_header = PANE_HEADERS[i.min(PANE_HEADERS.len() - 1)];
+                            // A header that was brought out by hand goes back with the old choice.
+                            s.header_reveal = Default::default();
+                            s.save();
+                            tx.instant();
+                        },
+                    ),
+                    select_row(
+                        "active-pane-outline",
+                        "Active pane outline",
+                        "Auto follows density. A single edge-to-edge pane has no outline.",
+                        &["Auto", "On", "Off"],
+                        match s.settings.interface.highlight_active_pane {
+                            None => 0,
+                            Some(true) => 1,
+                            Some(false) => 2,
+                        },
+                        |s, i, tx| {
+                            s.settings.interface.highlight_active_pane = match i {
+                                1 => Some(true),
+                                2 => Some(false),
+                                _ => None,
                             };
                             s.save();
                             tx.instant();
                         },
                     ),
+                    setting(
+                        "Fade inactive pane headers",
+                        "For panes without the keyboard.",
+                        header_fade_switch(
+                            "fade-inactive-headers",
+                            "Fade inactive pane headers",
+                            s.settings.interface.fade_inactive_pane_headers,
+                            |i| &mut i.fade_inactive_pane_headers,
+                        ),
+                    ),
+                    setting(
+                        "Fade headers in inactive windows",
+                        "While this window is not focused.",
+                        header_fade_switch(
+                            "fade-headers-inactive-window",
+                            "Fade headers in inactive windows",
+                            s.settings.interface.fade_pane_headers_in_inactive_window,
+                            |i| &mut i.fade_pane_headers_in_inactive_window,
+                        ),
+                    ),
+                ]),
+                footnote(
+                    "Only visible header names and available buttons fade. Activity, progress, exceptions and terminal content stay unchanged.",
                 ),
-                select_row(
-                    "pane-header",
-                    "Pane headers",
-                    "Auto shows them on split panes in Comfortable density.",
-                    &["Auto", "Always", "On hover", "Hidden"],
-                    PANE_HEADERS
-                        .iter()
-                        .position(|h| *h == s.settings.pane_header)
-                        .unwrap_or_default(),
-                    |s, i, tx| {
-                        s.settings.pane_header = PANE_HEADERS[i.min(PANE_HEADERS.len() - 1)];
-                        // A header that was brought out by hand goes back with the old choice.
-                        s.header_reveal = Default::default();
-                        s.save();
-                        tx.instant();
-                    },
-                ),
-            ])],
+            ],
         ),
         section(
             "Sidebar and tabs",
@@ -190,7 +282,35 @@ fn interface(s: &Workspace) -> El {
                         },
                     ),
                 ),
+                setting(
+                    "Tabs fill available space",
+                    "Only toolbar tabs share the available width.",
+                    Switch::new(s.settings.interface.tabs_fill_available_space)
+                        .label("Tabs fill available space")
+                        .hide_label()
+                        .on_toggle(|s: &mut Workspace| {
+                            s.settings.interface.tabs_fill_available_space =
+                                !s.settings.interface.tabs_fill_available_space;
+                            s.reveal_tab_again = true;
+                            s.save();
+                        })
+                        .build(k)
+                        .key("tabs-fill"),
+                ),
             ])],
+        ),
+        section(
+            "Downloads",
+            [card([disclosure(
+                "download-folder",
+                "Download folder",
+                "Where Download file… saves.",
+                &super::downloads::folder_text(
+                    &s.download_folder(),
+                    super::downloads::FOLDER_CHARS,
+                ),
+                |s, tx| s.perform(Intent::DownloadFolder, tx),
+            )])],
         ),
         section(
             "Notices",
@@ -375,118 +495,7 @@ fn notifications(s: &Workspace) -> El {
 }
 
 fn terminal(s: &Workspace) -> El {
-    let saved = &s.settings.font_family;
-    let active = s.terminal_family.unwrap_or("IBM Plex Mono (bundled)");
-    // The row's helper is one sentence. What terminals are drawn in now goes under the card,
-    // and only while that isn't the family the row names.
-    let drawn = if *saved != s.launch_saved_font {
-        Some(format!(
-            "{saved} is saved and applies when you reopen the client. Until then terminals use {active}."
-        ))
-    } else if s.terminal_family.is_none() {
-        Some(format!(
-            "{} isn't installed, so terminals use {active}.",
-            s.launch_font
-        ))
-    } else {
-        None
-    };
-    let fallbacks = if s.settings.font_fallbacks.is_empty() {
-        "Automatic".to_owned()
-    } else {
-        s.settings.font_fallbacks.join(", ")
-    };
-    let shells = s.settings.hosts.iter().enumerate().map(|(i, host)| {
-        disclosure(
-            &format!("host-shell:{i}"),
-            &host.label,
-            "",
-            host.shell.as_deref().unwrap_or("Server default"),
-            move |s, tx| s.perform(Intent::HostShell(i), tx),
-        )
-    });
-    page([
-        section(
-            "Typography",
-            std::iter::once(card([
-                disclosure(
-                    "font-change",
-                    "Font family",
-                    "Applies when you reopen the client.",
-                    saved,
-                    |s, tx| s.perform(Intent::Fonts, tx),
-                ),
-                setting(
-                    "Font size",
-                    "From 8 to 48 pt, for every terminal.",
-                    stepper(
-                        "font",
-                        format!("{} pt", s.settings.font_size),
-                        |s, _| s.change_font(-1.),
-                        |s, _| s.change_font(1.),
-                    ),
-                ),
-                setting(
-                    "Fallback fonts",
-                    "For glyphs the font lacks, before the system's own fallbacks.",
-                    value(fallbacks).truncate().max_w(260.),
-                ),
-            ]))
-            .chain(drawn.map(|words| footnote(words).key("font-drawn"))),
-        ),
-        section(
-            "Layout",
-            [card([setting(
-                "Pane padding",
-                "Space around each terminal's content, from 0 to 32 pt.",
-                stepper(
-                    "pane-padding",
-                    format!("{} pt", s.settings.pane_padding),
-                    |s, _| {
-                        s.settings.pane_padding = (s.settings.pane_padding - 1.).max(0.);
-                        s.save();
-                    },
-                    |s, _| {
-                        s.settings.pane_padding = (s.settings.pane_padding + 1.).min(32.);
-                        s.save();
-                    },
-                ),
-            )])],
-        ),
-        section(
-            "Colours",
-            [
-                card([setting(
-                    "Theme",
-                    "",
-                    value_popup(
-                        "terminal-theme",
-                        Workspace::theme_label(&s.settings.terminal_theme),
-                        Intent::ChooseTheme,
-                    ),
-                )]),
-                footnote(
-                    "Declared to Rex for panes this client owns or nobody owns. Follow server declares nothing until this client has declared a theme once; from then on it resets those panes to Rex's colours, once each per connection.",
-                ),
-            ],
-        ),
-        section(
-            "Default shell",
-            [
-                card(shells),
-                footnote(
-                    "What new sessions, tabs and splits start on each host. Running terminals keep theirs.",
-                ),
-            ],
-        ),
-        section(
-            "",
-            [
-                footnote("These settings are saved in"),
-                mono_footnote(s.settings_path.display().to_string()).mt(-6.),
-            ],
-        ),
-    ])
+    super::terminal_page::terminal(s)
 }
 
 fn host_card(s: &Workspace, i: usize, last: bool) -> El {
@@ -605,103 +614,6 @@ fn hosts(s: &Workspace) -> El {
     ])
 }
 
-/// Presentation only: preserve dispatch priority within each action/argument group.
-struct ShortcutRow<'a> {
-    binding: &'a rex_linux::keymap::ResolvedBinding,
-    also_numpad: bool,
-    arrows: bool,
-}
-
-fn shortcut_rows<'a>(
-    effective: &[&'a rex_linux::keymap::ResolvedBinding],
-    category: &str,
-) -> Vec<ShortcutRow<'a>> {
-    use super::actions::{SPECS, find};
-    use rex_linux::keymap::Key;
-
-    let mut list: Vec<_> = effective
-        .iter()
-        .copied()
-        .filter(|b| {
-            find(&b.binding.action)
-                .map(|a| a.category())
-                .unwrap_or("Server")
-                == category
-        })
-        .collect();
-    list.sort_by_cached_key(|b| {
-        (
-            SPECS
-                .iter()
-                .position(|s| s.name == b.binding.action)
-                .unwrap_or(SPECS.len()),
-            b.binding.action.clone(),
-            b.binding
-                .args
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-        )
-    });
-    let default_focus = |b: &&rex_linux::keymap::ResolvedBinding, direction: &str| {
-        b.binding.action == "pane.focus"
-            && b.binding.source.as_deref() == Some("linux")
-            && b.binding.keys == [format!("ctrl+alt+{direction}")]
-            && b.binding.args == Some(serde_json::json!({"direction": direction}))
-    };
-    let arrows = ["left", "right", "up", "down"]
-        .iter()
-        .all(|d| list.iter().any(|b| default_focus(b, d)));
-    let mut rows: Vec<_> = list
-        .iter()
-        .map(|b| ShortcutRow {
-            binding: b,
-            also_numpad: false,
-            arrows: false,
-        })
-        .collect();
-    let mut hidden = std::collections::HashSet::new();
-    for (i, b) in list.iter().enumerate() {
-        if arrows
-            && ["left", "right", "up", "down"]
-                .iter()
-                .any(|d| default_focus(b, d))
-        {
-            if default_focus(b, "down") {
-                rows[i].arrows = true;
-            } else {
-                hidden.insert(i);
-            }
-        }
-        let Some([chord]) = b.chords.as_deref() else {
-            continue;
-        };
-        let Key::Physical(code) = &chord.key else {
-            continue;
-        };
-        let equivalent = match *code {
-            "NumpadAdd" => '+',
-            "NumpadSubtract" => '-',
-            "Numpad0" => '0',
-            _ => continue,
-        };
-        if let Some(j) = list.iter().position(|other| {
-            other.binding.action == b.binding.action
-                && other.binding.args == b.binding.args
-                && other.binding.source == b.binding.source
-                && other.chords.as_deref().is_some_and(|chords| matches!(chords,
-                    [other] if other.modifiers == chord.modifiers && other.key == Key::Character(equivalent)))
-        }) {
-            rows[j].also_numpad = true;
-            hidden.insert(i);
-        }
-    }
-    rows.into_iter()
-        .enumerate()
-        .filter_map(|(i, row)| (!hidden.contains(&i)).then_some(row))
-        .collect()
-}
-
 /// The headings of the Shortcuts page, in order. Every action's `category()` is one of them
 /// (a test checks), and an action this client does not know is listed under Server.
 pub(super) const SHORTCUT_CATEGORIES: [&str; 6] = [
@@ -713,209 +625,45 @@ pub(super) const SHORTCUT_CATEGORIES: [&str; 6] = [
     "Server",
 ];
 
-fn shortcuts(s: &Workspace) -> El {
-    let mut sections = Vec::new();
-    let effective = s.effective_bindings();
-    for name in SHORTCUT_CATEGORIES {
-        let list = shortcut_rows(&effective, name);
-        if list.is_empty() {
-            continue;
+/// Build only the page content. Search reads these same labelled Settings-kit rows.
+pub(super) fn body(s: &Workspace, page: super::settings_nav::Page) -> El {
+    let section = match page {
+        super::settings_nav::Page::Section(section) => section,
+        super::settings_nav::Page::Sub(super::settings_nav::SubPage::AdvancedFont) => {
+            return super::font_page::advanced(s);
         }
-        // A row reads as a menu row does: what it runs on the left, in the name Commands and
-        // the menus use, and its keys on the right as the same keycaps.
-        let rows = list.iter().enumerate().map(|(index, display)| {
-            let binding = display.binding;
-            let chords: Chords = if display.arrows {
-                vec![vec!["Ctrl".into(), "Alt".into(), "Arrows".into()]]
-            } else {
-                let chords = binding.chords.as_ref().unwrap();
-                chords.iter().map(|chord| chord.keycaps()).collect()
-            };
-            let source = match binding.binding.source.as_deref() {
-                Some("linux") => None,
-                Some("settings") => Some("shortcuts.json"),
-                Some(source) => Some(source),
-                None => Some("Server"),
-            };
-            let title = if display.arrows {
-                "Focus adjacent pane".into()
-            } else {
-                super::actions::binding_title(&binding.binding)
-            };
-            let numpad = display.also_numpad.then_some("Also on the numpad");
-            let detail: Vec<&str> = source.into_iter().chain(numpad).collect();
-            let detail = detail.join(" · ");
-            row_frame(!detail.is_empty())
-                .key(format!("shortcut-{name}-{index}"))
-                .child(words(&title, &detail))
-                .child(
-                    keycaps(&chords, false)
-                        .key(format!("shortcut-keys-{name}-{index}"))
-                        .label(spell(&chords)),
-                )
-        });
-        sections.push(section(name, [card(rows)]));
-    }
-    // The pointer's buttons are not keys: plain words, as in Commands.
-    sections.push(section(
-        "Pointer",
-        [card([setting(
-            "Back and forward in history",
-            "",
-            value("Mouse Back / Forward"),
-        )])],
-    ));
-    let diagnostics = &s.effective_keymap().diagnostics;
-    if !diagnostics.is_empty() || s.model().keymap_error.is_some() {
-        let problem = |words: String| {
-            text(words)
-                .font(ui(11.5))
-                .color(rgb(warning()))
-                .wrap()
-                .grow(1.)
-                .shrink()
-        };
-        let mut rows = Vec::new();
-        if let Some(error) = &s.model().keymap_error {
-            rows.push(row_frame(false).child(problem(error.clone())));
-        }
-        for (index, found) in diagnostics.iter().enumerate() {
-            rows.push(
-                row_frame(false).child(
-                    problem(format!(
-                        "{}: {}",
-                        found.source.as_deref().unwrap_or("keymap"),
-                        found.message
-                    ))
-                    .key(format!("shortcut-problem-{index}")),
-                ),
-            );
-        }
-        sections.push(section("Problems", [card(rows)]));
-    }
-    let path = |key: &str, words: String| {
-        row_frame(false).child(
-            text(words)
-                .key(key.to_owned())
-                .font(mono(11.))
-                .color(rgb(muted()))
-                .selectable(true)
-                .wrap()
-                .grow(1.)
-                .shrink(),
-        )
     };
-    let mut files = Vec::new();
-    if let Some(snapshot) = s.keymap_snapshot() {
-        files.push(path(
-            "server-shortcuts-path",
-            format!(
-                "Server: {}{}",
-                snapshot.reply.config.path,
-                if snapshot.reply.config.exists {
-                    ""
-                } else {
-                    " (not created)"
-                }
-            ),
-        ));
-    }
-    files.push(path(
-        "shortcuts-path",
-        rex_linux::settings::shortcuts::Shortcuts::path(&s.settings_path)
-            .display()
-            .to_string(),
-    ));
-    sections.push(section(
-        "Files",
-        [
-            card(files),
-            footnote(
-                "Edit the overrides file, then return to Rex to reload. Escape cancels a sequence; unbound keys reach the terminal.",
-            ),
-        ],
-    ));
-    page(sections)
-}
-
-/// The section list, in gapped groups: the window, what runs in it, and the app itself.
-fn nav(s: &Workspace, width: f32) -> El {
-    let mut list = col()
-        .key("settings-sections")
-        .role("tablist")
-        .focus_group()
-        .gap(2.);
-    for section in SettingsSection::ALL {
-        let selected = s.settings_section == section;
-        let mut item = row()
-            .key(format!("settings-section:{}", section.key()))
-            .role("tab")
-            .label(section.title())
-            .w_full()
-            .h(32.)
-            .px(10.)
-            .center_y()
-            .radius(8.)
-            .continuous_corners()
-            .cursor(Cursor::Pointer)
-            .focusable(true)
-            .focus_selected(selected)
-            .focus_ring(2., 0., rgb(accent()))
-            .on_press(move |s: &mut Workspace| s.open_section(section))
-            .child(
-                text(section.title())
-                    .font(if selected { medium(13.) } else { ui(13.) })
-                    .color(rgb(if selected { ink() } else { muted() })),
-            );
-        if matches!(
-            section,
-            SettingsSection::Terminal | SettingsSection::Updates
-        ) {
-            item = item.mt(12.);
-        }
-        item = if selected {
-            item.fill(white(0.09))
-        } else {
-            item.hover(white(0.05))
-        };
-        list = list.child(item);
-    }
-    col()
-        .w(width)
-        .h_full()
-        .padding(14.)
-        .gap(12.)
-        .child(
-            text("Settings")
-                .font(strong(15.))
-                .color(rgb(ink()))
-                .px(10.)
-                .pt(6.),
-        )
-        .child(list)
-}
-
-/// The dialog's surface: the section list, and the page under its header. The page scrolls
-/// with a fade at whichever edge hides content and a thumb while there is more than fits.
-fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
-    let k = kit();
-    let section = s.settings_section;
-    let body = match section {
+    match section {
         SettingsSection::Interface => interface(s),
         SettingsSection::Terminal => terminal(s),
         SettingsSection::Notifications => notifications(s),
         SettingsSection::Integrations => super::integrations::section(s),
         SettingsSection::Hosts => hosts(s),
-        SettingsSection::Shortcuts => shortcuts(s),
+        SettingsSection::Shortcuts => super::shortcuts_page::page(s),
         SettingsSection::Updates => super::updates::section(s),
         SettingsSection::About => super::about::section(s),
-    };
+    }
+}
+
+/// The dialog's surface: the section list, and the page under its header. The page scrolls
+/// with a fade at whichever edge hides content and a thumb while there is more than fits.
+fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
+    let section = s.settings_page();
+    let body = super::settings_nav::draw(s, section);
     let width = PANEL_WIDTH.min(viewport[0] * 0.92);
     // Under the toolbar, which stays whole above it, with a margin at both ends.
-    let height = PANEL_HEIGHT.min((viewport[1] - TOOLBAR - 2. * CLEARANCE).max(0.));
+    let height = PANEL_HEIGHT
+        .min((viewport[1] - super::toolbar_reveal::row_height(s) - 2. * CLEARANCE).max(0.));
     let nav_width = NAV_WIDTH.min(width * 0.3);
-    let (page_width, page_height) = (width - nav_width - 1., height - HEADER);
+    let pinned = (section == SettingsSection::Shortcuts)
+        .then(|| super::shortcuts_page::filter_field(s, PAGE_INSET));
+    let above = HEADER
+        + pinned
+            .as_ref()
+            .map_or(0., |_| super::shortcuts_page::FILTER);
+    let (page_width, page_height) = (width - nav_width - 1., height - above);
     let thumb = s.settings_fx.thumb.clone();
+    let offset = s.settings_nav.offset();
     let scroller = col()
         .key(format!("settings-scroll:{}", section.key()))
         .grow(1.)
@@ -926,6 +674,7 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         })
         .scroll_edge_fade(16.)
         .on_scroll_offset(move |at: ScrollPos| {
+            offset.set(at.offset[1]);
             let hidden = at.max[1];
             if hidden < 1. {
                 thumb.set([0.; 4]);
@@ -940,22 +689,8 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
         .grow(1.)
         .min_w(0.)
         .h_full()
-        .child(
-            row()
-                .h(HEADER)
-                .pl(PAGE_INSET + super::settings_kit::INSET)
-                .pr(PAGE_INSET)
-                .center_y()
-                .justify_between()
-                .child(text(section.title()).font(strong(17.)).color(rgb(ink())))
-                .child(
-                    IconButton::new(&CLOSE)
-                        .label("Close")
-                        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| s.close_panel(tx))
-                        .build(k)
-                        .key("close-settings"),
-                ),
-        )
+        .child(super::settings_shell::header(s, section))
+        .children(pinned)
         .child(
             col()
                 .grow(1.)
@@ -964,102 +699,45 @@ fn surface(s: &Workspace, viewport: [f32; 2]) -> El {
                 .child(scroller)
                 .child(s.settings_fx.thumb_el()),
         );
+    let frame = row()
+        .key("settings-frame")
+        .w_full()
+        .h_full()
+        .pointer_buttons([PointerButton::Back, PointerButton::Forward])
+        .preserve_focus_on_press(true)
+        .on_press_tx(|s: &mut Workspace, tx: &mut Tx| {
+            let direction = match tx.button() {
+                PointerButton::Back => -1,
+                PointerButton::Forward => 1,
+                _ => return,
+            };
+            s.settings_history(direction, tx);
+        })
+        .child(super::settings_shell::sidebar(s, nav_width))
+        .child(el().w(1.).h_full().fill(white(0.06)))
+        .child(content);
     row()
         .w(width)
         .h(height)
-        .child(nav(s, nav_width))
-        .child(el().w(1.).h_full().fill(white(0.06)))
-        .child(content)
+        .on_key(|s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| s.settings_key(ev, tx))
+        .child(frame)
 }
 
 pub fn settings(s: &Workspace, viewport: [f32; 2]) -> El {
-    modal_layer(s, surface(s, viewport), false, TOOLBAR)
+    modal_layer(
+        s,
+        surface(s, viewport),
+        false,
+        super::toolbar_reveal::row_height(s),
+    )
 }
 
 /// Settings under a list opened from one of its controls: drawn where it was, taking no input.
 pub fn settings_under(s: &Workspace, viewport: [f32; 2]) -> El {
-    modal_layer(s, surface(s, viewport), true, TOOLBAR)
-}
-
-#[cfg(test)]
-mod shortcut_tests {
-    use super::*;
-    use crate::app::actions;
-    use rex_linux::keymap::Overrides;
-    use serde_json::json;
-
-    #[test]
-    fn defaults_are_compact_and_in_registry_order() {
-        let map = actions::resolve(&Overrides::default());
-        let effective = actions::effective(&map, &[]);
-        let panes = shortcut_rows(&effective, "Panes");
-        let focus: Vec<_> = panes
-            .iter()
-            .filter(|r| r.binding.binding.action == "pane.focus")
-            .collect();
-        assert_eq!(focus.len(), 1);
-        assert!(focus[0].arrows);
-        let interface = shortcut_rows(&effective, "Interface");
-        assert_eq!(interface.iter().filter(|r| r.also_numpad).count(), 3);
-        assert!(
-            !interface
-                .iter()
-                .any(|r| r.binding.binding.keys[0].contains("Numpad"))
-        );
-        for category in [
-            "Navigate",
-            "Create and close",
-            "Panes",
-            "Text and view",
-            "Interface",
-        ] {
-            let rows = shortcut_rows(&effective, category);
-            let positions: Vec<_> = rows
-                .iter()
-                .map(|r| {
-                    actions::SPECS
-                        .iter()
-                        .position(|s| s.name == r.binding.binding.action)
-                        .unwrap()
-                })
-                .collect();
-            assert!(positions.windows(2).all(|w| w[0] <= w[1]));
-        }
-        let scroll: Vec<_> = effective
-            .iter()
-            .filter(|b| b.binding.action == "pane.scroll")
-            .map(|b| actions::binding_title(&b.binding))
-            .collect();
-        assert!(scroll.contains(&"Scroll up · 20 lines".into()));
-        assert!(scroll.contains(&"Scroll down · 20 lines".into()));
-    }
-
-    #[test]
-    fn custom_focus_is_not_folded_and_try_order_is_retained() {
-        let map = actions::resolve(&Overrides::parse(&json!([
-            {"keys":"ctrl+alt+left","action":"pane.focus","args":{"direction":"right"}},
-            {"keys":"ctrl+j","action":"client.tab.new"},
-            {"keys":"ctrl+y","action":"client.tab.new"},
-            {"keys":"ctrl+[Numpad0]","action":"client.zoom.in"}
-        ])));
-        let effective = actions::effective(&map, &[]);
-        assert!(shortcut_rows(&effective, "Panes").iter().all(|r| !r.arrows));
-        let expected: Vec<_> = effective
-            .iter()
-            .filter(|b| b.binding.action == "client.tab.new")
-            .map(|b| &b.binding.keys)
-            .collect();
-        let rows = shortcut_rows(&effective, "Create and close");
-        let actual: Vec<_> = rows
-            .iter()
-            .filter(|r| r.binding.binding.action == "client.tab.new")
-            .map(|r| &r.binding.binding.keys)
-            .collect();
-        assert_eq!(actual, expected);
-        assert!(
-            shortcut_rows(&effective, "Interface")
-                .iter()
-                .any(|r| r.binding.binding.keys == ["ctrl+[Numpad0]"] && !r.also_numpad)
-        );
-    }
+    modal_layer(
+        s,
+        surface(s, viewport),
+        true,
+        super::toolbar_reveal::row_height(s),
+    )
 }

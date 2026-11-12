@@ -97,7 +97,7 @@ pub fn overlay() -> El {
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))
 }
 
-fn dismiss_layer() -> El {
+pub(super) fn dismiss_layer() -> El {
     el().key("popup-dismiss")
         .pin(Some(0.), Some(0.), Some(0.), Some(0.))
         .preserve_focus_on_press(true)
@@ -118,7 +118,7 @@ fn dismiss(s: &mut Workspace, tx: &mut Tx) {
 }
 
 /// How far a list opened from a control sits from it.
-const CONTROL_GAP: f32 = 4.;
+pub(super) const CONTROL_GAP: f32 = 4.;
 
 /// The captured pane's outline, in window points, above any scrim and below the panel.
 pub fn target_outline(s: &Workspace) -> Option<El> {
@@ -131,6 +131,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
         panel.kind,
         PanelKind::Pane
             | PanelKind::Form(super::panel::Form::RenamePane(_))
+            | PanelKind::Download(_)
             | PanelKind::Confirm { .. }
     ) {
         return None;
@@ -180,7 +181,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let [vw, vh] = viewport;
     // The control a Settings popup button opened this list from, `[x, y, w, h]` where layout
     // put it: the list goes right under it, or right above when there is more room there.
-    let control = panel.anchor_to.as_deref().and_then(rune::memo::layout);
+    // Include the page's scroll so choices stay beside a row reached by scrolling/search.
+    let control = panel
+        .anchor_to
+        .as_deref()
+        .and_then(rune::memo::window_layout);
     let room = control.map(|[_, y, _, h]| {
         let below = vh - (y + h + CONTROL_GAP) - 8.;
         let above = y - CONTROL_GAP - 8.;
@@ -190,7 +195,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     let discover = matches!(panel.kind, PanelKind::Discover);
     let width = (if values {
         220.
-    } else if pane {
+    } else if pane || matches!(panel.kind, PanelKind::ShortcutMenu) {
         280.
     } else if sessions {
         340.
@@ -256,6 +261,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
         PanelKind::Session => "session-menu",
         PanelKind::Host(_) => "host-menu",
         PanelKind::Window => "tab-menu",
+        PanelKind::ShortcutMenu => "shortcut-menu",
         _ => "pane-menu",
     };
     let mut spans: Vec<(f32, f32, Hidden)> = Vec::new();

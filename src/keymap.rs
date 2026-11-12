@@ -324,6 +324,7 @@ impl Chord {
             }
         }
         caps.push(match self.key {
+            Key::Character('+') => "Plus".into(),
             Key::Character(c) => c.to_uppercase().to_string(),
             Key::Physical(code) => code.into(),
             Key::Named("pageup") => "PageUp".into(),
@@ -374,6 +375,7 @@ pub fn defaults() -> KeymapDefault {
         ("ctrl+shift+p", "client.palette.toggle"),
         ("ctrl+,", "client.settings"),
         ("ctrl+shift+b", "client.sidebar.toggle"),
+        ("ctrl+alt+shift+t", "client.toolbar.toggle"),
         ("ctrl+shift+n", "session.new"),
         ("ctrl+shift+t", "client.tab.new"),
         ("ctrl+shift+w", "client.close"),
@@ -386,6 +388,8 @@ pub fn defaults() -> KeymapDefault {
         ("ctrl+shift+c", "pane.copy"),
         ("ctrl+shift+v", "pane.paste"),
         ("ctrl+shift+f", "client.search"),
+        ("ctrl+shift+up", "client.prompt.previous"),
+        ("ctrl+shift+down", "client.prompt.next"),
         ("ctrl+shift+r", "pane.reconnect"),
         // Of an action's bindings the last is the one Commands and menus show: the main
         // block's key, not the numpad's.
@@ -534,11 +538,7 @@ pub struct ResolvedBinding {
 }
 impl From<Binding> for ResolvedBinding {
     fn from(binding: Binding) -> Self {
-        let chords = if binding.mode.is_none() {
-            parse_keys(&binding.keys).ok()
-        } else {
-            None
-        };
+        let chords = parse_keys(&binding.keys).ok();
         Self { binding, chords }
     }
 }
@@ -568,6 +568,9 @@ impl Resolved {
     }
 }
 
+/// The name of the layer of shortcuts recorded in Settings, which sits above the user's file.
+pub const RECORDED: &str = "recorded";
+
 /// Local fallback until the active host answers (or while it is offline).
 /// Action-specific argument checks belong to the UI's action registry.
 pub fn resolve(
@@ -575,12 +578,24 @@ pub fn resolve(
     overrides: &Overrides,
     actions: &[InspectResponseAction],
 ) -> Resolved {
+    resolve_all(defaults, &[overrides], actions)
+}
+
+/// [`resolve`] with every override layer, lowest first: the user's file, then what was
+/// recorded in Settings.
+pub fn resolve_all(
+    defaults: &[KeymapDefault],
+    overrides: &[&Overrides],
+    actions: &[InspectResponseAction],
+) -> Resolved {
     let mut layers = defaults.to_vec();
-    layers.push(overrides.layer.clone());
+    layers.extend(overrides.iter().map(|layer| layer.layer.clone()));
     let mut resolved = resolve_layers(&layers, defaults.len(), actions);
-    resolved
-        .diagnostics
-        .splice(0..0, overrides.diagnostics.clone());
+    let diagnostics: Vec<Diagnostic> = overrides
+        .iter()
+        .flat_map(|layer| layer.diagnostics.iter().cloned())
+        .collect();
+    resolved.diagnostics.splice(0..0, diagnostics);
     resolved
 }
 
@@ -777,7 +792,7 @@ mod tests {
             (vec!["ctrl+b".into(), "c".into()], "Ctrl B, C"),
             (vec!["ctrl+[KeyT]".into()], "Ctrl KeyT"),
             (vec!["shift+pageup".into()], "Shift PageUp"),
-            (vec!["ctrl++".into()], "Ctrl +"),
+            (vec!["ctrl++".into()], "Ctrl Plus"),
             (vec!["meta+k".into()], "Super K"),
         ] {
             assert_eq!(display(&keys), expected);
@@ -804,7 +819,7 @@ mod tests {
         let layer = defaults();
         assert_eq!(layer.name, "linux");
         assert!(layer.removals.is_empty());
-        assert_eq!(layer.bindings.len(), 35);
+        assert_eq!(layer.bindings.len(), 38);
         // The terminal font size actions have no default: Ctrl Alt + / - / 0 belong to the
         // program in the terminal until the user binds them.
         assert!(
@@ -821,6 +836,8 @@ mod tests {
             ("ctrl+tab", "client.tab.next_global"),
             ("ctrl+shift+tab", "client.tab.previous_global"),
             ("ctrl+shift+f", "client.search"),
+            ("ctrl+shift+up", "client.prompt.previous"),
+            ("ctrl+shift+down", "client.prompt.next"),
             ("ctrl++", "client.zoom.in"),
             ("ctrl+[Numpad0]", "client.zoom.reset"),
             ("ctrl+0", "client.zoom.reset"),
@@ -1004,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn server_binding_keeps_prefix_strings_and_disables_unknown_or_mode_keys() {
+    fn server_binding_keeps_prefix_strings_and_parses_mode_keys() {
         let readable = Binding::new(["SUPER+K", "C"], "client.key.forward");
         let parsed = ResolvedBinding::from(readable.clone());
         assert_eq!(parsed.binding.keys, readable.keys);
@@ -1013,7 +1030,7 @@ mod tests {
         assert!(unknown.chords.is_none());
         assert_eq!(display(&unknown.binding.keys), "ctrl+FutureKey");
         let mode = ResolvedBinding::from(Binding::new(["left"], "pane.focus").mode("resize"));
-        assert!(mode.chords.is_none());
+        assert!(mode.chords.is_some());
     }
 
     #[test]
