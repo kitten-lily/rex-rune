@@ -144,6 +144,11 @@ pub struct Workspace {
     pub badge: usize,
     /// Badge counts headless tests would have sent.
     pub badges: Vec<usize>,
+    pub notification_health: super::notify::Health,
+    /// Tabs with a desktop notification sent since they were last on screen.
+    pub notified_tabs: std::collections::HashSet<super::notify::NoteTarget>,
+    #[cfg(test)]
+    pub notification_outbox: super::notify::Outbox,
     pub integrations: super::integrations::Integrations,
     pub ssh_setup: super::ssh_setup::Setup,
     /// The tailnet's machines, for Add host.
@@ -155,6 +160,7 @@ pub struct Workspace {
     /// The Ghostty themes the theme picker lists, read when it opens.
     pub themes: Vec<ThemeInfo>,
     pub updates: super::updates::Updates,
+    pub restart: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// What this launch's downloads have told the person, and what finished rows may offer.
     pub downloads: super::downloads::Downloads,
 }
@@ -292,6 +298,10 @@ impl Workspace {
             outbox: Vec::new(),
             badge: 0,
             badges: Vec::new(),
+            notification_health: Default::default(),
+            notified_tabs: Default::default(),
+            #[cfg(test)]
+            notification_outbox: Default::default(),
             integrations: Default::default(),
             ssh_setup: Default::default(),
             discovery: Default::default(),
@@ -299,6 +309,7 @@ impl Workspace {
             theme_dirs,
             themes: Vec::new(),
             updates: Default::default(),
+            restart: Default::default(),
             downloads: Default::default(),
         };
         this.init_updates();
@@ -566,9 +577,9 @@ impl Workspace {
             self.keymap_generation,
         );
         for queued in client_actions {
-            // Only this person's own key or click starts a download, whatever a host returns.
-            if super::actions::find(&queued.action.action).is_some_and(|s| s.starts_download()) {
-                self.inform("Returned client action skipped: a host cannot start a download.");
+            // File dialogs need this person's own key or click, whatever a host returns.
+            if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
+                self.inform("Returned client action skipped: a host cannot start a download or open the path browser.");
                 continue;
             }
             // Focus events following the reply may legitimately move to another pane.
@@ -620,6 +631,7 @@ impl Workspace {
         }
         self.sync_tabs(index, tx);
         self.process_downloads(index, tx);
+        self.process_directory(index);
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
         }
@@ -1334,7 +1346,10 @@ impl Workspace {
         // Only pane actions carry a captured pane, and session actions a captured session,
         // into the panel they open.
         if let Some(panel) = &mut self.panel {
-            if !matches!(action, Intent::Pane(..) | Intent::MovePaneTo(_)) {
+            if !matches!(
+                action,
+                Intent::Pane(..) | Intent::MovePaneTo(_) | Intent::InsertPath(_)
+            ) {
                 panel.target = None;
             }
             if !matches!(action, Intent::Session(..)) {
@@ -1352,6 +1367,7 @@ impl Workspace {
                 super::actions::run(self, name, &args, tx);
             }
             Intent::Switcher => self.picker(true),
+            Intent::InsertPath(index) => self.insert_path(index, tx),
             Intent::NewSession => self.create_session(self.active, None, tx),
             Intent::CreateOn(host, name) => self.create_session(host, name, tx),
             Intent::SwitchHost(host) => { self.close_panel(tx); self.activate_host(host, tx); }
@@ -1504,6 +1520,9 @@ impl Workspace {
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
+                if self.settings_section == SettingsSection::Notifications {
+                    self.notification_command(super::notify::Command::Check);
+                }
             }
             Intent::Updates => self.open_updates_settings(),
             Intent::About => {
@@ -1803,6 +1822,8 @@ impl Workspace {
                 self.terminal_command(&key, Command::Reconnect);
             }
             PaneAction::Download => self.download_dialog(target),
+            PaneAction::InsertPath => self.insert_path_dialog(target),
+            PaneAction::GoToDirectory => self.go_to_directory_dialog(target),
             PaneAction::Copy
             | PaneAction::Paste
             | PaneAction::SelectAll
@@ -1952,6 +1973,9 @@ impl Workspace {
         self.settings_nav.sub = None;
         self.settings_section = section;
         self.recorder = None;
+        if section == SettingsSection::Notifications {
+            self.notification_command(super::notify::Command::Check);
+        }
         if section == SettingsSection::Shortcuts {
             self.reload_shortcuts();
         }
@@ -2032,6 +2056,14 @@ impl Workspace {
     }
 
     pub fn query_changed(&mut self) {
+        if self
+            .panel
+            .as_ref()
+            .is_some_and(|p| matches!(p.kind, PanelKind::Directory(_)))
+        {
+            self.list_directory();
+            return;
+        }
         let first = self.entries().iter().position(|e| e.enabled).unwrap_or(0);
         if let Some(panel) = &mut self.panel {
             panel.selected = first;

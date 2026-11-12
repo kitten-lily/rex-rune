@@ -37,7 +37,7 @@ pub const REPORT_ISSUE: &str = "client.issue.report";
 /// Registered actions with no row: each needs an argument Commands cannot ask for, or is
 /// the list itself.
 #[cfg(test)]
-pub const NOT_LISTED: [(&str, &str); 29] = [
+pub const NOT_LISTED: [(&str, &str); 30] = [
     (
         "pane.prompt_previous",
         "compatibility alias of an existing Commands row",
@@ -104,6 +104,10 @@ pub const NOT_LISTED: [(&str, &str); 29] = [
     ),
     (
         "client.find.open",
+        "compatibility alias of an existing Commands row",
+    ),
+    (
+        "client.activity",
         "compatibility alias of an existing Commands row",
     ),
     (
@@ -629,6 +633,16 @@ impl Workspace {
             pane("pane.download", "Download file…", PaneAction::Download)
                 .keywords("save fetch get file transfer")
                 .section(4),
+            pane("pane.insert_path", "Insert path…", PaneAction::InsertPath)
+                .keywords("file folder directory paste")
+                .section(4),
+            pane(
+                "pane.go_to_directory",
+                "Go to directory…",
+                PaneAction::GoToDirectory,
+            )
+            .keywords("cd change folder")
+            .section(4),
             pane("pane.clear", "Clear terminal", PaneAction::Clear)
                 .keywords("screen scrollback")
                 .section(5),

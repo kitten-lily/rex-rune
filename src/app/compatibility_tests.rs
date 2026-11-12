@@ -111,6 +111,7 @@ fn every_added_name_is_remote_denied_including_aliases_of_allowed_actions() {
         "client.mode.exit_all",
         "client.scroll.page_up",
         "client.scroll.page_down",
+        "client.activity",
     ];
     for name in names {
         assert!(
@@ -555,6 +556,12 @@ fn scroll_pages_use_viewport_rows_find_aliases_and_host_switch_are_real() {
     assert!(ws.active_terminal().unwrap().search.is_none());
     run(&mut ws, "client.find.open", Value::Null);
     assert!(ws.active_terminal().unwrap().search.is_some());
+    run(&mut ws, "client.activity", Value::Null);
+    assert_eq!(
+        ws.settings.sidebar_mode,
+        rex_linux::settings::SidebarMode::Activity
+    );
+    assert!(ws.sidebar.is_open());
     run(&mut ws, "client.host.switch", Value::Null);
     assert!(matches!(
         ws.panel.as_ref().unwrap().kind,

@@ -39,6 +39,8 @@ pub fn alias(name: &str) -> Option<(&'static str, Value)> {
         "pane.prompt_previous" => ("client.prompt.previous", Value::Null),
         "pane.prompt_next" => ("client.prompt.next", Value::Null),
         "client.find.open" => (actions::SEARCH, Value::Null),
+        // Upstream's Activity popup; this fork shows its sidebar Activity view instead.
+        "client.activity" => (actions::VIEW_ACTIVITY, Value::Null),
         "client.find.next" => (super::find::NEXT, Value::Null),
         "client.find.previous" => (super::find::PREVIOUS, Value::Null),
         "client.theme.change" => (super::commands::CHOOSE_THEME, Value::Null),
@@ -75,6 +77,7 @@ pub fn title(name: &str) -> &'static str {
         "pane.split.down" => "Split down",
         "pane.split.auto" => "Split best fit",
         "client.find.open" => "Search terminal",
+        "client.activity" => "Show activity",
         "client.find.next" => "Find next",
         "client.find.previous" => "Find previous",
         "client.tab.move.backward" => "Move tab backward",

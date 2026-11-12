@@ -8,6 +8,8 @@ mod bindings_integration_tests;
 mod command_tests;
 #[path = "compatibility_tests.rs"]
 mod compatibility_tests;
+#[path = "directory_tests.rs"]
+mod directory_tests;
 #[path = "downloads_tests.rs"]
 mod downloads_tests;
 #[path = "find_tests.rs"]
@@ -20,6 +22,8 @@ mod header_fading_tests;
 mod menu_tests;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
+#[path = "notification_tests.rs"]
+mod notification_tests;
 #[path = "pane_ergonomics_tests.rs"]
 mod pane_ergonomics_tests;
 #[path = "pane_header_tests.rs"]
@@ -34,6 +38,8 @@ mod recorder_tests;
 mod remote_session_tests;
 #[path = "remote_tests.rs"]
 mod remote_tests;
+#[path = "server_page_tests.rs"]
+mod server_page_tests;
 #[path = "settings_nav_tests.rs"]
 mod settings_nav_tests;
 #[path = "settings_tests.rs"]
@@ -42,6 +48,10 @@ mod settings_tests;
 mod shortcuts_page_tests;
 #[path = "tab_fill_tests.rs"]
 mod tab_fill_tests;
+#[path = "tab_icon_colour_tests.rs"]
+mod tab_icon_colour_tests;
+#[path = "tab_icon_tests.rs"]
+mod tab_icon_tests;
 #[path = "tab_tests.rs"]
 mod tab_tests;
 #[path = "tailscale_tests.rs"]
@@ -52,6 +62,8 @@ mod terminal_settings_tests;
 mod titles_tests;
 #[path = "toolbar_reveal_tests.rs"]
 mod toolbar_reveal_tests;
+#[path = "updates_tests.rs"]
+mod updates_tests;
 #[path = "wiring_tests.rs"]
 mod wiring_tests;
 #[path = "workspace_fixes_tests.rs"]
@@ -2377,7 +2389,10 @@ fn background_tabs_latch_done_and_notify_only_about_live_changes() {
     assert!(ws.unseen("split"));
     assert_eq!(ws.outbox.len(), 1);
     assert_eq!(ws.outbox[0].summary, "dev · Done");
-    assert_eq!(ws.outbox[0].target.window.as_deref(), Some("split"));
+    assert_eq!(
+        ws.outbox[0].target.as_ref().unwrap().window.as_deref(),
+        Some("split")
+    );
     // A live error is news too.
     set_activity(&mut ws, "block:c", &[("", record(Error, true))]);
     assert_eq!(ws.outbox.len(), 2);
@@ -2464,12 +2479,21 @@ fn each_pane_notifies_with_its_own_block_and_keeps_its_tab_done() {
     // block:b finishing is news even though block:c keeps the tab's fold at Working.
     set_activity(&mut ws, "block:b", &[]);
     assert_eq!(ws.outbox.len(), 1);
-    assert_eq!(ws.outbox[0].target.block.as_deref(), Some("block:b"));
-    assert_eq!(ws.outbox[0].target.window.as_deref(), Some("split"));
+    assert_eq!(
+        ws.outbox[0].target.as_ref().unwrap().block.as_deref(),
+        Some("block:b")
+    );
+    assert_eq!(
+        ws.outbox[0].target.as_ref().unwrap().window.as_deref(),
+        Some("split")
+    );
     assert!(ws.unseen("split"), "a tab is unseen Done while any pane is");
     set_activity(&mut ws, "block:c", &[("", record(Blocked, true))]);
     assert_eq!(ws.outbox.len(), 2);
-    assert_eq!(ws.outbox[1].target.block.as_deref(), Some("block:c"));
+    assert_eq!(
+        ws.outbox[1].target.as_ref().unwrap().block.as_deref(),
+        Some("block:c")
+    );
     assert!(
         ws.unseen("split"),
         "block:c needing you doesn't see block:b"
@@ -2555,7 +2579,7 @@ fn a_clicked_notification_focuses_its_exact_pane() {
     let (mut ws, rx) = tabbed_workspace("single");
     ws.track_activity(0);
     set_activity(&mut ws, "block:c", &[("", record(Error, true))]);
-    let target = ws.outbox[0].target.clone();
+    let target = ws.outbox[0].target.clone().unwrap();
     rx.try_iter().count();
     ws.open_note(target, None, &mut rune::Tx::default());
     assert_eq!(
@@ -2574,7 +2598,7 @@ fn a_notification_for_a_closed_pane_never_targets_its_replacement() {
     let (mut ws, rx) = tabbed_workspace("single");
     ws.track_activity(0);
     set_activity(&mut ws, "block:c", &[("", record(Error, true))]);
-    let target = ws.outbox[0].target.clone();
+    let target = ws.outbox[0].target.clone().unwrap();
     // block:c closes and block:d takes its place in the same position.
     close_split_pane(&mut ws, "block:c");
     reopen_split_pane(&mut ws, "block:d");
@@ -6060,6 +6084,7 @@ fn update_notice_toast_opens_whats_new_dismisses_for_version_and_resurfaces_on_n
         dismissed_version: None,
         announced_version: None,
     };
+    state.save(&state_path).unwrap(); // The worker saves before delivering its result.
     ws.finish_update_check(
         false,
         Ok((
@@ -6133,6 +6158,7 @@ fn update_notice_toast_opens_whats_new_dismisses_for_version_and_resurfaces_on_n
         newer.highest_verified = Some("0.6.1".into());
         newer.latest_version = Some("0.6.1".into());
         newer.notes_url = Some("https://github.com/shuv1337/rex-rune/releases/tag/v0.6.1".into());
+        newer.save(&state_path).unwrap();
         s.finish_update_check(
             false,
             Ok((

@@ -70,6 +70,8 @@ const IDS: &[&str] = &[
     "pane.rename",
     "pane.copy_id",
     "pane.download",
+    "pane.insert_path",
+    "pane.go_to_directory",
     "pane.clear",
     "pane.reset",
     "pane.reconnect",

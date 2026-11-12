@@ -3,7 +3,7 @@
 //! changes become desktop notifications and which panes finished out of sight.
 use super::{
     activity_list::PaneRef,
-    notify::{Note, NoteTarget, Notifier, Sound},
+    notify::{Command, Kind, Note, NoteTarget, Notifier, Sound},
     theme::*,
     workspace::{HostId, Workspace},
 };
@@ -123,6 +123,28 @@ pub fn pane_activity(model: &HostModel, block: &str) -> TabActivity {
     fold_activity(model, std::iter::once(block), Some(block))
 }
 
+/// A pane's icon source: its deciding status record's program, else its foreground process.
+/// Shared so a tab icon count of one is exactly `TabActivity::program`.
+fn block_program(model: &HostModel, block: &str) -> Option<String> {
+    model
+        .activity
+        .get(block)
+        .and_then(|records| deciding(records.values()))
+        .and_then(|r| r.program().map(str::to_owned))
+        .or_else(|| model.programs.get(block).cloned())
+}
+
+/// Cached programs, focused pane first then stable server layer/block order.
+/// Aggregate tab severity never sorts panes. Missing focus falls back to the first block.
+pub fn tab_programs(model: &HostModel, window: &session::Window) -> Vec<Option<String>> {
+    let focused = focused_block(window);
+    focused
+        .into_iter()
+        .chain(blocks(window).filter(|b| Some(*b) != focused))
+        .map(|b| block_program(model, b))
+        .collect()
+}
+
 /// The record that speaks for a set: the highest state, and among equals one that reports
 /// progress, then the latest report, so neither depends on record or pane order. A set is
 /// one host's, so its report times all come from one server clock.
@@ -141,14 +163,7 @@ fn fold_activity<'a>(
             .filter_map(|b| model.activity.get(b))
             .flat_map(|records| records.values()),
     );
-    let program = focused.and_then(|b| {
-        model
-            .activity
-            .get(b)
-            .and_then(|records| deciding(records.values()))
-            .and_then(|r| r.program().map(str::to_owned))
-            .or_else(|| model.programs.get(b).cloned())
-    });
+    let program = focused.and_then(|b| block_program(model, b));
     // A program's own OSC 9;4 report wins over the percentage in its status record.
     let progress = blocks
         .filter_map(|b| model.progress.get(b).copied())
@@ -392,6 +407,7 @@ impl Workspace {
         let mut latched = Vec::new();
         // Every tab present now, and whether it is in front.
         let mut tabs = HashMap::new();
+        let mut seen_tabs = Vec::new();
         let model = &self.hosts[index].model;
         for (session, view) in &model.views {
             for window in &view.windows {
@@ -400,6 +416,14 @@ impl Workspace {
                 };
                 let seen = self.tab_seen(index, session, &window_id);
                 tabs.insert(window_id.clone(), seen);
+                if seen {
+                    seen_tabs.push(NoteTarget {
+                        host: id,
+                        session: session.clone(),
+                        window: Some(window_id.clone()),
+                        block: None,
+                    });
+                }
                 for block in blocks(window) {
                     let key = (id, block.to_owned());
                     let activity = pane_activity(model, block);
@@ -463,6 +487,9 @@ impl Workspace {
         self.pane_states.retain(|(host, _), _| *host != id);
         self.pane_states
             .extend(now.into_iter().map(|(k, (track, ..))| (k, track)));
+        for target in seen_tabs {
+            self.close_tab_notification(target);
+        }
         for (state, session, window, block, activity) in notes {
             self.notify_state(index, state, session, window, block, &activity);
         }
@@ -526,9 +553,15 @@ impl Workspace {
             return;
         }
         let handle = self.handle.clone();
-        self.notifier
+        if !self
+            .notifier
             .get_or_insert_with(|| Notifier::spawn(handle))
-            .badge(count);
+            .badge(count)
+        {
+            // The next change starts a new worker, which shows the count then.
+            self.notifier = None;
+            self.badge = 0;
+        }
     }
 
     fn notify_state(
@@ -571,12 +604,13 @@ impl Workspace {
         self.deliver(Note {
             summary,
             body,
-            target: NoteTarget {
+            target: Some(NoteTarget {
                 host,
                 session,
                 window: Some(window),
                 block: Some(block),
-            },
+            }),
+            kind: Kind::Activity(state),
             sound,
         });
     }
@@ -627,12 +661,13 @@ impl Workspace {
             self.deliver(Note {
                 summary,
                 body,
-                target: NoteTarget {
+                target: Some(NoteTarget {
                     host,
                     session: notice.session,
                     window,
                     block: Some(notice.block),
-                },
+                }),
+                kind: Kind::Program,
                 sound,
             });
         }
@@ -663,13 +698,13 @@ impl Workspace {
 
     fn deliver(&mut self, note: Note) {
         if cfg!(test) {
-            self.outbox.push(note);
-            return;
+            self.outbox.push(note.clone());
         }
-        let handle = self.handle.clone();
-        self.notifier
-            .get_or_insert_with(|| Notifier::spawn(handle))
-            .send(note);
+        // Only a tab can be seen; a message whose tab is unknown closes on a click.
+        if let Some(target) = note.target.as_ref().filter(|t| t.window.is_some()) {
+            self.notified_tabs.insert(target.tab());
+        }
+        self.notification_command(Command::Send(note));
     }
 
     /// A notification was clicked: raise the window and focus the pane it came from, found
@@ -677,6 +712,7 @@ impl Workspace {
     /// whatever now sits where it was: its tab is shown if it still exists, with a notice.
     pub fn open_note(&mut self, target: NoteTarget, token: Option<String>, tx: &mut Tx) {
         self.handle.activate(token.unwrap_or_default());
+        self.close_notifications(target.clone());
         let Some(index) = self.host_index(target.host) else {
             self.inform("That pane has closed.");
             return;

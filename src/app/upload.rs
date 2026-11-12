@@ -9,6 +9,27 @@ use rune::Tx;
 use std::path::PathBuf;
 
 impl Workspace {
+    /// Text into a captured pane as a paste, the event clipboard text is sent as: for Insert
+    /// path and Go to directory. Sent once, with no key after it; a pane that is gone or
+    /// not live is told so.
+    pub fn paste_text(&mut self, target: &super::panel::PaneTarget, text: String) {
+        if !self.target_exists(target) {
+            self.inform("That pane is no longer available.");
+            return;
+        }
+        let key = (self.hosts[target.host].id, target.block.clone());
+        if !self.hosts[target.host].model.connected
+            || !self.terminals.get(&key).is_some_and(|t| t.status().live)
+        {
+            self.inform("Nothing was typed: the terminal is not live.");
+            return;
+        }
+        self.terminals
+            .get_mut(&key)
+            .unwrap()
+            .send(Command::Paste(text));
+    }
+
     /// Upload `files` to `block` of the active session. The block is fixed now; later focus
     /// changes don't move where the paths are typed.
     pub fn upload(&mut self, block: &str, files: Vec<File>) {

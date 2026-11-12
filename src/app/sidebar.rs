@@ -3,12 +3,13 @@
 use super::{
     activity::{
         TabActivity, activity_word, program_icon, progress_bar, shown_progress, shown_word,
-        shown_working, tab_activity, tab_name, working_dots,
+        shown_working, tab_activity, tab_name, tab_programs, working_dots,
     },
     activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
     keycaps::keycaps,
     panel::Intent,
     panes::divider_handle,
+    tab_icons,
     tabs::{muted_mark, target_ring},
     theme::*,
     widgets::{chrome_button, glyph},
@@ -202,7 +203,6 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str, prefixed: boo
         .continuous_corners()
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
-        .help_when_truncated(format!("{} · {label}", s.settings.hosts[index].label))
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
             s.select(index, target.clone(), tx);
             tx.blur();
@@ -344,20 +344,27 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
         .radius(10.)
         .continuous_corners()
         .cursor(Cursor::Pointer)
-        .help_when_truncated(label.clone())
-        .child(glyph(
-            program_icon(activity.program.as_deref()),
-            15.,
-            rgb(if active { ink() } else { muted() }),
-        ))
-        .child(
-            text(label)
-                .font(if active { medium(12.5) } else { ui(12.5) })
-                .color(rgb(if active { ink() } else { muted() }))
-                .truncate()
-                .grow(1.)
-                .min_w(0.),
-        );
+        .help_when_truncated(label.clone());
+    let icons = tab_icons::icons_of(
+        &tab_programs(model, tab),
+        s.settings.interface.tab_icon_count,
+    );
+    row = tab_icons::append(
+        row,
+        &format!("sidebar-tab-icon:{index}:{session}:{id}"),
+        &icons,
+        active,
+        s.settings.interface.tab_icon_color,
+    )
+    .child(
+        text(label)
+            .key(format!("sidebar-tab-name:{index}:{session}:{id}"))
+            .font(if active { medium(12.5) } else { ui(12.5) })
+            .color(rgb(if active { ink() } else { muted() }))
+            .truncate()
+            .grow(1.)
+            .min_w(0.),
+    );
     row = super::toolbar::tab_actions(
         row,
         index,

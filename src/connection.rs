@@ -17,6 +17,7 @@ use std::{
 
 pub mod activity;
 pub mod clipboard;
+pub mod directory;
 pub mod downloads;
 mod prefetch;
 mod probes;
@@ -227,6 +228,8 @@ pub struct HostModel {
     pub selected: Option<String>,
     /// Completion of the latest client navigation request (id, success), not a notice.
     pub navigation_result: Option<(u64, bool)>,
+    /// Most recent read-only directory reply; only its browser/request may consume it.
+    pub directory: Option<Arc<directory::Reply>>,
     pub views: HashMap<String, session::ViewResponse>,
     pub terminals: HashMap<String, Connection>,
     /// Each terminal block's OSC 7501 records, by record id (empty for the root record).
@@ -507,6 +510,7 @@ pub enum HostCommand {
     /// Download a file from the block's machine into a folder here (API revision 13). The
     /// transfer appears in `HostModel::downloads` under the request's id.
     Download(Box<downloads::Request>),
+    ListDir(Box<directory::Request>),
     /// Start the stream of a download that is `AwaitingConfirmation`.
     DownloadConfirm(u64),
     /// Stop a download at any point; its partial file is deleted.
@@ -1476,6 +1480,7 @@ async fn run_host(
     let mut probes = probes::Probes::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;
     let mut server_reads = server_info::Reader::default();
+    let mut directory_reads = directory::Reader::default();
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
     let ssh = crate::ssh::Target::parse(&configured)?;
@@ -1590,6 +1595,8 @@ async fn run_host(
             if let Some(call) = startup_call { tailscale_call(&mut control, shared, &mut state, &call).await?; }
             server_reads.reset();
             server_reads.start(&mut control).await?;
+            // The last connection's listing can no longer be answered.
+            directory_reads.abandon(shared, directory::Failure::Disconnected);
             retry = 0;
             prefetch.reset();
             probes.reset();
@@ -1663,6 +1670,7 @@ async fn run_host(
                         }
                     }
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
+                    _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
                         let event = event?;
@@ -1714,6 +1722,10 @@ async fn run_host(
                                 shared.update(|m| m.notice = Some(format!("Upload failed: {error:#}")));
                                 if !matches!(error.downcast_ref::<rexrs::Error>(), Some(rexrs::Error::Api(_)) | None) { return Err(error); }
                             }
+                            continue;
+                        }
+                        if let HostCommand::ListDir(request) = command {
+                            directory_reads.start(&mut control, shared, *request).await?;
                             continue;
                         }
                         if let HostCommand::Download(request) = command {
@@ -1785,6 +1797,7 @@ async fn run_host(
                     Ok(HostCommand::Identify) => server_reads.want(),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
+                    Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
                     Ok(HostCommand::Download(request)) => downloads::refuse(shared, *request, crate::download::Failure::Disconnected),
                     Ok(HostCommand::DownloadConfirm(_) | HostCommand::DownloadCancel(_)) => {}
                     Ok(HostCommand::Terminal { block, command: Command::Selection(input), .. }) => {
@@ -1815,6 +1828,9 @@ async fn run_host(
                 }
                 HostCommand::Terminal { block, command, .. } => {
                     forward_search(&workers, &block, &command);
+                }
+                HostCommand::ListDir(request) => {
+                    directory::finish(shared, &request, Err(directory::Failure::Disconnected))
                 }
                 HostCommand::Download(request) => {
                     downloads::refuse(shared, *request, crate::download::Failure::Disconnected)
@@ -2238,7 +2254,8 @@ async fn handle_command(
                 }
             }
         }
-        HostCommand::Reconnect
+        HostCommand::ListDir(_)
+        | HostCommand::Reconnect
         | HostCommand::Shutdown
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)

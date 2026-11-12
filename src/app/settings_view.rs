@@ -283,6 +283,43 @@ fn interface(s: &Workspace) -> El {
                     ),
                 ),
                 setting(
+                    "Show tab icons",
+                    "0–5 distinct programs; focused pane first.",
+                    stepper(
+                        "tab-icons",
+                        s.settings.interface.tab_icon_count.to_string(),
+                        |s, _| s.step_tab_icons(-1),
+                        |s, _| s.step_tab_icons(1),
+                    ),
+                ),
+                select_row(
+                    "tab-icon-color",
+                    "Use colour for tab icons",
+                    if s.settings.interface.tab_icon_count == 0 {
+                        "No icons are shown while Show tab icons is 0."
+                    } else {
+                        "Active pane colours only its first icon in the tab on screen."
+                    },
+                    &["Always", "Active pane", "Active tab", "Never"],
+                    match s.settings.interface.tab_icon_color {
+                        rex_linux::settings::interface::TabIconColor::Always => 0,
+                        rex_linux::settings::interface::TabIconColor::ActivePane => 1,
+                        rex_linux::settings::interface::TabIconColor::ActiveTab => 2,
+                        rex_linux::settings::interface::TabIconColor::Never => 3,
+                    },
+                    |s, i, _| {
+                        use rex_linux::settings::interface::TabIconColor;
+                        s.settings.interface.tab_icon_color = [
+                            TabIconColor::Always,
+                            TabIconColor::ActivePane,
+                            TabIconColor::ActiveTab,
+                            TabIconColor::Never,
+                        ][i];
+                        s.save();
+                    },
+                ),
+                super::tab_icons::preview(s),
+                setting(
                     "Tabs fill available space",
                     "Only toolbar tabs share the available width.",
                     Switch::new(s.settings.interface.tabs_fill_available_space)
@@ -390,6 +427,22 @@ fn channel_row(state: &str, label: &str, detail: &str, cells: Cells) -> El {
 }
 
 fn notifications(s: &Workspace) -> El {
+    use super::notify::{Command, Service, TestResult};
+    use super::settings_kit::{ChipTone, state_chip};
+    let health = &s.notification_health;
+    let (status, tone) = match &health.service {
+        Service::Unchecked => ("Not checked yet", ChipTone::Off),
+        Service::Available => ("Available", ChipTone::Good),
+        Service::NotFound => ("Not found", ChipTone::Attention),
+        Service::Unreachable(_) => ("Unreachable", ChipTone::Attention),
+        Service::Rejected => ("Rejected", ChipTone::Attention),
+    };
+    let test = match &health.test {
+        TestResult::None => "No test sent yet.".to_owned(),
+        TestResult::Sending => "Sending test…".to_owned(),
+        TestResult::Sent => "Last test: sent to the service.".to_owned(),
+        TestResult::Failed(reason) => format!("Last test failed: {reason}."),
+    };
     let n = &s.settings.notifications;
     let mut header = row_frame(false).child(el().grow(1.));
     let mut columns = row().center_y();
@@ -490,6 +543,42 @@ fn notifications(s: &Workspace) -> El {
                     ("sound", m.sound, !m.desktop, |n| &mut n.messages.sound),
                 ],
             )])],
+        ),
+        section(
+            "Desktop service",
+            [
+                card([
+                    setting(
+                        "Notification service",
+                        "Last check, not a delivery receipt.",
+                        state_chip("notification-health", status, tone, health.service.reason()),
+                    ),
+                    setting(
+                        "Send test notification",
+                        &test,
+                        row()
+                            .gap(6.)
+                            .center_y()
+                            .children(matches!(health.test, TestResult::Failed(_)).then(|| {
+                                state_chip(
+                                    "notification-test-failed",
+                                    "Failed",
+                                    ChipTone::Attention,
+                                    &test,
+                                )
+                            }))
+                            .child(button(
+                                "notification-test",
+                                "Send test",
+                                Pill::Neutral,
+                                |s, _| {
+                                    s.notification_command(Command::Test);
+                                },
+                            )),
+                    ),
+                ]),
+                footnote("Tests work even when desktop notifications are off."),
+            ],
         ),
     ])
 }
@@ -634,6 +723,7 @@ pub(super) fn body(s: &Workspace, page: super::settings_nav::Page) -> El {
         }
     };
     match section {
+        SettingsSection::Server => super::server_page::section(s),
         SettingsSection::Interface => interface(s),
         SettingsSection::Terminal => terminal(s),
         SettingsSection::Notifications => notifications(s),

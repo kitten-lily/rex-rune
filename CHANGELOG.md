@@ -13,12 +13,36 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 - Settings → Notifications is now a channels × states table (Tabs, Desktop, Count, Sound × Needs you, Fails, Finishes, Works, plus messages from programs). `notifications` in workspace.json has a new shape; older files migrate with their behaviour unchanged. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - OSC 7501 status records keep their `owner` and `updated_at`. A report without an app is named after the process in the foreground when it reported, for icons, Activity rows and notifications. When records tie on state and progress, the latest report by the server's clock speaks for the pane, tab or session; it is never compared with this computer's clock. ([#3](https://github.com/kitten-lily/rex-rune/issues/3))
 - With upstream's tab management and Commands: a muted tab's panes also leave the unread count; Commands lists View Activity and its three actions and Reload config. Settings → Interface gains Session list, Notifications keeps its channels × states table, and Hosts keeps each local host's Tailscale rows, all in the new card layout.
+- With upstream 0.7.5: upstream's Activity popup and its session words on sidebar rows are left out, since the Activity view and its session words cover them; `client.activity` from upstream's keymaps opens the Activity view as a local-only compatibility alias, refused remotely like upstream's. Upstream's notification worker now carries this fork's per-state sounds and launcher badge (which no longer needs a notification service), keeps each note's pane for its click, and replaces and closes notes by tab. Tab icons replace the single program glyph in toolbar pills and sidebar tab rows.
+
+## 0.7.5 - 2026-11-12
+
+### Changed
+
+- **README screenshots:** refreshed the workspace image and added current Settings screenshots with reproducible native capture notes (#77).
 
 ### Added
+
+- **Go to directory… (partial M3.1):** Commands → Go to directory… browses the folders on the focused terminal's machine and types `cd` with the chosen folder, shell-quoted, at the prompt. It does not press Enter: the client cannot see what the prompt already holds, so running the line stays with you. Same captured pane, errors and refusals as Insert path; local-only and unbound by default. Recent paths remain deferred. See [checks and limits](docs/parity-2026-11/M3.1-go-to-directory.md).
+
+- **Insert path… (partial M3.1):** browse the focused terminal's files and folders from Commands, then paste one POSIX-shell-quoted absolute path without Enter. The captured pane never changes; browsing only lists paths, errors stay inline and nothing retries automatically. The action is local-only and unbound by default. Recent paths remain deferred. See [checks and limits](docs/parity-2026-11/M3.1-insert-path.md).
+
+- **Server settings (partial M3.3):** a read-only page shows the active host's cached version, API, process, listeners and built-in Tailscale facts, with explicit missing/stale states and sanitized address copy. Opening the page makes no requests or server changes. Pairing and server controls remain deferred. See [checks and limits](docs/parity-2026-11/M3.3-server-settings.md).
+
+- **Notification quality and health (partial M3.4):** activity notifications replace the previous one for their tab, use critical urgency for Needs you/Error and close when the tab is seen. Failed sends stay dropped without ending the worker. Settings → Notifications reports service health and offers an explicit test, even with desktop notifications off. Program messages remain separate. See [checks and limits](docs/parity-2026-11/M3.4-notification-quality.md).
+
+## 0.7.4 - 2026-11-11
+
+One-click updates for eligible installer users, optional header fading, toolbar tab fill, and configurable tab icons with a preview.
+
+### Added
+
+- **Tab icons (partial M2.8):** **Show tab icons** in Interface → Sidebar and tabs saves a 0–5 count with a small live preview. The default preserves the existing single monochrome icon; additional icons use distinct cached pane programs, focused first, in toolbar and sidebar tabs. **Use colour for tab icons** adds Always / Active pane / Active tab / Never (default Never), tinting only the existing glyphs with an inert active/inactive preview. Shell-theme styling remains deferred. See [count checks](docs/parity-2026-11/M2.8-tab-icons.md) and [colour checks and limits](docs/parity-2026-11/M2.8-tab-icon-colours.md).
 
 - **Tab fill (partial M2.8):** default-off **Tabs fill available space** in Interface → Sidebar and tabs shares spare toolbar track width without changing sidebar rows, terminal geometry or ownership. Existing scroll arrows, tab menus, live chips and native drag space remain. See [checks and limits](docs/parity-2026-11/M2.8-tab-fill.md).
 
 - **Header fading (partial M2.7):** two default-off Interface → Panes switches fade header names and available buttons on inactive panes or in inactive windows. Activity, progress, exceptions and terminal content stay unchanged; no server/layout/ownership change from preferences. Focus follows mouse remains deferred. See [checks and limits](docs/parity-2026-11/M2.7-header-fading.md).
+- **One-click installer updates:** Settings → Updates offers **Update now** for verified, user-writable install.sh installations under `~/.local`, with download progress, errors and **Restart to finish**. Signed manifest hashes and exact sizes are checked before transactional replacement of the client, launcher, icons and receipt; failures restore the previous files. **Copy command** remains available. Optional **Install updates automatically** is off by default and never restarts the app for you. Package-managed and source builds keep their existing guidance.
 
 ## 0.7.3 - 2026-11-11
 
