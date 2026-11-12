@@ -610,7 +610,6 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
-/// Host 0 connected on session "s" with a one-pane tab "single" and a split tab "split".
 /// Nothing went to the host but the Activity view's session prefetch, which is this
 /// client's own read-only bookkeeping, never a server request.
 fn quiet(host: &flume::Receiver<HostCommand>) -> bool {
@@ -618,6 +617,7 @@ fn quiet(host: &flume::Receiver<HostCommand>) -> bool {
         .all(|c| matches!(c, HostCommand::PrefetchViews(_)))
 }
 
+/// Host 0 connected on session "s" with a one-pane tab "single" and a split tab "split".
 fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     let mut ws = workspace();
     let rx = capture_host(&mut ws, 0);
