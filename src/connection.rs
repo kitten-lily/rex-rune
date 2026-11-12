@@ -472,12 +472,6 @@ pub enum HostCommand {
         payload: Value,
         cwd_from: String,
     },
-    /// A mutating request whose caller needs to discard optimistic local state on failure.
-    RequestTracked {
-        method: String,
-        payload: Value,
-        reply: flume::Sender<std::result::Result<(), String>>,
-    },
     Terminal {
         session: String,
         block: String,
@@ -1795,9 +1789,6 @@ async fn run_host(
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
-                HostCommand::RequestTracked { reply, .. } => {
-                    let _ = reply.send(Err("Host is reconnecting".into()));
-                }
                 HostCommand::Terminal { block, command, .. } => {
                     forward_search(&workers, &block, &command);
                 }
@@ -2045,22 +2036,6 @@ async fn handle_command(
             // Creation is sent once. A failure follows the ordinary request path; never replay.
             request(control, &method, payload).await?;
             after_request(control, shared, workers, state, Some(&session)).await?;
-        }
-        HostCommand::RequestTracked {
-            method,
-            payload,
-            reply,
-        } => {
-            let session_id = payload["session_id"].as_str().map(str::to_owned);
-            let result = request(control, &method, payload).await;
-            let _ = reply.send(
-                result
-                    .as_ref()
-                    .map(|_| ())
-                    .map_err(|error| format!("{error:#}")),
-            );
-            result?;
-            after_request(control, shared, workers, state, session_id.as_deref()).await?;
         }
         HostCommand::Ticket {
             session,

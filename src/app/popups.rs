@@ -137,8 +137,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     }
     let target = panel.target.as_ref()?;
     let current = s.model().window()?;
-    let placement = s
-        .arrange(current, None)
+    let placement = rex_linux::layout::placements(current, None)
         .0
         .into_iter()
         .find(|p| p.block == target.block)?;
@@ -152,7 +151,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
         } else {
             CARD_RADIUS
         };
-        (super::panes::card_rect(s, &placement), radius)
+        (super::panes::card_rect(s, placement.rect), radius)
     };
     Some(
         el().key("target-outline")

@@ -11,9 +11,6 @@ pub const NEXT_GLOBAL: &str = "client.tab.next_global";
 pub const PREVIOUS_GLOBAL: &str = "client.tab.previous_global";
 pub const HISTORY_BACK: &str = "client.history.back";
 pub const HISTORY_FORWARD: &str = "client.history.forward";
-pub const CYCLE_COLUMN: &str = "client.column.cycle_width";
-pub const MAXIMIZE_COLUMN: &str = "client.column.maximize";
-pub const MOVE_COLUMN: &str = "client.column.move";
 pub const VIEW_ACTIVITY: &str = "pane.view_activity";
 pub const TOGGLE_ACTIVITY: &str = "client.sidebar.activity.toggle";
 pub const ACTIVITY_BY_SESSION: &str = "client.sidebar.activity.by_session";
@@ -59,9 +56,6 @@ enum Handler {
     RenameSession,
     ClosePane,
     SendKey,
-    CycleColumn,
-    MaximizeColumn,
-    MoveColumn,
     SelectAll,
     CopyPaneId,
     ClearTerminal,
@@ -139,9 +133,6 @@ specs! {
     "session.rename" => RenameSession,
     "pane.close" => ClosePane,
     "pane.send_key" => SendKey,
-    CYCLE_COLUMN => CycleColumn,
-    MAXIMIZE_COLUMN => MaximizeColumn,
-    MOVE_COLUMN => MoveColumn,
     "pane.select_all" => SelectAll,
     "pane.copy_id" => CopyPaneId,
     "pane.clear" => ClearTerminal,
@@ -222,9 +213,6 @@ impl Spec {
                 Remote::Never("Use rex do session.select on the target host instead.")
             }
             Reconnect => Remote::Never("Only the person at this computer can reconnect terminals."),
-            CycleColumn | MaximizeColumn | MoveColumn => Remote::Never(
-                "Only the person at this computer can change this client's scrolling columns.",
-            ),
             SelectAll => {
                 Remote::Never("Only the person at this computer can select terminal text.")
             }
@@ -339,9 +327,6 @@ impl Spec {
             Handler::RenameSession => "Rename session",
             Handler::ClosePane => "Close pane",
             Handler::SendKey => "Send key",
-            Handler::CycleColumn => "Cycle column width",
-            Handler::MaximizeColumn => "Maximize or restore column",
-            Handler::MoveColumn => "Move column",
             Handler::SelectAll => "Select all",
             Handler::CopyPaneId => "Copy pane ID",
             Handler::ClearTerminal => "Clear terminal",
@@ -419,9 +404,6 @@ impl Spec {
             | Handler::FocusPane
             | Handler::PaneActions
             | Handler::Reconnect
-            | Handler::CycleColumn
-            | Handler::MaximizeColumn
-            | Handler::MoveColumn
             | Handler::CopyPaneId
             | Handler::ClearTerminal
             | Handler::ResetTerminal
@@ -461,10 +443,6 @@ impl Spec {
             ),
             Handler::GotoTab => ("index", json!({"type":"integer","minimum":-1})),
             Handler::SendKey => ("key", json!({"type":"string"})),
-            Handler::MoveColumn => (
-                "direction",
-                json!({"type":"string","enum":["left","right"]}),
-            ),
             Handler::MoveTab => (
                 "direction",
                 json!({"type":"string","enum":["left","right"]}),
@@ -488,7 +466,6 @@ impl Spec {
                         | Handler::Scroll
                         | Handler::GotoTab
                         | Handler::SendKey
-                        | Handler::MoveColumn
                         | Handler::MoveTab
                 );
         };
@@ -519,9 +496,6 @@ impl Spec {
                     && args["index"]
                         .as_i64()
                         .is_some_and(|n| n == -1 || n > 0 && usize::try_from(n).is_ok())
-            }
-            Handler::MoveColumn => {
-                object.len() == 1 && matches!(args["direction"].as_str(), Some("left" | "right"))
             }
             Handler::MoveTab => {
                 object.len() == 1 && matches!(args["direction"].as_str(), Some("left" | "right"))
@@ -684,12 +658,6 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
                 }
             }
         }
-        Handler::CycleColumn => s.perform(Intent::CycleColumnWidth, tx),
-        Handler::MaximizeColumn => s.perform(Intent::MaximizeColumn, tx),
-        Handler::MoveColumn => s.perform(
-            Intent::MoveColumn(if args["direction"] == "left" { -1 } else { 1 }),
-            tx,
-        ),
     }
     true
 }

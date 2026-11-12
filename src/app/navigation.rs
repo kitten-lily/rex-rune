@@ -259,7 +259,6 @@ impl Workspace {
         };
         self.active = host;
         self.drag = None;
-        self.column_drag = None;
         self.settings.hosts[host].collapsed = false;
         self.update_visibility();
         if !self.hosts[host].model.connected {

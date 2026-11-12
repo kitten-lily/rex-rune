@@ -13,17 +13,14 @@ use rex_linux::{
         Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options,
         tailscale::valid_name,
     },
-    layout::{
-        COLUMN_WIDTH_PRESETS, ColumnEdge, DEFAULT_COLUMN_WIDTH, Divider, MAX_COLUMN_WIDTH,
-        MIN_COLUMN_WIDTH, Placement, Strip, shell_layout,
-    },
+    layout::{Divider, shell_layout},
     settings::{
-        ChromeTheme, FocusCentering, Host, NoticePosition, SessionList, Settings, SidebarMode,
-        TabLayout, TerminalThemeChoice, normalize_font_preferences, validate_host,
+        ChromeTheme, Host, NoticePosition, SessionList, Settings, SidebarMode, TerminalThemeChoice,
+        normalize_font_preferences, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
-use rexrs::api::{session::Window, terminal::SetTheme};
+use rexrs::api::terminal::SetTheme;
 use rune::{AppHandle, TextEdit, Tx};
 use serde_json::{Value, json};
 use std::{
@@ -54,58 +51,6 @@ pub struct DividerDrag {
     pub ratio: f64,
 }
 
-/// A boundary drag in a scrolling tab: it resizes only the column before the boundary; the
-/// columns after it keep their widths and move with it.
-pub struct ColumnDrag {
-    pub host: usize,
-    pub session: String,
-    pub window: String,
-    pub before: String,
-    pub after: String,
-    pub start: f64,
-    pub width: f64,
-}
-
-struct ActiveColumn {
-    session: String,
-    window: String,
-    block: String,
-    column: String,
-    width: f64,
-    resizable: bool,
-}
-
-#[derive(Clone, Copy, Default)]
-pub struct ColumnActions {
-    pub move_left: bool,
-    pub move_right: bool,
-    pub consume_left: bool,
-    pub consume_right: bool,
-    pub expel: bool,
-}
-
-#[derive(Clone, Copy)]
-enum ColumnChangeKind {
-    Consume,
-    Expel,
-}
-
-struct PendingColumnChange {
-    host: HostId,
-    session: String,
-    window: String,
-    moved: String,
-    anchor: String,
-    survivor: Option<String>,
-    source: String,
-    target: Option<String>,
-    source_width: f64,
-    target_width: Option<f64>,
-    kind: ColumnChangeKind,
-    outcome: Option<flume::Receiver<std::result::Result<(), String>>>,
-    confirmed: bool,
-}
-
 pub struct Notice {
     pub id: u64,
     pub text: String,
@@ -128,10 +73,6 @@ pub struct Workspace {
     next_notice: u64,
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
-    /// Whether the current precise horizontal wheel gesture panned a scrolling strip.
-    pub strip_gesture: bool,
-    pub column_drag: Option<ColumnDrag>,
-    pending_column_change: Option<PendingColumnChange>,
     /// Keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<super::bindings::Identity>,
     pub bindings: super::bindings::State,
@@ -204,18 +145,7 @@ pub struct Workspace {
     pub theme_dirs: ThemeDirs,
     /// The Ghostty themes the theme picker lists, read when it opens.
     pub themes: Vec<ThemeInfo>,
-    /// Each scrolling tab's place along its strip, by host and Rex window ID.
-    pub strips: HashMap<HostId, HashMap<String, StripView>>,
     pub updates: super::updates::Updates,
-}
-
-/// A scrolling tab's place along its strip, and the pane it last brought into view.
-#[derive(Default)]
-pub struct StripView {
-    offset: f64,
-    revealed: Option<String>,
-    revealed_span: Option<[f64; 2]>,
-    restore_widths: HashMap<String, f64>,
 }
 
 #[derive(Default)]
@@ -301,9 +231,6 @@ impl Workspace {
             next_notice: 0,
             zoom_notice: None,
             drag: None,
-            strip_gesture: false,
-            column_drag: None,
-            pending_column_change: None,
             forwarded: HashSet::new(),
             bindings: Default::default(),
             local_keymap,
@@ -353,7 +280,6 @@ impl Workspace {
             term_theme,
             theme_dirs,
             themes: Vec::new(),
-            strips: HashMap::new(),
             updates: Default::default(),
         };
         this.init_updates();
@@ -455,14 +381,6 @@ impl Workspace {
         self.unseen_done.retain(|(host, _)| *host != id);
         self.unseen_bells.retain(|(host, _)| *host != id);
         self.activity_epochs.remove(&id);
-        self.strips.remove(&id);
-        if self
-            .pending_column_change
-            .as_ref()
-            .is_some_and(|pending| pending.host == id)
-        {
-            self.pending_column_change = None;
-        }
         self.update_badge();
     }
 
@@ -480,7 +398,6 @@ impl Workspace {
         // Menus and drags name hosts by position, which just shifted.
         self.panel = None;
         self.drag = None;
-        self.column_drag = None;
         if self.active == index {
             self.active = 0;
         } else if self.active > index {
@@ -518,7 +435,6 @@ impl Workspace {
             self.forget_host(old);
             if self.active == index {
                 self.drag = None;
-                self.column_drag = None;
             }
             self.update_visibility();
         }
@@ -608,8 +524,6 @@ impl Workspace {
             self.bindings.sequence.clear();
         }
         self.hosts[index].model = model;
-        let columns_changed =
-            self.apply_pending_column_change(index) | self.reconcile_column_state(index);
         self.announce_keymap_problems(index);
         self.poll_remote_navigation(std::time::Instant::now());
         for pending in performs {
@@ -671,14 +585,9 @@ impl Workspace {
         self.sync_tabs(index, tx);
         if index == self.active && old_session != self.hosts[index].model.selected {
             self.drag = None;
-            self.column_drag = None;
-            self.pending_column_change = None;
         }
-        if (changed_session || columns_changed) && self.hosts[index].model.selected.is_some() {
+        if changed_session && self.hosts[index].model.selected.is_some() {
             self.save();
-        }
-        if index == self.active {
-            self.reveal_focus();
         }
         self.claim_visible();
         let font = self.settings.font_size;
@@ -689,172 +598,6 @@ impl Workspace {
         }
         self.sync_prefetch();
         self.update_title(tx);
-    }
-
-    /// Carry local widths across a server-confirmed consume or expel operation.
-    pub(crate) fn apply_pending_column_change(&mut self, host: usize) -> bool {
-        let Some(mut pending) = self.pending_column_change.take() else {
-            return false;
-        };
-        if pending.host != self.hosts[host].id {
-            self.pending_column_change = Some(pending);
-            return false;
-        }
-        if !pending.confirmed {
-            match pending
-                .outcome
-                .as_ref()
-                .expect("column change outcome")
-                .try_recv()
-            {
-                Ok(Ok(())) => pending.confirmed = true,
-                Ok(Err(_)) | Err(flume::TryRecvError::Disconnected) => return false,
-                Err(flume::TryRecvError::Empty) => {
-                    self.pending_column_change = Some(pending);
-                    return false;
-                }
-            }
-        }
-        let found = self.hosts[host]
-            .model
-            .views
-            .get(&pending.session)
-            .and_then(|view| {
-                view.windows
-                    .iter()
-                    .find(|window| window.window_id.as_deref() == Some(&pending.window))
-            })
-            .and_then(|window| {
-                let strip = Strip::new(window, DEFAULT_COLUMN_WIDTH);
-                let moved = strip.column(&pending.moved)?.0.to_owned();
-                let anchor = strip.column(&pending.anchor)?.0.to_owned();
-                let survivor = pending
-                    .survivor
-                    .as_deref()
-                    .and_then(|block| strip.column(block))
-                    .map(|(column, _)| column.to_owned());
-                Some((moved, anchor, survivor))
-            });
-        let Some((moved, anchor, survivor)) = found else {
-            self.pending_column_change = Some(pending);
-            return false;
-        };
-        let complete = match pending.kind {
-            ColumnChangeKind::Consume => moved == anchor,
-            ColumnChangeKind::Expel => moved != anchor,
-        };
-        if !complete {
-            self.pending_column_change = Some(pending);
-            return false;
-        }
-
-        let endpoint = self.settings.hosts[host].endpoint.clone();
-        let widths = self
-            .settings
-            .column_widths
-            .entry(endpoint)
-            .or_default()
-            .entry(pending.session)
-            .or_default()
-            .entry(pending.window)
-            .or_default();
-        widths.remove(&pending.source);
-        if let Some(target) = &pending.target {
-            widths.remove(target);
-        }
-        match pending.kind {
-            ColumnChangeKind::Consume => {
-                widths.insert(moved, pending.target_width.unwrap_or(DEFAULT_COLUMN_WIDTH));
-                if let Some(survivor) = survivor {
-                    widths.insert(survivor, pending.source_width);
-                }
-            }
-            ColumnChangeKind::Expel => {
-                widths.insert(moved, pending.source_width);
-                widths.insert(anchor, pending.source_width);
-            }
-        }
-        true
-    }
-
-    /// Drop local widths and ephemeral state whose server-owned columns no longer exist.
-    pub(crate) fn reconcile_column_state(&mut self, host: usize) -> bool {
-        let endpoint = self.settings.hosts[host].endpoint.clone();
-        let host_id = self.hosts[host].id;
-        let model = &self.hosts[host].model;
-        if !model.connected {
-            return false;
-        }
-        let sessions: HashSet<String> = model
-            .sessions
-            .iter()
-            .map(|session| session.session_id.clone())
-            .collect();
-        let mut known: HashMap<String, HashMap<String, HashSet<String>>> = HashMap::new();
-        let mut known_windows: HashMap<String, HashSet<String>> = HashMap::new();
-        for (session, view) in &model.views {
-            let windows = known.entry(session.clone()).or_default();
-            for window in &view.windows {
-                let Some(window_id) = window.window_id.as_ref() else {
-                    continue;
-                };
-                let columns: HashSet<String> = Strip::new(window, DEFAULT_COLUMN_WIDTH)
-                    .column_ids()
-                    .map(str::to_owned)
-                    .collect();
-                if model.selected.as_deref() == Some(session) {
-                    known_windows.insert(window_id.clone(), columns.clone());
-                }
-                windows.insert(window_id.clone(), columns);
-            }
-        }
-
-        let mut changed = false;
-        if let Some(widths) = self.settings.column_widths.get_mut(&endpoint) {
-            let before = widths.len();
-            widths.retain(|session, windows| {
-                if !sessions.contains(session) {
-                    return false;
-                }
-                if let Some(known) = known.get(session) {
-                    let before = windows.len();
-                    windows.retain(|window, columns| {
-                        let Some(valid) = known.get(window) else {
-                            return false;
-                        };
-                        let before = columns.len();
-                        columns.retain(|column, _| valid.contains(column));
-                        changed |= before != columns.len();
-                        !columns.is_empty()
-                    });
-                    changed |= before != windows.len();
-                }
-                !windows.is_empty()
-            });
-            changed |= before != widths.len();
-        }
-        if self
-            .settings
-            .column_widths
-            .get(&endpoint)
-            .is_some_and(HashMap::is_empty)
-        {
-            self.settings.column_widths.remove(&endpoint);
-        }
-
-        if let Some(views) = self.strips.get_mut(&host_id) {
-            let before = views.len();
-            views.retain(|window, view| {
-                let Some(valid) = known_windows.get(window) else {
-                    return false;
-                };
-                view.restore_widths
-                    .retain(|column, _| valid.contains(column));
-                true
-            });
-            changed |= before != views.len();
-        }
-        changed
     }
 
     /// Take size ownership of the panes on screen, as the native Rex apps and multiplexers
@@ -1033,609 +776,6 @@ impl Workspace {
             term.resize_if_owner(font);
         }
         self.place_find(key);
-    }
-
-    fn tab_layout_for(&self, host: usize, session: &str, window: &str) -> TabLayout {
-        let endpoint = &self.settings.hosts[host].endpoint;
-        self.settings
-            .tab_layouts
-            .get(endpoint)
-            .and_then(|sessions| sessions.get(session))
-            .and_then(|windows| windows.get(window))
-            .copied()
-            .unwrap_or(self.settings.tab_layout)
-    }
-
-    /// The layout of a tab on any host and session: its own choice, else the default.
-    pub fn tab_layout_of(&self, target: &WindowTarget) -> TabLayout {
-        self.tab_layout_for(target.host, &target.session, &target.window)
-    }
-
-    /// `window` in the active host's selected session.
-    #[cfg(test)]
-    pub fn window_target(&self, window: String) -> Option<WindowTarget> {
-        Some(WindowTarget {
-            host: self.active,
-            session: self.model().selected.clone()?,
-            window,
-        })
-    }
-
-    /// The layout of `window` in the active host and session: its own choice, else the default.
-    pub fn tab_layout(&self, window: &str) -> TabLayout {
-        self.model()
-            .selected
-            .as_deref()
-            .map_or(self.settings.tab_layout, |session| {
-                self.tab_layout_for(self.active, session, window)
-            })
-    }
-
-    fn column_width_for(&self, host: usize, session: &str, window: &str, column: &str) -> f64 {
-        self.settings
-            .column_widths
-            .get(&self.settings.hosts[host].endpoint)
-            .and_then(|sessions| sessions.get(session))
-            .and_then(|windows| windows.get(window))
-            .and_then(|columns| columns.get(column))
-            .copied()
-            .unwrap_or(DEFAULT_COLUMN_WIDTH)
-    }
-
-    fn strip_for<'a>(&self, host: usize, session: &str, window: &'a Window) -> Strip<'a> {
-        let window_id = window.window_id.as_deref().unwrap_or_default();
-        let preview = self
-            .column_drag
-            .as_ref()
-            .filter(|d| d.host == host && d.session == session && d.window == window_id);
-        Strip::with_widths(window, |column| {
-            preview
-                .filter(|drag| column == drag.before)
-                .map(|drag| drag.width)
-                .unwrap_or_else(|| self.column_width_for(host, session, window_id, column))
-        })
-    }
-
-    /// `window`'s panes, server dividers and local column boundaries in window units.
-    pub fn arrange<'a>(
-        &self,
-        window: &'a Window,
-        drag: Option<(&str, f64)>,
-    ) -> (Vec<Placement>, Vec<Divider>, Vec<ColumnEdge<'a>>) {
-        let Some(session) = self.model().selected.as_deref() else {
-            let (panes, dividers) = rex_linux::layout::placements(window, drag);
-            return (panes, dividers, Vec::new());
-        };
-        let Some(id) = window
-            .window_id
-            .as_deref()
-            .filter(|id| self.tab_layout_for(self.active, session, id) == TabLayout::Scrolling)
-        else {
-            let (panes, dividers) = rex_linux::layout::placements(window, drag);
-            return (panes, dividers, Vec::new());
-        };
-        let offset = self
-            .strips
-            .get(&self.hosts[self.active].id)
-            .and_then(|views| views.get(id))
-            .map_or(0., |v| v.offset);
-        let strip = self.strip_for(self.active, session, window);
-        let edges = if window.zoomed_block_id.is_some() {
-            Vec::new()
-        } else {
-            strip.column_edges(offset)
-        };
-        let (panes, dividers) = strip.placements(offset, drag);
-        (panes, dividers, edges)
-    }
-
-    /// Scroll the active tab along its strip by `delta` window widths. False when the tab
-    /// doesn't scroll or its strip fits the window.
-    pub fn scroll_strip(&mut self, delta: f64) -> bool {
-        let host = &self.hosts[self.active];
-        let Some(session) = host.model.selected.as_deref() else {
-            return false;
-        };
-        let Some(window) = host.model.window() else {
-            return false;
-        };
-        let Some(id) = window.window_id.as_ref() else {
-            return false;
-        };
-        let strip = self.strip_for(self.active, session, window);
-        if self.tab_layout_for(self.active, session, id) == TabLayout::Tiled || strip.extent <= 1. {
-            return false;
-        }
-        let view = self
-            .strips
-            .entry(host.id)
-            .or_default()
-            .entry(id.clone())
-            .or_default();
-        let next = strip.clamp(strip.clamp(view.offset) + delta);
-        let changed = (next - view.offset).abs() > 1e-9;
-        view.offset = next;
-        changed
-    }
-
-    /// Snap the active tab to the nearest column edge after a precise scroll gesture.
-    pub fn snap_strip(&mut self) -> bool {
-        let host = &self.hosts[self.active];
-        let Some(session) = host.model.selected.as_deref() else {
-            return false;
-        };
-        let Some(window) = host.model.window() else {
-            return false;
-        };
-        let Some(id) = window.window_id.as_ref() else {
-            return false;
-        };
-        let strip = self.strip_for(self.active, session, window);
-        if self.tab_layout_for(self.active, session, id) == TabLayout::Tiled || strip.extent <= 1. {
-            return false;
-        }
-        let view = self
-            .strips
-            .entry(host.id)
-            .or_default()
-            .entry(id.clone())
-            .or_default();
-        let snapped = strip.snap(view.offset);
-        let changed = (snapped - view.offset).abs() > 1e-9;
-        view.offset = snapped;
-        changed
-    }
-
-    /// Bring the active tab's focused pane into view if focus or its column moved.
-    pub(crate) fn reveal_focus(&mut self) {
-        let host = &self.hosts[self.active];
-        let Some(session) = host.model.selected.as_deref() else {
-            return;
-        };
-        let (Some(window), Some(block)) = (host.model.window(), host.model.focused()) else {
-            return;
-        };
-        let Some(id) = window.window_id.as_ref() else {
-            return;
-        };
-        if self.tab_layout_for(self.active, session, id) == TabLayout::Tiled {
-            return;
-        }
-        let strip = self.strip_for(self.active, session, window);
-        let span = strip.column_span(block);
-        let policy = self.settings.focus_centering;
-        let view = self
-            .strips
-            .entry(host.id)
-            .or_default()
-            .entry(id.clone())
-            .or_default();
-        if view.revealed.as_deref() != Some(block) || view.revealed_span != span {
-            let center = match (policy, view.revealed_span, span) {
-                (FocusCentering::Always, _, _) => true,
-                (FocusCentering::OnOverflow, Some(previous), Some(next)) => {
-                    let left = previous[0].min(next[0]);
-                    let right = (previous[0] + previous[1]).max(next[0] + next[1]);
-                    right - left > 1. + 1e-9
-                }
-                _ => false,
-            };
-            view.offset = if center {
-                strip
-                    .center(block)
-                    .unwrap_or_else(|| strip.reveal(view.offset, block))
-            } else {
-                strip.reveal(view.offset, block)
-            };
-            view.revealed = Some(block.to_owned());
-            view.revealed_span = span;
-        }
-    }
-
-    fn active_column(&self) -> Option<ActiveColumn> {
-        let model = self.model();
-        let session = model.selected.as_deref()?;
-        let window = model.window()?;
-        let window_id = window.window_id.as_deref()?;
-        if self.tab_layout_for(self.active, session, window_id) != TabLayout::Scrolling {
-            return None;
-        }
-        let block = model.focused()?;
-        let strip = self.strip_for(self.active, session, window);
-        let resizable = strip.column_ids().nth(1).is_some();
-        let (column, [_, width]) = strip.column(block)?;
-        Some(ActiveColumn {
-            session: session.to_owned(),
-            window: window_id.to_owned(),
-            block: block.to_owned(),
-            column: column.to_owned(),
-            width,
-            resizable,
-        })
-    }
-
-    pub fn active_column_width(&self) -> Option<f64> {
-        self.active_column()
-            .filter(|column| column.resizable)
-            .map(|column| column.width)
-    }
-
-    pub fn column_actions(&self) -> ColumnActions {
-        let Some(column) = self.active_column() else {
-            return ColumnActions::default();
-        };
-        let Some(window) = self.model().window() else {
-            return ColumnActions::default();
-        };
-        let strip = self.strip_for(self.active, &column.session, window);
-        ColumnActions {
-            move_left: strip.swap_target(&column.block, -1).is_some(),
-            move_right: strip.swap_target(&column.block, 1).is_some(),
-            consume_left: strip.consume_anchor(&column.block, -1).is_some(),
-            consume_right: strip.consume_anchor(&column.block, 1).is_some(),
-            expel: strip.expel_anchor(&column.block).is_some(),
-        }
-    }
-
-    pub fn move_column(&mut self, direction: i8) {
-        let Some(column) = self.active_column() else {
-            return;
-        };
-        let Some(window) = self.model().window() else {
-            return;
-        };
-        let Some(target) = self
-            .strip_for(self.active, &column.session, window)
-            .swap_target(&column.block, direction)
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        self.request(
-            "session.swap_blocks",
-            json!({"block_id":column.block,"other_block_id":target}),
-        );
-        self.request("session.focus_block", json!({"block_id":column.block}));
-    }
-
-    fn request_column_change(&mut self, mut pending: PendingColumnChange, mut payload: Value) {
-        payload["session_id"] = json!(pending.session);
-        let (reply, outcome) = flume::bounded(1);
-        pending.outcome = Some(outcome);
-        self.pending_column_change = Some(pending);
-        self.send(
-            self.active,
-            HostCommand::RequestTracked {
-                method: "session.move_block".into(),
-                payload,
-                reply,
-            },
-        );
-    }
-
-    pub fn consume_pane(&mut self, direction: i8) {
-        let Some(column) = self.active_column() else {
-            return;
-        };
-        let Some(window) = self.model().window() else {
-            return;
-        };
-        let strip = self.strip_for(self.active, &column.session, window);
-        let Some(anchor) = strip
-            .consume_anchor(&column.block, direction)
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        let Some((target, [_, target_width])) = strip.column(&anchor) else {
-            return;
-        };
-        let survivor = strip.expel_anchor(&column.block).map(str::to_owned);
-        self.request_column_change(
-            PendingColumnChange {
-                host: self.hosts[self.active].id,
-                session: column.session,
-                window: column.window,
-                moved: column.block.clone(),
-                anchor: anchor.clone(),
-                survivor,
-                source: column.column,
-                target: Some(target.to_owned()),
-                source_width: column.width,
-                target_width: Some(target_width),
-                kind: ColumnChangeKind::Consume,
-                outcome: None,
-                confirmed: false,
-            },
-            json!({
-                "block_id":column.block,
-                "anchor_block_id":anchor,
-                "direction":"vertical",
-                "side":"after"
-            }),
-        );
-    }
-
-    pub fn expel_pane(&mut self, direction: i8) {
-        let Some(column) = self.active_column() else {
-            return;
-        };
-        let Some(window) = self.model().window() else {
-            return;
-        };
-        let Some(anchor) = self
-            .strip_for(self.active, &column.session, window)
-            .expel_anchor(&column.block)
-            .map(str::to_owned)
-        else {
-            return;
-        };
-        self.request_column_change(
-            PendingColumnChange {
-                host: self.hosts[self.active].id,
-                session: column.session,
-                window: column.window,
-                moved: column.block.clone(),
-                anchor: anchor.clone(),
-                survivor: Some(anchor.clone()),
-                source: column.column,
-                target: None,
-                source_width: column.width,
-                target_width: None,
-                kind: ColumnChangeKind::Expel,
-                outcome: None,
-                confirmed: false,
-            },
-            json!({
-                "block_id":column.block,
-                "anchor_block_id":anchor,
-                "direction":"horizontal",
-                "side":if direction < 0 {"before"} else {"after"}
-            }),
-        );
-    }
-
-    fn remember_column_width(
-        &mut self,
-        host: usize,
-        session: &str,
-        window: &str,
-        column: &str,
-        width: f64,
-    ) {
-        let endpoint = self.settings.hosts[host].endpoint.clone();
-        self.settings
-            .column_widths
-            .entry(endpoint)
-            .or_default()
-            .entry(session.to_owned())
-            .or_default()
-            .entry(window.to_owned())
-            .or_default()
-            .insert(
-                column.to_owned(),
-                width.clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH),
-            );
-    }
-
-    /// Ctrl Shift S: 1/3 → 1/2 → 2/3 for the focused scrolling column.
-    pub fn cycle_column_width(&mut self) {
-        let Some(column) = self.active_column() else {
-            return;
-        };
-        if !column.resizable {
-            return;
-        }
-        let current = COLUMN_WIDTH_PRESETS
-            .iter()
-            .position(|preset| (column.width - preset).abs() < 0.02);
-        let width = COLUMN_WIDTH_PRESETS[current.map_or(0, |i| (i + 1) % 3)];
-        if let Some(view) = self
-            .strips
-            .get_mut(&self.hosts[self.active].id)
-            .and_then(|views| views.get_mut(&column.window))
-        {
-            view.restore_widths.remove(&column.column);
-        }
-        self.remember_column_width(
-            self.active,
-            &column.session,
-            &column.window,
-            &column.column,
-            width,
-        );
-        self.reveal_focus();
-        self.save();
-    }
-
-    /// Ctrl Shift M: maximize the focused scrolling column, or restore its previous width.
-    pub fn maximize_column(&mut self) {
-        let Some(column) = self.active_column() else {
-            return;
-        };
-        if !column.resizable {
-            return;
-        }
-        let view = self
-            .strips
-            .entry(self.hosts[self.active].id)
-            .or_default()
-            .entry(column.window.clone())
-            .or_default();
-        let width = if column.width >= MAX_COLUMN_WIDTH - 0.01 {
-            view.restore_widths
-                .remove(&column.column)
-                .unwrap_or(DEFAULT_COLUMN_WIDTH)
-        } else {
-            view.restore_widths
-                .insert(column.column.clone(), column.width);
-            MAX_COLUMN_WIDTH
-        };
-        self.remember_column_width(
-            self.active,
-            &column.session,
-            &column.window,
-            &column.column,
-            width,
-        );
-        self.reveal_focus();
-        self.save();
-    }
-
-    /// Center the focused scrolling column in the viewport.
-    pub fn center_column(&mut self) {
-        let Some(column) = self.active_column() else {
-            return;
-        };
-        let Some(window) = self.model().window() else {
-            return;
-        };
-        let strip = self.strip_for(self.active, &column.session, window);
-        let Some(offset) = strip.center(&column.block) else {
-            return;
-        };
-        let span = strip.column_span(&column.block);
-        let view = self
-            .strips
-            .entry(self.hosts[self.active].id)
-            .or_default()
-            .entry(column.window)
-            .or_default();
-        view.offset = offset;
-        view.revealed = Some(column.block);
-        view.revealed_span = span;
-    }
-
-    pub fn begin_column_drag(&mut self, before: String, after: String) {
-        let Some(session) = self.model().selected.as_deref() else {
-            return;
-        };
-        let Some(window) = self.model().window() else {
-            return;
-        };
-        let Some(window_id) = window.window_id.as_deref() else {
-            return;
-        };
-        if self.tab_layout_for(self.active, session, window_id) != TabLayout::Scrolling {
-            return;
-        }
-        let strip = self.strip_for(self.active, session, window);
-        let (Some(width), Some(_)) = (strip.column_width(&before), strip.column_width(&after))
-        else {
-            return;
-        };
-        self.column_drag = Some(ColumnDrag {
-            host: self.active,
-            session: session.to_owned(),
-            window: window_id.to_owned(),
-            before,
-            after,
-            start: width,
-            width,
-        });
-    }
-
-    pub fn update_column_drag(&mut self, delta: f64) {
-        let Some(drag) = &mut self.column_drag else {
-            return;
-        };
-        drag.width = (drag.start + delta).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
-    }
-
-    pub fn finish_column_drag(&mut self, cancelled: bool) {
-        let Some(drag) = self.column_drag.take() else {
-            return;
-        };
-        if cancelled {
-            return;
-        }
-        self.remember_column_width(
-            drag.host,
-            &drag.session,
-            &drag.window,
-            &drag.before,
-            drag.width,
-        );
-        if let Some(view) = self
-            .strips
-            .get_mut(&self.hosts[drag.host].id)
-            .and_then(|views| views.get_mut(&drag.window))
-        {
-            view.restore_widths.remove(&drag.before);
-        }
-        self.reveal_focus();
-        self.save();
-    }
-
-    /// Switch a tab between tiled and scrolling, for that tab only.
-    pub fn toggle_tab_layout(&mut self, target: WindowTarget) {
-        let next = match self.tab_layout_of(&target) {
-            TabLayout::Scrolling => TabLayout::Tiled,
-            TabLayout::Tiled => TabLayout::Scrolling,
-        };
-        let endpoint = self.settings.hosts[target.host].endpoint.clone();
-        let WindowTarget {
-            host,
-            session,
-            window,
-        } = target;
-        if next == self.settings.tab_layout {
-            if let Some(sessions) = self.settings.tab_layouts.get_mut(&endpoint) {
-                if let Some(windows) = sessions.get_mut(&session) {
-                    windows.remove(&window);
-                }
-                sessions.retain(|_, windows| !windows.is_empty());
-            }
-            self.settings
-                .tab_layouts
-                .retain(|_, sessions| !sessions.is_empty());
-        } else {
-            self.settings
-                .tab_layouts
-                .entry(endpoint)
-                .or_default()
-                .entry(session)
-                .or_default()
-                .insert(window.clone(), next);
-        }
-        // A tab that scrolls again starts at its focused pane.
-        if let Some(views) = self.strips.get_mut(&self.hosts[host].id) {
-            views.remove(&window);
-        }
-        self.reveal_focus();
-        self.save();
-    }
-
-    /// The layout of tabs without their own choice.
-    pub fn set_tab_layout(&mut self, layout: TabLayout) {
-        if self.settings.tab_layout != layout {
-            self.settings.tab_layout = layout;
-            for sessions in self.settings.tab_layouts.values_mut() {
-                for windows in sessions.values_mut() {
-                    windows.retain(|_, tab| *tab != layout);
-                }
-                sessions.retain(|_, windows| !windows.is_empty());
-            }
-            self.settings
-                .tab_layouts
-                .retain(|_, sessions| !sessions.is_empty());
-            self.strips.clear();
-            self.reveal_focus();
-            self.save();
-        }
-    }
-
-    pub fn set_focus_centering(&mut self, policy: FocusCentering) {
-        if self.settings.focus_centering != policy {
-            self.settings.focus_centering = policy;
-            for views in self.strips.values_mut() {
-                for view in views.values_mut() {
-                    view.revealed = None;
-                }
-            }
-            self.reveal_focus();
-            self.save();
-        }
     }
 
     pub fn update_title(&mut self, tx: &mut Tx) {
@@ -2039,7 +1179,6 @@ impl Workspace {
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
-        self.column_drag = None;
         self.update_visibility();
         self.observe_navigation();
         self.save();
@@ -2264,16 +1403,9 @@ impl Workspace {
                 }
             }
             Intent::Split(direction) => {
-                let model = self.model();
-                if let (Some(block), Some(session), Some(window)) = (
-                    model.focused(),
-                    model.selected.as_deref(),
-                    model.window().and_then(|w| w.window_id.as_deref()),
-                ) {
-                    let (block, session, window) =
-                        (block.to_owned(), session.to_owned(), window.to_owned());
+                if let (Some(session), Some(block)) = (self.model().selected.clone(), self.focused_block()) {
                     let layout = self.new_terminal(self.active);
-                    let payload = self.split_in_tab(self.active, &session, &window, &block, direction, layout);
+                    let payload = self.split_payload(self.active, &block, direction, layout);
                     self.open_terminal(self.active, "session.new_split", payload, &session, Some(&block));
                 }
             }
@@ -2297,13 +1429,6 @@ impl Workspace {
                 ),
             },
             Intent::Window(target, action) => self.tab_action(target, action, tx),
-            Intent::TabLayout(target) => self.toggle_tab_layout(target),
-            Intent::CycleColumnWidth => self.cycle_column_width(),
-            Intent::MaximizeColumn => self.maximize_column(),
-            Intent::CenterColumn => self.center_column(),
-            Intent::MoveColumn(direction) => self.move_column(direction),
-            Intent::ConsumePane(direction) => self.consume_pane(direction),
-            Intent::ExpelPane(direction) => self.expel_pane(direction),
             Intent::Zoom => {
                 if let Some(block) = self.focused_block() {
                     self.request("session.zoom_block", json!({"block_id":block}));
@@ -2370,7 +1495,6 @@ impl Workspace {
         self.settings.hosts[host].collapsed = false;
         self.active = host;
         self.drag = None;
-        self.column_drag = None;
         self.update_visibility();
         self.save();
         self.update_title(tx);
@@ -2414,7 +1538,6 @@ impl Workspace {
             host: self.active,
             session: model.selected.clone()?,
             block: block.into(),
-            window: model.window()?.window_id.clone()?,
             label: self.block_label(block),
             name: self.pane_name(block),
             tab: model
@@ -2556,43 +1679,6 @@ impl Workspace {
         }
     }
 
-    /// The `session.new_split` payload for a split of `block` in a tab. In a scrolling tab a
-    /// side-by-side split makes a new column: its anchor is the whole column holding `block`.
-    fn split_in_tab(
-        &self,
-        host: usize,
-        session: &str,
-        window: &str,
-        block: &str,
-        way: super::splits::SplitWay,
-        layout: Value,
-    ) -> Value {
-        let mut payload = self.split_payload(host, block, way, layout);
-        if payload["direction"] != "horizontal"
-            || self.tab_layout_for(host, session, window) != TabLayout::Scrolling
-        {
-            return payload;
-        }
-        let anchor = self.hosts[host]
-            .model
-            .views
-            .get(session)
-            .and_then(|view| {
-                view.windows
-                    .iter()
-                    .find(|candidate| candidate.window_id.as_deref() == Some(window))
-            })
-            .and_then(|window| {
-                self.strip_for(host, session, window)
-                    .column_anchor(block)
-                    .map(str::to_owned)
-            });
-        if let Some(anchor) = anchor {
-            payload["anchor_id"] = json!(anchor);
-        }
-        payload
-    }
-
     fn pane_action(&mut self, target: PaneTarget, action: PaneAction, tx: &mut Tx) {
         if !self.target_exists(&target) {
             self.close_panel(tx);
@@ -2612,14 +1698,7 @@ impl Workspace {
         match action {
             PaneAction::Split(direction) => {
                 let layout = self.new_terminal(target.host);
-                let payload = self.split_in_tab(
-                    target.host,
-                    &target.session,
-                    &target.window,
-                    &target.block,
-                    direction,
-                    layout,
-                );
+                let payload = self.split_payload(target.host, &target.block, direction, layout);
                 self.open_terminal(
                     target.host,
                     "session.new_split",

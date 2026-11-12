@@ -40,10 +40,10 @@ use super::{
 use clap::Parser;
 use rex_linux::{
     connection::{HostCommand, HostConnection, Options},
-    settings::{FocusCentering, Host, SessionList, Settings, TabLayout, TerminalThemeChoice},
+    settings::{Host, SessionList, Settings, TerminalThemeChoice},
     terminal_theme::ThemeDirs,
 };
-use rune::{AppSpec, Env, GesturePhase, Key, KeyEvent, Mods, Runtime, WheelEvent};
+use rune::{AppSpec, Env, Key, KeyEvent, Mods, Runtime};
 
 fn workspace() -> Workspace {
     workspace_hosts(1)
@@ -469,7 +469,6 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
         host: 1,
         session: "b".into(),
         block: "block:1".into(),
-        window: "w".into(),
         label: "shell".into(),
         name: "shell".into(),
         tab: "Shell".into(),
@@ -509,8 +508,7 @@ fn tabs_and_splits_start_the_right_hosts_shell() {
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
-/// Host 0 connected on session "s" with a one-pane tab "single", a split tab "split" and a
-/// three-column tab "strip".
+/// Host 0 connected on session "s" with a one-pane tab "single" and a split tab "split".
 fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     let mut ws = workspace();
     let rx = capture_host(&mut ws, 0);
@@ -518,7 +516,7 @@ fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
     model.connected = true;
     model.sessions = vec![session("s")];
     model.selected = Some("s".into());
-    let mut windows = serde_json::json!([
+    let windows = serde_json::json!([
         {"window_id": "single", "label": "server", "focused_block_id": "block:a",
          "layers": [{"kind": "tiled", "layout": {"block_id": "block:a"},
             "blocks": [{"block_id": "block:a"}]}]},
@@ -527,22 +525,6 @@ fn tabbed_workspace(active: &str) -> (Workspace, flume::Receiver<HostCommand>) {
             "before": {"block_id": "block:b"}, "after": {"block_id": "block:c"}}},
             "blocks": [{"block_id": "block:b"}, {"block_id": "block:c"}]}]}
     ]);
-    // A wide nested tab for the scrolling view, present only in tests that select it, so
-    // tab-cycling tests see the two tabs above.
-    if active == "strip" {
-        windows.as_array_mut().unwrap().push(serde_json::json!(
-            {"window_id": "strip", "label": "wide", "focused_block_id": "block:f",
-             "layers": [{"kind": "tiled", "layout": {"split": {"split_id": "strip:root",
-                "direction": "horizontal", "ratio": 0.7,
-                "before": {"split": {"split_id": "strip:left", "direction": "horizontal", "ratio": 0.3,
-                    "before": {"block_id": "block:d"},
-                    "after": {"split": {"split_id": "column:eg", "direction": "vertical", "ratio": 0.5,
-                        "before": {"block_id": "block:e"}, "after": {"block_id": "block:g"}}}}},
-                "after": {"block_id": "block:f"}}},
-                "blocks": [{"block_id": "block:d"}, {"block_id": "block:e"},
-                    {"block_id": "block:g"}, {"block_id": "block:f"}]}]}
-        ));
-    }
     model.views.insert(
         "s".into(),
         serde_json::from_value(serde_json::json!({
@@ -779,642 +761,6 @@ fn split_pane_headers_show_their_own_status_word() {
 }
 
 #[test]
-fn a_scrolling_tab_uses_local_half_width_columns_and_pans_its_strip() {
-    let (mut ws, _rx) = tabbed_workspace("strip");
-    let mut tx = rune::Tx::default();
-    let strip = ws.window_target("strip".into()).unwrap();
-    ws.perform(Intent::TabLayout(strip), &mut tx);
-    assert_eq!(ws.tab_layout("strip"), TabLayout::Scrolling);
-    let saved = relaunch(&ws);
-    assert_eq!(
-        saved.settings.tab_layouts["unix:///nonexistent/rex-test.sock"]["s"].get("strip"),
-        Some(&TabLayout::Scrolling),
-        "the tab's choice is local and persistent"
-    );
-    let path = ws.settings_path.clone();
-    let mut rt = runtime(ws);
-    for _ in 0..90 {
-        rt.frame(1. / 60.);
-    }
-    let pane_x = |rt: &Runtime<Workspace>, block: &str| {
-        rt.elements()
-            .into_iter()
-            .find(|e| e.key.as_deref() == Some(block))
-            .unwrap()
-            .rect[0]
-    };
-    let before = pane_x(&rt, "pane:block:d");
-    assert!(before < 0., "focus on the last column reveals it: {before}");
-    let e = rt
-        .elements()
-        .into_iter()
-        .find(|e| e.key.as_deref() == Some("pane:block:e"))
-        .unwrap()
-        .rect;
-    assert!((490. ..=514.).contains(&e[2]), "half-width column: {e:?}");
-    rt.update(|s, tx| {
-        assert!(s.scroll_strip(-1.), "an overflowing strip scrolls");
-        tx.instant();
-    });
-    rt.frame(1. / 60.);
-    let after = pane_x(&rt, "pane:block:d");
-    assert!(
-        after > before + 400.,
-        "the strip pans left: {before} → {after}"
-    );
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn a_precise_scroll_snaps_to_the_nearest_column_edge_when_it_ends() {
-    let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    let path = ws.settings_path.clone();
-    let mut rt = runtime(ws);
-    for _ in 0..90 {
-        rt.frame(1. / 60.);
-    }
-    let pane_x = |rt: &Runtime<Workspace>| {
-        rt.elements()
-            .into_iter()
-            .find(|element| element.key.as_deref() == Some("pane:block:d"))
-            .unwrap()
-            .rect[0]
-    };
-    rt.wheel_event(
-        WheelEvent::new(260., 0.)
-            .at(500., 400.)
-            .phase(GesturePhase::Began)
-            .precise(true),
-    );
-    rt.frame(1. / 60.);
-    let between = pane_x(&rt);
-    assert!(
-        (-350. ..=-100.).contains(&between),
-        "gesture remains between columns: {between}"
-    );
-    rt.wheel_event(
-        WheelEvent::new(0., 0.)
-            .at(500., 400.)
-            .phase(GesturePhase::Ended)
-            .precise(true),
-    );
-    for _ in 0..90 {
-        rt.frame(1. / 60.);
-    }
-    assert!(pane_x(&rt) > 0., "gesture end snapped to the first edge");
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn a_vertical_precise_gesture_never_snaps_a_scrolling_strip() {
-    let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    let path = ws.settings_path.clone();
-    let mut rt = runtime(ws);
-    for _ in 0..90 {
-        rt.frame(1. / 60.);
-    }
-    let pane_x = |rt: &Runtime<Workspace>| {
-        rt.elements()
-            .into_iter()
-            .find(|element| element.key.as_deref() == Some("pane:block:d"))
-            .unwrap()
-            .rect[0]
-    };
-    rt.wheel_event(WheelEvent::new(180., 0.).at(500., 400.));
-    for _ in 0..30 {
-        rt.frame(1. / 60.);
-    }
-    rt.wheel_event(
-        WheelEvent::new(0., 40.)
-            .at(500., 400.)
-            .phase(GesturePhase::Began)
-            .precise(true),
-    );
-    for _ in 0..30 {
-        rt.frame(1. / 60.);
-    }
-    let before_end = pane_x(&rt);
-    rt.wheel_event(
-        WheelEvent::new(0., 0.)
-            .at(500., 400.)
-            .phase(GesturePhase::Ended)
-            .precise(true),
-    );
-    for _ in 0..30 {
-        rt.frame(1. / 60.);
-    }
-    let after = pane_x(&rt);
-    assert!(
-        (after - before_end).abs() < 1.,
-        "vertical scroll end does not snap the strip: {before_end} → {after}"
-    );
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn focus_centering_policies_match_niri_overflow_rules() {
-    let focused_x = |policy, wide: bool| {
-        let (mut ws, _rx) = tabbed_workspace("strip");
-        if wide {
-            let columns = ws
-                .settings
-                .column_widths
-                .entry("unix:///nonexistent/rex-test.sock".into())
-                .or_default()
-                .entry("s".into())
-                .or_default()
-                .entry("strip".into())
-                .or_default();
-            columns.insert("column:eg".into(), 2. / 3.);
-            columns.insert("block:f".into(), 2. / 3.);
-        }
-        ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-        ws.scroll_strip(-9.);
-        ws.hosts[0]
-            .model
-            .views
-            .get_mut("s")
-            .unwrap()
-            .windows
-            .iter_mut()
-            .find(|window| window.window_id.as_deref() == Some("strip"))
-            .unwrap()
-            .focused_block_id = Some("block:e".into());
-        ws.settings.focus_centering = policy;
-        ws.reveal_focus();
-        let current = ws.model().window().unwrap();
-        let x = ws
-            .arrange(current, None)
-            .0
-            .into_iter()
-            .find(|placement| placement.block == "block:e")
-            .unwrap()
-            .rect[0];
-        std::fs::remove_file(&ws.settings_path).ok();
-        x
-    };
-    assert!((focused_x(FocusCentering::Never, false) - 0.5).abs() < 1e-9);
-    assert!((focused_x(FocusCentering::OnOverflow, false) - 0.5).abs() < 1e-9);
-    assert!((focused_x(FocusCentering::Always, false) - 0.25).abs() < 1e-9);
-    assert!(
-        (focused_x(FocusCentering::OnOverflow, true) - 1. / 6.).abs() < 1e-9,
-        "columns that cannot fit together center the new focus"
-    );
-}
-
-#[test]
-fn server_topology_changes_prune_only_stale_column_state() {
-    let (mut ws, _rx) = tabbed_workspace("strip");
-    let endpoint = "unix:///nonexistent/rex-test.sock";
-    ws.settings.column_widths = serde_json::from_value(serde_json::json!({
-        (endpoint): {
-            "s": {
-                "strip": {"block:d": 0.4, "column:eg": 0.6, "gone": 0.8},
-                "gone-window": {"gone": 0.3}
-            },
-            "gone-session": {"gone-window": {"gone": 0.7}}
-        }
-    }))
-    .unwrap();
-    assert!(ws.reconcile_column_state(0));
-    let widths = &ws.settings.column_widths[endpoint]["s"]["strip"];
-    assert_eq!(widths.len(), 2);
-    assert_eq!(widths["block:d"], 0.4);
-    assert_eq!(widths["column:eg"], 0.6);
-    assert!(!ws.settings.column_widths[endpoint]["s"].contains_key("gone-window"));
-    assert!(!ws.settings.column_widths[endpoint].contains_key("gone-session"));
-
-    ws.settings
-        .column_widths
-        .get_mut(endpoint)
-        .unwrap()
-        .get_mut("s")
-        .unwrap()
-        .get_mut("strip")
-        .unwrap()
-        .insert("offline".into(), 0.9);
-    ws.hosts[0].model.connected = false;
-    assert!(!ws.reconcile_column_state(0));
-    assert!(
-        ws.settings.column_widths[endpoint]["s"]["strip"].contains_key("offline"),
-        "a disconnected host is not authoritative"
-    );
-    std::fs::remove_file(&ws.settings_path).ok();
-}
-
-#[test]
-fn moving_single_pane_columns_uses_swap_and_keeps_block_widths() {
-    let (mut ws, rx) = tabbed_workspace("split");
-    ws.toggle_tab_layout(ws.window_target("split".into()).unwrap());
-    let columns = ws
-        .settings
-        .column_widths
-        .entry("unix:///nonexistent/rex-test.sock".into())
-        .or_default()
-        .entry("s".into())
-        .or_default()
-        .entry("split".into())
-        .or_default();
-    columns.insert("block:b".into(), 0.3);
-    columns.insert("block:c".into(), 0.7);
-    let path = ws.settings_path.clone();
-    let mut rt = runtime(ws);
-    rt.key(KeyEvent {
-        key: Key::Right,
-        mods: Mods {
-            ctrl: true,
-            alt: true,
-            shift: true,
-            ..Mods::default()
-        },
-    });
-    for _ in 0..3 {
-        rt.frame(1. / 60.);
-    }
-    let sent = requests(&rx);
-    assert_eq!(sent[0].0, "session.swap_blocks");
-    assert_eq!(sent[0].2["block_id"], "block:b");
-    assert_eq!(sent[0].2["other_block_id"], "block:c");
-    assert_eq!(sent[1].0, "session.focus_block");
-    assert_eq!(sent[1].2["block_id"], "block:b");
-    let widths =
-        &rt.state.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["split"];
-    assert_eq!((widths["block:b"], widths["block:c"]), (0.3, 0.7));
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn consuming_and_expelling_panes_preserve_the_resulting_column_widths() {
-    let endpoint = "unix:///nonexistent/rex-test.sock";
-
-    let (mut ws, rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    let widths = ws
-        .settings
-        .column_widths
-        .entry(endpoint.into())
-        .or_default()
-        .entry("s".into())
-        .or_default()
-        .entry("strip".into())
-        .or_default();
-    widths.insert("column:eg".into(), 0.3);
-    widths.insert("block:f".into(), 0.7);
-    ws.consume_pane(-1);
-    let sent = requests(&rx);
-    assert_eq!(sent[0].0, "session.move_block");
-    assert_eq!(sent[0].2["block_id"], "block:f");
-    assert_eq!(sent[0].2["anchor_block_id"], "block:e");
-    assert_eq!(sent[0].2["direction"], "vertical");
-    let window = ws.hosts[0]
-        .model
-        .views
-        .get_mut("s")
-        .unwrap()
-        .windows
-        .iter_mut()
-        .find(|window| window.window_id.as_deref() == Some("strip"))
-        .unwrap();
-    window.layers[0].layout = Some(
-        serde_json::from_value(serde_json::json!({"split":{
-            "split_id":"strip:root","direction":"horizontal","ratio":0.5,
-            "before":{"block_id":"block:d"},
-            "after":{"split":{"split_id":"column:eg","direction":"vertical","ratio":0.5,
-                "before":{"split":{"split_id":"column:ef","direction":"vertical","ratio":0.5,
-                    "before":{"block_id":"block:e"},"after":{"block_id":"block:f"}}},
-                "after":{"block_id":"block:g"}}}
-        }}))
-        .unwrap(),
-    );
-    window.focused_block_id = Some("block:f".into());
-    assert!(ws.apply_pending_column_change(0));
-    ws.reconcile_column_state(0);
-    let widths = &ws.settings.column_widths[endpoint]["s"]["strip"];
-    assert_eq!(widths["column:eg"], 0.3);
-    assert!(!widths.contains_key("block:f"));
-    assert_eq!(ws.active_column_width(), Some(0.3));
-    std::fs::remove_file(&ws.settings_path).ok();
-
-    let (mut ws, rx) = tabbed_workspace("strip");
-    ws.hosts[0]
-        .model
-        .views
-        .get_mut("s")
-        .unwrap()
-        .windows
-        .iter_mut()
-        .find(|window| window.window_id.as_deref() == Some("strip"))
-        .unwrap()
-        .focused_block_id = Some("block:e".into());
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    ws.settings
-        .column_widths
-        .entry(endpoint.into())
-        .or_default()
-        .entry("s".into())
-        .or_default()
-        .entry("strip".into())
-        .or_default()
-        .insert("column:eg".into(), 0.6);
-    ws.expel_pane(1);
-    let sent = requests(&rx);
-    assert_eq!(sent[0].0, "session.move_block");
-    assert_eq!(sent[0].2["block_id"], "block:e");
-    assert_eq!(sent[0].2["anchor_block_id"], "block:g");
-    assert_eq!(sent[0].2["direction"], "horizontal");
-    assert_eq!(sent[0].2["side"], "after");
-    let window = ws.hosts[0]
-        .model
-        .views
-        .get_mut("s")
-        .unwrap()
-        .windows
-        .iter_mut()
-        .find(|window| window.window_id.as_deref() == Some("strip"))
-        .unwrap();
-    window.layers[0].layout = Some(
-        serde_json::from_value(serde_json::json!({"split":{
-            "split_id":"strip:root","direction":"horizontal","ratio":0.5,
-            "before":{"block_id":"block:d"},
-            "after":{"split":{"split_id":"strip:rest","direction":"horizontal","ratio":0.5,
-                "before":{"block_id":"block:g"},
-                "after":{"split":{"split_id":"strip:right","direction":"horizontal","ratio":0.5,
-                    "before":{"block_id":"block:e"},"after":{"block_id":"block:f"}}}}
-        }}}))
-        .unwrap(),
-    );
-    window.focused_block_id = Some("block:e".into());
-    assert!(ws.apply_pending_column_change(0));
-    ws.reconcile_column_state(0);
-    let widths = &ws.settings.column_widths[endpoint]["s"]["strip"];
-    assert_eq!((widths["block:g"], widths["block:e"]), (0.6, 0.6));
-    assert!(!widths.contains_key("column:eg"));
-    assert_eq!(ws.active_column_width(), Some(0.6));
-    std::fs::remove_file(&ws.settings_path).ok();
-}
-
-#[test]
-fn a_failed_column_move_discards_its_width_migration() {
-    let (mut ws, rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    ws.consume_pane(-1);
-    let reply = rx
-        .try_iter()
-        .find_map(|c| match c {
-            HostCommand::RequestTracked { reply, .. } => Some(reply),
-            _ => None,
-        })
-        .expect("a tracked column move");
-    let path = ws.settings_path.clone();
-    let mut rt = runtime(ws);
-    reply.send(Err("rejected".into())).unwrap();
-    rt.update(|s, _| {
-        let window = s.hosts[0]
-            .model
-            .views
-            .get_mut("s")
-            .unwrap()
-            .windows
-            .iter_mut()
-            .find(|window| window.window_id.as_deref() == Some("strip"))
-            .unwrap();
-        window.layers[0].layout = Some(
-            serde_json::from_value(serde_json::json!({"split":{
-                "split_id":"strip:root","direction":"horizontal","ratio":0.5,
-                "before":{"block_id":"block:d"},
-                "after":{"split":{"split_id":"column:eg","direction":"vertical","ratio":0.5,
-                    "before":{"split":{"split_id":"column:ef","direction":"vertical","ratio":0.5,
-                        "before":{"block_id":"block:e"},"after":{"block_id":"block:f"}}},
-                    "after":{"block_id":"block:g"}}}
-            }}))
-            .unwrap(),
-        );
-        assert!(
-            !s.apply_pending_column_change(0),
-            "a rejected request cannot migrate widths after a later topology change"
-        );
-    });
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn a_lone_scrolling_column_keeps_its_saved_width_and_has_no_size_controls() {
-    let endpoint = "unix:///nonexistent/rex-test.sock";
-    let (mut ws, _rx) = tabbed_workspace("single");
-    ws.toggle_tab_layout(ws.window_target("single".into()).unwrap());
-    ws.settings
-        .column_widths
-        .entry(endpoint.into())
-        .or_default()
-        .entry("s".into())
-        .or_default()
-        .entry("single".into())
-        .or_default()
-        .insert("block:a".into(), 1. / 3.);
-    assert_eq!(ws.active_column_width(), None);
-    ws.cycle_column_width();
-    ws.maximize_column();
-    assert_eq!(
-        ws.settings.column_widths[endpoint]["s"]["single"]["block:a"],
-        1. / 3.
-    );
-    let window = ws.model().window().unwrap().clone();
-    assert!(
-        ws.arrange(&window, None).2.is_empty(),
-        "a lone column has no boundaries"
-    );
-    ws.hosts[0]
-        .model
-        .views
-        .get_mut("s")
-        .unwrap()
-        .windows
-        .iter_mut()
-        .find(|window| window.window_id.as_deref() == Some("single"))
-        .unwrap()
-        .zoomed_block_id = Some("block:a".into());
-    let window = ws.model().window().unwrap().clone();
-    assert!(
-        ws.arrange(&window, None).2.is_empty(),
-        "zoom never exposes underlying column boundaries"
-    );
-    std::fs::remove_file(&ws.settings_path).ok();
-}
-
-#[test]
-fn scrolling_column_actions_persist_resize_center_and_anchor_new_columns() {
-    let (mut ws, rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    ws.cycle_column_width();
-    let widths = &ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"];
-    assert!((widths["block:f"] - 2. / 3.).abs() < 1e-9);
-    assert_eq!(
-        relaunch(&ws).settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:f"],
-        2. / 3.,
-        "column widths persist locally"
-    );
-    ws.maximize_column();
-    assert_eq!(
-        ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:f"],
-        1.
-    );
-    ws.maximize_column();
-    assert_eq!(
-        ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:f"],
-        2. / 3.,
-        "maximize restores the previous width"
-    );
-
-    let view = ws.hosts[0].model.views.get_mut("s").unwrap();
-    view.windows
-        .iter_mut()
-        .find(|window| window.window_id.as_deref() == Some("strip"))
-        .unwrap()
-        .focused_block_id = Some("block:e".into());
-    ws.center_column();
-    let current = ws.model().window().unwrap();
-    let e = ws
-        .arrange(current, None)
-        .0
-        .into_iter()
-        .find(|placement| placement.block == "block:e")
-        .unwrap();
-    assert!((e.rect[0] - 0.25).abs() < 1e-9, "centered: {:?}", e.rect);
-
-    let widths = &ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"];
-    let right = widths.get("column:eg").copied();
-    ws.begin_column_drag("block:d".into(), "column:eg".into());
-    ws.update_column_drag(0.2);
-    ws.finish_column_drag(false);
-    let widths = &ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"];
-    assert!((widths["block:d"] - 0.7).abs() < 1e-9);
-    assert_eq!(
-        widths.get("column:eg").copied(),
-        right,
-        "only the column left of the boundary resizes"
-    );
-    ws.begin_column_drag("block:d".into(), "column:eg".into());
-    ws.update_column_drag(5.);
-    ws.finish_column_drag(false);
-    assert_eq!(
-        ws.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:d"], 1.,
-        "a drag stops at one window"
-    );
-
-    let mut tx = rune::Tx::default();
-    ws.perform(Intent::Split(super::splits::SplitWay::Right), &mut tx);
-    let sent = requests(&rx);
-    assert_eq!(sent[0].0, "session.new_split");
-    assert_eq!(sent[0].2["anchor_id"], "column:eg");
-    assert_eq!(
-        sent[0].2["cwd_from"], "block:e",
-        "the directory comes from the focused pane, not the column it splits"
-    );
-    assert_eq!(sent[0].2["side"], "after");
-    std::fs::remove_file(&ws.settings_path).ok();
-}
-
-#[test]
-fn scrolling_column_shortcuts_and_controls_act_on_the_focused_column() {
-    let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    let path = ws.settings_path.clone();
-    let mut rt = runtime(ws);
-    ctrl_shift(&mut rt, 's');
-    assert_eq!(
-        rt.state.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:f"],
-        2. / 3.
-    );
-    ctrl_shift(&mut rt, 'm');
-    assert_eq!(
-        rt.state.settings.column_widths["unix:///nonexistent/rex-test.sock"]["s"]["strip"]["block:f"],
-        1.
-    );
-    rt.update(|s, _| s.picker(false));
-    let entries = rt.state.entries();
-    assert!(
-        entries
-            .iter()
-            .find(|entry| entry.label == "Consume pane into left column")
-            .is_some_and(|entry| entry.enabled)
-    );
-    assert!(
-        entries
-            .iter()
-            .find(|entry| entry.label == "Move column left")
-            .is_some_and(|entry| !entry.enabled),
-        "a multi-pane neighbour cannot be swapped as one column"
-    );
-    assert!(
-        entries
-            .iter()
-            .find(|entry| entry.label == "Expel pane to new column right")
-            .is_some_and(|entry| !entry.enabled)
-    );
-    let detail = |label: &str| {
-        entries
-            .iter()
-            .find(|entry| entry.label == label)
-            .map(|entry| entry.detail.clone())
-    };
-    // Column shortcuts are keymap actions, so Commands shows their effective keys.
-    assert_eq!(
-        detail("Cycle column width").as_deref(),
-        Some("Ctrl Shift S")
-    );
-    assert_eq!(
-        detail("Restore column width").as_deref(),
-        Some("Ctrl Shift M")
-    );
-    assert_eq!(
-        detail("Move column left").as_deref(),
-        Some("Ctrl Alt Shift Left")
-    );
-    assert_eq!(
-        detail("Move column right").as_deref(),
-        Some("Ctrl Alt Shift Right")
-    );
-    let labels: Vec<String> = entries.into_iter().map(|entry| entry.label).collect();
-    assert!(labels.contains(&"Cycle column width".into()));
-    assert!(labels.contains(&"Restore column width".into()));
-    assert!(labels.contains(&"Center column".into()));
-    assert!(labels.contains(&"Move column left".into()));
-    assert!(labels.contains(&"Consume pane into left column".into()));
-    assert!(labels.contains(&"Expel pane to new column right".into()));
-    press(&mut rt, Key::Escape);
-    secondary_click(&mut rt, "tab:strip");
-    let labels: Vec<String> = rt
-        .state
-        .entries()
-        .into_iter()
-        .map(|entry| entry.label)
-        .collect();
-    assert!(labels.contains(&"Cycle column width".into()));
-    assert!(labels.contains(&"Restore column width".into()));
-    assert!(labels.contains(&"Center column".into()));
-    std::fs::remove_file(path).ok();
-}
-
-#[test]
-fn changing_the_default_layout_keeps_only_real_tab_overrides() {
-    let (mut ws, _rx) = tabbed_workspace("strip");
-    ws.toggle_tab_layout(ws.window_target("strip".into()).unwrap());
-    assert_eq!(
-        ws.settings.tab_layouts["unix:///nonexistent/rex-test.sock"]["s"].get("strip"),
-        Some(&TabLayout::Scrolling)
-    );
-    ws.set_tab_layout(TabLayout::Scrolling);
-    assert!(
-        ws.settings.tab_layouts.is_empty(),
-        "an override equal to the new default is redundant"
-    );
-    assert_eq!(relaunch(&ws).settings.tab_layout, TabLayout::Scrolling);
-    std::fs::remove_file(&ws.settings_path).ok();
-}
-
-#[test]
 fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     let (ws, rx) = tabbed_workspace("single");
     let mut rt = runtime(ws);
@@ -1426,7 +772,6 @@ fn a_tabs_menu_and_middle_click_act_on_that_tab() {
     assert_eq!(panel.title, "dev");
     let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
     assert_eq!(labels.first().map(String::as_str), Some("Rename tab…"));
-    assert!(labels.iter().any(|l| l == "Use scrolling layout"));
     assert_eq!(labels.last().map(String::as_str), Some("Close tab…"));
     assert!(has(&rt, "menu-surface"));
     press(&mut rt, Key::Escape);
@@ -1545,14 +890,6 @@ fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_jso
     rx.try_iter()
         .filter_map(|c| match c {
             HostCommand::Request { method, payload } => {
-                Some((method, payload["session_id"].as_str()?.to_owned(), payload))
-            }
-            HostCommand::RequestTracked {
-                method,
-                payload,
-                reply,
-            } => {
-                let _ = reply.send(Ok(()));
                 Some((method, payload["session_id"].as_str()?.to_owned(), payload))
             }
             HostCommand::NewTerminal {
@@ -4573,8 +3910,7 @@ fn a_sidebar_tabs_menu_rename_and_middle_click_act_on_its_own_session() {
     };
     sent(&rx);
 
-    // Outside the selected session the menu leaves out the column actions, which would act
-    // on the selected session.
+    // Outside the selected session the menu acts on that tab's own session.
     secondary_click(&mut rt, tab);
     let panel = rt.state.panel.as_ref().expect("a tab menu");
     assert!(matches!(&panel.kind, PanelKind::Window));
@@ -4585,8 +3921,6 @@ fn a_sidebar_tabs_menu_rename_and_middle_click_act_on_its_own_session() {
     );
     let labels: Vec<String> = rt.state.entries().into_iter().map(|e| e.label).collect();
     assert_eq!(labels.first().map(String::as_str), Some("Rename tab…"));
-    assert!(labels.iter().any(|l| l == "Use scrolling layout"));
-    assert!(!labels.iter().any(|l| l.contains("column")), "{labels:?}");
     assert!(has(&rt, "tab-target:other-second"));
 
     // Rename tab… names its own session, not the selected one.

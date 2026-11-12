@@ -102,25 +102,6 @@ pub enum PaneHeader {
     Auto,
 }
 
-/// How a tab arranges its panes: tiled to the window, or as columns that scroll sideways.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TabLayout {
-    #[default]
-    Tiled,
-    Scrolling,
-}
-
-/// When focus movement centers a column in a scrolling tab.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FocusCentering {
-    #[default]
-    Never,
-    OnOverflow,
-    Always,
-}
-
 /// How the Activity view groups its rows: by urgency, or by session.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -148,9 +129,6 @@ pub enum SessionList {
     ByHost,
     Flat,
 }
-
-/// Client-local column widths, keyed by host endpoint, session, window and column.
-pub type ColumnWidths = HashMap<String, HashMap<String, HashMap<String, HashMap<String, f64>>>>;
 
 /// Where one program state shows: a word (or progress bar) in tabs, a desktop notification,
 /// the unread count, and a sound with the notification.
@@ -548,18 +526,9 @@ pub struct Settings {
     /// client's last declaration per block across launches, so Follow server then resets
     /// eligible blocks to Rex's colours. Never cleared automatically.
     pub terminal_theme_declared: bool,
-    /// The layout of tabs without their own choice.
-    pub tab_layout: TabLayout,
-    pub focus_centering: FocusCentering,
     pub activity_grouping: ActivityGrouping,
     /// The Activity view lists agents that have records but are all idle.
     pub activity_show_idle: bool,
-    /// Tabs given their own layout, by host endpoint, session ID and Rex window ID.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub tab_layouts: HashMap<String, HashMap<String, HashMap<String, TabLayout>>>,
-    /// Widths changed from the half-window default, by host, session, window and column ID.
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub column_widths: ColumnWidths,
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
@@ -605,12 +574,8 @@ impl Default for Settings {
             terminal_theme: TerminalThemeChoice::default(),
             terminal_theme_chosen: false,
             terminal_theme_declared: false,
-            tab_layout: TabLayout::default(),
-            focus_centering: FocusCentering::default(),
             activity_grouping: ActivityGrouping::default(),
             activity_show_idle: false,
-            tab_layouts: HashMap::new(),
-            column_widths: HashMap::new(),
             muted_tabs: Vec::new(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }
@@ -665,18 +630,6 @@ impl Settings {
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
-        for sessions in settings.column_widths.values_mut() {
-            for windows in sessions.values_mut() {
-                for columns in windows.values_mut() {
-                    for width in columns.values_mut() {
-                        *width = width.clamp(
-                            crate::layout::MIN_COLUMN_WIDTH,
-                            crate::layout::MAX_COLUMN_WIDTH,
-                        );
-                    }
-                }
-            }
-        }
         // Import before the first save loses nivox's unknown keybindings field.
         let imported = shortcuts::import_nivox(&value, &shortcuts::Shortcuts::path(path));
         settings.shortcut_file = shortcuts::Shortcuts::load(path);
@@ -930,46 +883,15 @@ mod tests {
         );
         assert_eq!(old.notice_position, NoticePosition::TopRight);
         assert_eq!(old.notifications, NotificationsConfig::default());
-        assert_eq!(old.tab_layout, TabLayout::Tiled);
-        assert_eq!(old.focus_centering, FocusCentering::Never);
-        assert!(old.tab_layouts.is_empty());
-        assert!(old.column_widths.is_empty());
         let partial: Settings =
             serde_json::from_str(r#"{"notifications":{"done":false}}"#).unwrap();
         assert!(!partial.notifications.done.desktop && partial.notifications.blocked.desktop);
         let mut s = old;
         s.notice_position = NoticePosition::BottomRight;
-        s.tab_layout = TabLayout::Scrolling;
-        s.focus_centering = FocusCentering::OnOverflow;
-        s.tab_layouts
-            .entry("unix:///run/rex.sock".into())
-            .or_default()
-            .entry("session:a".into())
-            .or_default()
-            .insert("window:a".into(), TabLayout::Tiled);
-        s.column_widths
-            .entry("unix:///run/rex.sock".into())
-            .or_default()
-            .entry("session:a".into())
-            .or_default()
-            .entry("window:a".into())
-            .or_default()
-            .insert("split:a".into(), 2. / 3.);
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["notice_position"], "bottom_right");
-        assert_eq!(json["tab_layout"], "scrolling");
-        assert_eq!(json["focus_centering"], "on_overflow");
         let back: Settings = serde_json::from_value(json).unwrap();
         assert_eq!(back.notice_position, NoticePosition::BottomRight);
-        assert_eq!(back.focus_centering, FocusCentering::OnOverflow);
-        assert_eq!(
-            back.tab_layouts["unix:///run/rex.sock"]["session:a"]["window:a"],
-            TabLayout::Tiled
-        );
-        assert_eq!(
-            back.column_widths["unix:///run/rex.sock"]["session:a"]["window:a"]["split:a"],
-            2. / 3.
-        );
     }
 
     #[test]
@@ -1036,27 +958,6 @@ mod tests {
         assert_eq!(json["done"]["sound"], true);
         let back: NotificationsConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back, table);
-    }
-
-    #[test]
-    fn loaded_column_widths_are_held_to_supported_bounds() {
-        let path = std::env::temp_dir().join(format!(
-            "rex-linux-settings-columns-{}.json",
-            std::process::id()
-        ));
-        std::fs::write(
-            &path,
-            r#"{
-                "hosts":[{"label":"a","endpoint":"unix:///run/rex.sock"}],
-                "column_widths":{"unix:///run/rex.sock":{"s":{"w":{"narrow":0.01,"wide":4.0}}}}
-            }"#,
-        )
-        .unwrap();
-        let settings = Settings::load(&path).unwrap();
-        let widths = &settings.column_widths["unix:///run/rex.sock"]["s"]["w"];
-        assert_eq!(widths["narrow"], crate::layout::MIN_COLUMN_WIDTH);
-        assert_eq!(widths["wide"], crate::layout::MAX_COLUMN_WIDTH);
-        std::fs::remove_file(path).ok();
     }
 
     #[test]

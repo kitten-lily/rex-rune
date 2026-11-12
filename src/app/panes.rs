@@ -2,9 +2,7 @@
 //! (label, activity, exception pill and the pane's buttons), drag handles in the gutters, and
 //! empty states. A tab with a single pane draws it edge to edge instead. Compact density
 //! removes card decorations and gaps from every placement. Where a header is, and whether it
-//! is a row or floats over the terminal, is `pane_header`'s to say. A
-//! scrolling tab's columns slide sideways under the wheel and to bring the focused pane into
-//! view.
+//! is a row or floats over the terminal, is `pane_header`'s to say.
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
     activity::{pane_activity, progress_bar, shown_progress, shown_word},
@@ -19,14 +17,11 @@ use super::{
 use rex_linux::{
     connection::Command,
     layout,
-    settings::{PaneDensity, PaneHeader, TabLayout},
+    settings::{PaneDensity, PaneHeader},
     terminal::selection::Phase as SelectionPhase,
 };
 use rexrs::api::session::Window;
-use rune::{
-    Cursor, El, GesturePhase, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, el, row,
-    text,
-};
+use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, el, row, text};
 
 /// The area cards are laid out in, in the pane area's own points.
 fn inner(s: &Workspace) -> [f32; 4] {
@@ -44,15 +39,16 @@ fn inner(s: &Workspace) -> [f32; 4] {
 
 /// A placement's card rect: its share of the inner area, inset by half a gutter wherever it
 /// meets another card.
-pub fn card_rect(s: &Workspace, placement: &layout::Placement) -> [f32; 4] {
+pub fn card_rect(s: &Workspace, rect: [f64; 4]) -> [f32; 4] {
     let [ix, iy, iw, ih] = inner(s);
-    let [x, y, w, h] = placement.rect;
+    let [x, y, w, h] = rect;
     let half = if s.settings.pane_density == PaneDensity::Compact {
         0.
     } else {
         GUTTER / 2.
     };
-    let [l, t, r, b] = placement.inner;
+    let (l, t) = (x > 1e-6, y > 1e-6);
+    let (r, b) = (x + w < 1. - 1e-6, y + h < 1. - 1e-6);
     let mut c = [
         ix + x as f32 * iw,
         iy + y as f32 * ih,
@@ -508,16 +504,6 @@ fn pane_card(
                     s.pane_menu(menu_block.clone(), Some((w.x, w.y)));
                 })
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
-                    // Sideways scrolling and only the end of the precise gesture that panned
-                    // the strip belong to the pane area, so it can pan and snap that strip.
-                    let horizontal = e.dx.abs() > e.dy.abs();
-                    let ended = e.precise && e.phase == GesturePhase::Ended;
-                    if e.precise && !ended && !horizontal {
-                        s.strip_gesture = false;
-                    }
-                    if horizontal || (ended && s.strip_gesture) {
-                        return false;
-                    }
                     let scale = if e.precise { s.ui_scale() } else { 1. };
                     let cell = term::metrics(s.settings.font_size).cell;
                     let Some(t) = s.terminals.get_mut(&k3) else {
@@ -747,47 +733,14 @@ pub fn area(s: &Workspace, px: f32) -> El {
     let focused = s.focused_block();
     let target = target_block(s);
     let preview = s.drag.as_ref().map(|d| (d.divider.key(), d.ratio));
-    let (panes, dividers, column_edges) =
-        s.arrange(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
+    let (panes, dividers) =
+        layout::placements(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
     let bleed = full_bleed(s, current);
-    let scrolls = current
-        .window_id
-        .as_deref()
-        .is_some_and(|id| s.tab_layout(id) == TabLayout::Scrolling);
-    if scrolls {
-        // Columns off either side are cut at the area's edges. Over a pane only sideways
-        // scrolling arrives here; over gutters and headers the plain wheel pans as well.
-        area = area
-            .clip_rounded(0.)
-            .on_wheel(|s: &mut Workspace, e: WheelEvent, tx: &mut Tx| {
-                let ended = e.precise && e.phase == GesturePhase::Ended;
-                let horizontal = e.dx.abs() >= e.dy.abs() && (e.dx != 0. || e.dy != 0.);
-                if e.precise && !ended && horizontal {
-                    s.strip_gesture = true;
-                }
-                let strip_gesture = ended && std::mem::take(&mut s.strip_gesture);
-                if ended && !strip_gesture {
-                    return false;
-                }
-                let delta = if horizontal { e.dx } else { e.dy };
-                let scale = if e.precise { s.ui_scale() } else { 1. };
-                let width = inner(s)[2] * scale;
-                let moved = width > 0. && s.scroll_strip(-f64::from(delta / width));
-                let snapped = strip_gesture && s.snap_strip();
-                if !moved && !snapped && !ended {
-                    return false;
-                }
-                if !ended {
-                    tx.instant();
-                }
-                true
-            });
-    }
     for placement in panes {
         let rect = if bleed {
             [0., 0., s.area[2], s.area[3]]
         } else {
-            card_rect(s, &placement)
+            card_rect(s, placement.rect)
         };
         let is_focus = focused.as_deref() == Some(placement.block.as_str());
         let state = if target.as_deref() == Some(placement.block.as_str())
@@ -811,45 +764,6 @@ pub fn area(s: &Workspace, px: f32) -> El {
         ));
     }
     let [ix, iy, iw, ih] = inner(s);
-    for edge in column_edges {
-        let before = edge.before.to_owned();
-        let after = edge.after.to_owned();
-        let dragging = s
-            .column_drag
-            .as_ref()
-            .is_some_and(|drag| drag.before == before && drag.after == after);
-        let key = format!("column-divider:{before}:{after}");
-        let drag_before = before.clone();
-        let drag_after = after.clone();
-        area = area.child(
-            divider_handle(
-                el().key(key)
-                    .absolute(ix + edge.x as f32 * iw - 5., iy)
-                    .w(10.)
-                    .h(ih),
-                true,
-                dragging,
-                s.settings.pane_density == PaneDensity::Compact,
-            )
-            .on_drag(move |s: &mut Workspace, g, tx| {
-                let same = s
-                    .column_drag
-                    .as_ref()
-                    .is_some_and(|drag| drag.before == drag_before && drag.after == drag_after);
-                if g.phase == Phase::Down || !same {
-                    s.begin_column_drag(drag_before.clone(), drag_after.clone());
-                }
-                let width = inner(s)[2] * s.ui_scale();
-                if width > 0. {
-                    s.update_column_drag(f64::from(g.dx / width));
-                }
-                tx.instant();
-                if g.phase == Phase::Up {
-                    s.finish_column_drag(g.cancelled());
-                }
-            }),
-        );
-    }
     for divider in dividers {
         let [x, y, w, h] = divider.rect;
         let horizontal = divider.horizontal;
