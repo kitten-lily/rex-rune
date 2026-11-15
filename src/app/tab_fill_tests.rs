@@ -2,7 +2,7 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
 use crate::app::panel::SettingsSection;
-use rex_linux::{
+use rex_rune::{
     connection::activity::TerminalProgress,
     download::{State, Transfer},
     settings::interface::ToolbarBehavior,
@@ -330,7 +330,7 @@ fn tab_fill_keeps_labels_status_progress_and_muted_marks() {
             model.programs.insert("block:a".into(), "vim".into());
             model.places.insert(
                 "block:a".into(),
-                rex_linux::connection::titles::Place {
+                rex_rune::connection::titles::Place {
                     cwd: Some("/home/u/rex".into()),
                     home: Some("/home/u".into()),
                     shell: Some(1),
@@ -510,4 +510,41 @@ fn tab_fill_draw() {
     settle(&mut rt);
     camera.snap(&mut rt, "tabs-settings");
     std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// Where the system frames the window (macOS), Rex draws no close button and no resize
+/// bands of its own, and the toolbar keeps its other controls inside the window.
+#[test]
+fn a_window_with_the_systems_frame_has_no_close_button_or_resize_bands_of_rexs() {
+    let _families = rune::text::with_families("Inter", "Inter");
+    let keys = |rt: &Runtime<Workspace>| -> Vec<String> {
+        rt.elements()
+            .into_iter()
+            .filter(|e| !e.exiting)
+            .filter_map(|e| e.key)
+            .collect()
+    };
+    let (ws, _host) = tabbed_workspace("split");
+    let mut rt = runtime_at(ws, (1024., 700.));
+    settle(&mut rt);
+    let own = keys(&rt);
+    assert!(own.iter().any(|k| k == "close-app"));
+    assert_eq!(own.iter().filter(|k| k.starts_with("resize:")).count(), 7);
+
+    rt.update(|s, _| s.own_frame = false);
+    settle(&mut rt);
+    let system = keys(&rt);
+    assert!(
+        !system
+            .iter()
+            .any(|k| k == "close-app" || k == "toolbar-divider")
+    );
+    assert!(!system.iter().any(|k| k.starts_with("resize:")));
+    let settings = rect(&rt, "settings");
+    assert!(
+        settings[0] + settings[2] <= 1024. - 8.,
+        "the last control keeps a margin from the window's edge: {settings:?}"
+    );
+    // The toolbar still moves the window.
+    assert!(system.iter().any(|k| k == "title-drag"));
 }

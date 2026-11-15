@@ -6,7 +6,7 @@ use super::{
     theme::*,
     workspace::Workspace,
 };
-use rex_linux::settings::NoticePosition;
+use rex_rune::settings::NoticePosition;
 use rune::{Cursor, El, Tx, col, el, row, text};
 use rune_kit::TextField;
 
@@ -238,6 +238,13 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
     let panel = s.panel.as_ref()?;
     let body = match &panel.kind {
         PanelKind::Form(f) => form(s, f),
+        PanelKind::Confirm {
+            method,
+            description,
+            ..
+        } if method == "server.stop" => {
+            confirm_with(&panel.title, description, "Cancel", "Stop server")
+        }
         PanelKind::Confirm { description, .. } => confirm(&panel.title, description),
         PanelKind::Settings => return Some(super::settings_view::settings(s, viewport)),
         PanelKind::RemoveHost(host) => {
@@ -245,7 +252,7 @@ pub fn dialog(s: &Workspace, viewport: [f32; 2]) -> Option<El> {
             confirm_with(
                 &panel.title,
                 &format!(
-                    "Rex Linux stops connecting to {label} and forgets it. Its sessions and programs keep running on that server, and you can add it again later."
+                    "Rex Rune stops connecting to {label} and forgets it. Its sessions and programs keep running on that server, and you can add it again later."
                 ),
                 "Keep host",
                 "Remove host",

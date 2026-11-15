@@ -1,6 +1,6 @@
 # README captures
 
-The README images show Rex Linux built from `origin/master` at
+The README images show Rex Rune built from `origin/master` at
 `9af5bf5d0a7cc1ba5c61e2d2784035a66e30e19b` (0.7.4). They are native X11
 captures with real fonts, not mock-ups or Rune's headless test-font renderer.
 
@@ -21,8 +21,8 @@ output are fixtures, not this repository's source or test results.
 Build a clean checkout of the source revision above, then run:
 
 ```sh
-cargo build --locked --release --bin rex-linux
-REX_BIN="$PWD/target/release/rex-linux" python3 scripts/readme-gallery.py
+cargo build --locked --release --bin rex-rune
+REX_BIN="$PWD/target/release/rex-rune" python3 scripts/readme-gallery.py
 oxipng -o 4 --strip all docs/screenshot.png docs/images/settings-*.png
 ```
 
@@ -42,7 +42,7 @@ autostart off. It does not use the personal environment inherited by
 
 ## Verification and hygiene
 
-- Built the current source with `cargo build --locked --offline --release --bin rex-linux`
+- Built the current source with `cargo build --locked --offline --release --bin rex-rune`
   in a disposable WTFM clone, with a temporary HOME and network disabled.
 - WTFM command records passed for format checking, release build, app help,
   Python compilation and the native capture script. This documentation-only
@@ -53,14 +53,23 @@ autostart off. It does not use the personal environment inherited by
 - Reviewed all four images and their OCR text: only fictional project/host
   labels, generic paths and the product's built-in preview text appear.
   No personal hosts, usernames, paths, IP addresses or credentials appear.
-- Ran WTFM scrub, PII and README link/style lint reports. Existing historical
-  docs and product references to coding tools are outside this screenshot
-  refresh; required contributor credits and bespoke prose are preserved.
-  No changelog, version stamps, security report or vendor files were rewritten.
+- Ran WTFM scrub, PII and README link/style lint reports. Checked every local
+  link, image and anchor across the 99 non-vendored Markdown files with GitHub
+  heading slugs, which preserve repeated hyphens: **0 broken**. An earlier check
+  reported 34, all false positives from collapsing hyphens in headings such as
+  `A. Settings > Shortcuts page`. Existing historical docs and product
+  references to coding tools are outside this screenshot refresh; required
+  contributor credits and bespoke prose are preserved. No changelog, version
+  stamps, security report or vendor files were rewritten.
 
 The existing `.wtfm.yaml` remains the command manifest. WTFM's capture planner
 supports `capture.web`, not desktop windows, and returns no pages for this
-project even with `--force`. Its browser capture/record phase is therefore
-skipped, not treated as a successful capture. This file and
-[`images/readme-captures.json`](images/readme-captures.json) record the native
-capture source, sizes and hashes instead.
+project even with `--force`. A `needed: false` result therefore says nothing
+about screenshot freshness and is not evidence for it. Its browser
+capture/record phase is skipped, not treated as a successful capture. The hero
+was inspected and its SHA-256 matches
+[`images/readme-captures.json`](images/readme-captures.json)
+(`b6e3e16f21b0f70c92a669bfc4802bbaef7c77f615a18b5be21cadf77d66165b`). It
+remains representative of the default chrome and layout, but it is a 0.7.4
+capture: it does not demonstrate 0.10 pane-header icons or later tab-icon
+settings.

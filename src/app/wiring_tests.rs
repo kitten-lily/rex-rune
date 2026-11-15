@@ -8,7 +8,7 @@ use crate::app::{
     panel::SettingsSection,
     settings_view::SHORTCUT_CATEGORIES,
 };
-use rex_linux::keymap::Overrides;
+use rex_rune::keymap::Overrides;
 use serde_json::{Value, json};
 
 /// Arguments for the actions that cannot run without them. An action that starts taking
@@ -32,7 +32,7 @@ fn chord(index: usize) -> String {
     const SECOND: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     format!(
         "ctrl+alt+shift+f{}>{}",
-        9 + index / SECOND.len(),
+        8 + index / SECOND.len(),
         SECOND[index % SECOND.len()] as char
     )
 }

@@ -23,6 +23,8 @@ pub struct Tx {
     pub(crate) input_time: Option<crate::time::Instant>,
     pub(crate) physical_key: Option<crate::PhysicalKeyCode>,
     pub(crate) key_base: Option<char>,
+    /// `Tx::alt_keys`.
+    pub(crate) alt_keys: crate::AltKeys,
     pub(crate) focused: Option<String>,
     pub(crate) instant: bool,
     pub(crate) motion: Option<Spring>,
@@ -62,6 +64,8 @@ pub struct Tx {
     pub(crate) toggle_maximized: bool,
     /// `Tx::toggle_full_screen`.
     pub(crate) toggle_full_screen: bool,
+    /// `Tx::set_option_alt`; the last wins.
+    pub(crate) option_as_alt: Option<crate::OptionAsAlt>,
     /// `Tx::show_window_menu`, in window points; the last wins.
     pub(crate) show_window_menu: Option<(f32, f32)>,
     /// `Tx::send_key`, in order.
@@ -294,6 +298,22 @@ impl Tx {
     /// Does nothing for overlays and headless runs.
     pub fn toggle_full_screen(&mut self) {
         self.toggle_full_screen = true;
+    }
+
+    /// Whether macOS's Option keys act as Alt in this window: the key arrives as the character
+    /// it types without Option (Shift kept), with `alt`, instead of the character Option
+    /// composes (∫ for B), and Option never starts a dead key. winit's `OptionAsAlt::Both` or
+    /// `None`. Lasts until the next call, but a focused text field gets Option's characters;
+    /// the window follows focus after every frame that runs input. Does nothing off macOS.
+    pub fn set_option_as_alt(&mut self, on: bool) {
+        self.set_option_alt(if on { crate::OptionAsAlt::Both } else { crate::OptionAsAlt::Neither });
+    }
+
+    /// [`Tx::set_option_as_alt`] for one Option key alone (winit's `OptionAsAlt::OnlyLeft` or
+    /// `OnlyRight`): a key typed with the other one composes, dead keys included. With both
+    /// held, the key is Alt. [`Tx::alt_keys`] says which were held with a key.
+    pub fn set_option_alt(&mut self, alt: crate::OptionAsAlt) {
+        self.option_as_alt = Some(alt);
     }
 
     /// Deliver `ev` once this handler is done, as if it were typed: to the focused field, then

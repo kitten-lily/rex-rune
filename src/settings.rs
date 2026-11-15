@@ -1,4 +1,5 @@
 pub mod interface;
+pub mod recent_paths;
 pub mod recorded;
 pub mod shortcuts;
 pub mod terminal;
@@ -558,6 +559,9 @@ pub struct Settings {
     /// Tabs muted from their menu, until unmuted or closed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub muted_tabs: Vec<MutedTab>,
+    /// Recently pasted paths on this computer, newest first per saved host endpoint.
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub recent_paths: HashMap<String, Vec<recent_paths::RecentPath>>,
     /// Shortcuts recorded in Settings → Shortcuts: a keymap layer above `shortcut_file`.
     #[serde(skip_serializing_if = "recorded::Recorded::is_empty")]
     pub recorded_shortcuts: recorded::Recorded,
@@ -611,6 +615,7 @@ impl Default for Settings {
             activity_show_idle: false,
             generated_titles: false,
             muted_tabs: Vec::new(),
+            recent_paths: HashMap::new(),
             recorded_shortcuts: recorded::Recorded::default(),
             shortcut_file: shortcuts::Shortcuts::default(),
         }
@@ -626,15 +631,8 @@ impl Settings {
             .unwrap_or_else(hostname)
     }
 
-    fn config_dir() -> PathBuf {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-            })
-    }
     pub fn path() -> PathBuf {
-        Self::config_dir().join("rex-linux/workspace.json")
+        crate::platform::dirs::config().join("workspace.json")
     }
     pub fn load_default() -> Result<(Self, PathBuf)> {
         let path = Self::path();
@@ -664,6 +662,7 @@ impl Settings {
         settings.font_size = settings.font_size.clamp(8., 48.);
         settings.pane_padding = settings.pane_padding.clamp(0., 32.);
         settings.interface.normalize();
+        settings.normalize_recent_paths();
         settings.sidebar_width = settings.sidebar_width.clamp(200., 360.);
         settings.ui_scale = normalize_ui_scale(settings.ui_scale);
         // Import before the first save loses nivox's unknown keybindings field.
@@ -695,7 +694,7 @@ pub fn hostname() -> String {
 fn hostname_label(name: &str) -> String {
     let name = name.trim();
     if name.is_empty() {
-        "Rex Linux".into()
+        "Rex Rune".into()
     } else {
         name.to_owned()
     }
@@ -854,8 +853,8 @@ mod tests {
             hostname_label(&gethostname::gethostname().to_string_lossy())
         );
         assert_eq!(hostname_label("  workstation\n"), "workstation");
-        assert_eq!(hostname_label(""), "Rex Linux");
-        assert_eq!(hostname_label(" \n "), "Rex Linux");
+        assert_eq!(hostname_label(""), "Rex Rune");
+        assert_eq!(hostname_label(" \n "), "Rex Rune");
     }
 
     #[test]

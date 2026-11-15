@@ -6,7 +6,7 @@ use crate::app::{
     keycaps::spell,
     theme::{MIDNIGHT, danger, ink, muted, rgb, selection, set_palette},
 };
-use rex_linux::keymap::Overrides;
+use rex_rune::keymap::Overrides;
 use rune::ElementInfo;
 use serde_json::json;
 
@@ -177,7 +177,8 @@ fn commands_keep_destructive_rows_last_and_a_filtered_list_is_flat() {
             "Close pane or tab…",
             "Close other panes…",
             "Close pane…",
-            "Remove host test-0…"
+            "Stop server…",
+            "Remove host test-0…",
         ]
     );
     // Under each heading the rows that end something come last, after a hairline, and no

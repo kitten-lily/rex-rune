@@ -6,7 +6,7 @@
 //!   typed, removes the binding being replaced. While it is open it has the keyboard and a
 //!   press anywhere else cancels it.
 //! - What is recorded goes to `Settings::recorded_shortcuts`, a keymap layer above the
-//!   user's `shortcuts.json` (`rex_linux::settings::recorded`), saved in the app's own
+//!   user's `shortcuts.json` (`rex_rune::settings::recorded`), saved in the app's own
 //!   settings file. `shortcuts.json` is never written. The layer is declared to every host
 //!   with `client.keymap` and resolved locally at once, so a new key works immediately.
 //! - The Configuration menu ([`menu_button`]) says how much is recorded, copies the path of
@@ -24,7 +24,7 @@ use super::{
     widgets::{Pill, glyph, pill},
     workspace::Workspace,
 };
-use rex_linux::{
+use rex_rune::{
     connection::HostCommand,
     keymap::{self, Chord, Key as BoundKey, RECORDED, Resolved},
     settings::{Settings, shortcuts::Shortcuts},
@@ -542,7 +542,7 @@ impl Workspace {
     pub(super) fn reset_shortcuts_words(&self) -> String {
         let count = self.settings.recorded_shortcuts.len();
         format!(
-            "The {} recorded in Settings {} forgotten. Every action goes back to its keys from shortcuts.json, the host's Rex configuration or the Linux defaults; shortcuts.json itself is not changed.",
+            "The {} recorded in Settings {} forgotten. Every action goes back to its keys from shortcuts.json, the host's Rex configuration or the built-in defaults; shortcuts.json itself is not changed.",
             if count == 1 {
                 "one change".to_owned()
             } else {
@@ -557,6 +557,7 @@ impl Workspace {
         self.local_keymap = local_keymap(&self.settings);
         self.keymap_generation += 1;
         self.bindings.sequence.clear();
+        self.revalidate_key_modes();
         // Disconnected workers retain the declaration for their next successful connect too.
         let declaration = self.keymap_declaration();
         for index in 0..self.hosts.len() {
@@ -623,7 +624,11 @@ pub fn key(s: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -> bool {
     recorder.refused = match chord_of(input) {
         None => Some("That key has no name a shortcut can use."),
         Some(chord) if recorder.chords.is_empty() && !starts(&chord) => {
-            Some("Start with Ctrl, Alt or Super, or use a function key.")
+            Some(if rex_rune::keymap::command_key() {
+                "Start with Cmd, Ctrl or Option, or use a function key."
+            } else {
+                "Start with Ctrl, Alt or Super, or use a function key."
+            })
         }
         Some(_) if recorder.chords.len() == LONGEST => {
             Some("Four keys at most. Backspace takes one back.")

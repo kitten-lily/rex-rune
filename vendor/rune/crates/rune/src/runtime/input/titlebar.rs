@@ -24,6 +24,8 @@ pub(super) struct Titlebar {
     pub(super) toggle_maximized: bool,
     /// `Tx::toggle_full_screen`, for the shell.
     pub(super) toggle_full_screen: bool,
+    /// The last `Tx::set_option_alt`, kept for every window the shell makes.
+    pub(super) option_as_alt: crate::OptionAsAlt,
     /// `Tx::show_window_menu`, for the shell: where, in window points.
     pub(super) menu_at: Option<(f32, f32)>,
     /// `Cx::set_titlebar` and `Cx::titlebar_height`, as the last view set them, and whether the
@@ -139,6 +141,20 @@ impl<S: 'static> Runtime<S> {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn take_toggle_full_screen(&mut self) -> bool {
         std::mem::take(&mut self.titlebar.toggle_full_screen)
+    }
+
+    /// What Option is in the window now: Alt where `Tx::set_option_as_alt` asked for it, except
+    /// while a text field has focus, which keeps Option's characters. The shell applies it after
+    /// every frame that runs input; headless tests read it.
+    #[doc(hidden)]
+    pub fn option_as_alt(&self) -> bool {
+        self.option_alt() != crate::OptionAsAlt::Neither
+    }
+
+    /// [`Runtime::option_as_alt`] by side: which Option keys are Alt in the window now.
+    #[doc(hidden)]
+    pub fn option_alt(&self) -> crate::OptionAsAlt {
+        if self.focused_input().is_some() { crate::OptionAsAlt::Neither } else { self.titlebar.option_as_alt }
     }
 
     /// Takes a `Tx::show_window_menu`, for the shell to carry out.

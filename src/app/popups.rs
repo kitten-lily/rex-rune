@@ -139,7 +139,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     }
     let target = panel.target.as_ref()?;
     let current = s.model().window()?;
-    let placement = rex_linux::layout::placements(current, None)
+    let placement = rex_rune::layout::placements(current, None)
         .0
         .into_iter()
         .find(|p| p.block == target.block)?;
@@ -148,7 +148,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     let ([x, y, w, h], radius) = if bleed {
         ([0., 0., aw, ah], 0.)
     } else {
-        let radius = if s.settings.pane_density == rex_linux::settings::PaneDensity::Compact {
+        let radius = if s.settings.pane_density == rex_rune::settings::PaneDensity::Compact {
             0.
         } else {
             CARD_RADIUS
@@ -207,14 +207,21 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     })
     .min(vw - 16.);
     let top = if sessions || pane {
-        TOOLBAR - 4.
+        super::toolbar_reveal::bar_height(s) - 4.
     } else if vh < 750. {
         60.
     } else {
         76.
     };
     let (ax, ay) = panel.anchor.unwrap_or((
-        if sessions {
+        if sessions && s.unified_title {
+            // Only a drawn title row has a session button to open under.
+            if super::toolbar_reveal::placement(s) == super::toolbar_reveal::Placement::None {
+                vw - width - MARGIN
+            } else {
+                s.title_session[0] + s.title_session[2] - width
+            }
+        } else if sessions {
             MARGIN + 38.
         } else if pane {
             vw - 450.
@@ -373,6 +380,7 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
                 Row {
                     key: format!("entry:{i}"),
                     surface: surface_id,
+                    program: entry.program,
                     label: &entry.label,
                     detail: &entry.detail,
                     keys: &entry.keys,

@@ -3069,12 +3069,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "rex-linux"
-version = "0.7.5"
+name = "rex-rune"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "arboard",
  "base64 0.22.1",
+ "block2 0.5.1",
  "clap",
  "flate2",
  "flume",
@@ -3084,6 +3085,9 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "objc2 0.5.3",
+ "objc2-foundation 0.2.2",
+ "objc2-user-notifications",
  "qrcode",
  "rexrs",
  "ring",

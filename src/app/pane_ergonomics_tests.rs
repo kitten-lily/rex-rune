@@ -2,7 +2,7 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
 use crate::app::{find, panel::SettingsSection, panes};
-use rex_linux::{
+use rex_rune::{
     connection::Command,
     settings::{PaneDensity, PaneHeader, typography::SpacingUnit},
 };
@@ -93,7 +93,7 @@ fn asymmetric_padding_keeps_layout_and_sizes_only_owned_panes() {
             ws.settings.pane_density = density;
             ws.settings.pane_header = PaneHeader::Always;
             if foreign_background {
-                ws.term_theme = Some(rex_linux::terminal_theme::TerminalTheme {
+                ws.term_theme = Some(rex_rune::terminal_theme::TerminalTheme {
                     background: Some(0x331122),
                     ..Default::default()
                 });
@@ -180,7 +180,7 @@ fn vertical_steps_resize_a_full_screen_terminal() {
         let mut model = t.connection.model.lock().unwrap();
         model.owner = true;
         model.frame = Some(std::sync::Arc::new(
-            rex_linux::terminal::Renderer::new()
+            rex_rune::terminal::Renderer::new()
                 .unwrap()
                 .frame(&terminal)
                 .unwrap(),
@@ -198,7 +198,8 @@ fn vertical_steps_resize_a_full_screen_terminal() {
         assert_eq!(rt.state.settings.padding(), (28., y as f32));
         assert_eq!(
             rect(&rt, "grid:block:a"),
-            [28., 52. + y as f32, 968., 648. - 2. * y as f32]
+            // Under the toolbar and the lone pane's header row.
+            [28., 52. + 30. + y as f32, 968., 648. - 30. - 2. * y as f32]
         );
         assert_eq!(rt.state.terminals[&key].rect, rect(&rt, "grid:block:a"));
     }
@@ -220,7 +221,7 @@ fn asymmetric_grid_mouse_wheel_cursor_links_selection_and_find_agree() {
     let mut rt = runtime(ws);
     settle(&mut rt);
     let grid = rect(&rt, "grid:block:a");
-    assert_eq!(grid, [24., 54., 976., 644.]);
+    assert_eq!(grid, [24., 84., 976., 614.], "under the lone pane's header");
     let cell = rt.state.metrics().cell;
     assert_eq!(cell.1, 26.);
     let key = rt.state.term_key("block:a");
@@ -373,7 +374,7 @@ fn compact_outline_overlays_foreign_background_without_changing_content() {
     let (mut ws, host) = tabbed_workspace("split");
     ws.settings.pane_density = PaneDensity::Compact;
     ws.settings.pane_header = PaneHeader::Hidden;
-    ws.term_theme = Some(rex_linux::terminal_theme::TerminalTheme {
+    ws.term_theme = Some(rex_rune::terminal_theme::TerminalTheme {
         background: Some(0x331122),
         ..Default::default()
     });
@@ -481,7 +482,7 @@ fn pane_ergonomics_draw() {
     settle(&mut rt);
     camera.snap(&mut rt, "panes-outline-compact");
     rt.update(|s, _| {
-        s.term_theme = Some(rex_linux::terminal_theme::TerminalTheme {
+        s.term_theme = Some(rex_rune::terminal_theme::TerminalTheme {
             background: Some(0x331122),
             ..Default::default()
         });

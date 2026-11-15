@@ -11,16 +11,19 @@ def refuse_local_themes(data: bytes, what: str) -> None:
     if MARKER in data:
         raise SystemExit(
             f"{what} contains local Dracula Pro themes and must not be packaged or published. "
-            "Rebuild with: REX_DRACULA_PRO=0 cargo build --locked --release --bin rex-linux"
+            "Rebuild with: REX_DRACULA_PRO=0 cargo build --locked --release --bin rex-rune"
         )
 
 
 def refuse_in_tarball(path: Path) -> None:
+    """Check every client binary in a release tarball: bin/rex-rune, and bin/rex-linux in
+    the bridge tarball the 0.7.x updater installs."""
     with tarfile.open(path) as archive:
-        members = [m for m in archive if m.isfile() and fnmatch(m.name, "*/bin/rex-linux")]
+        members = [
+            m for m in archive
+            if m.isfile() and (fnmatch(m.name, "*/bin/rex-rune") or fnmatch(m.name, "*/bin/rex-linux"))
+        ]
         if not members:
-            raise SystemExit(f"{path} has no */bin/rex-linux member to check for local Dracula Pro themes")
-        if len(members) > 1:
-            raise SystemExit(f"{path} has {len(members)} */bin/rex-linux members; extraction keeps only the last")
-        member = members[0]
-        refuse_local_themes(archive.extractfile(member).read(), f"{path}:{member.name}")
+            raise SystemExit(f"{path} has no */bin/rex-rune member to check for local Dracula Pro themes")
+        for member in members:
+            refuse_local_themes(archive.extractfile(member).read(), f"{path}:{member.name}")

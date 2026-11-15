@@ -11,7 +11,7 @@ use super::{
     widgets::{Pill, pill},
     workspace::{HostId, Workspace},
 };
-use rex_linux::download::{self, State, Transfer};
+use rex_rune::download::{self, State, Transfer};
 use rune::{El, KeyEvent, LiveRegion, Tx, col, el, row, text};
 use rune_kit::TextField;
 
@@ -370,7 +370,7 @@ pub fn popover(s: &Workspace, viewport: [f32; 2]) -> El {
             .role("dialog")
             .label("Downloads")
             .w(width)
-            .max_h(vh - TOOLBAR - 16.)
+            .max_h(vh - super::toolbar_reveal::bar_height(s) - 16.)
             .padding(5.)
             .gap(1.)
             .preserve_focus_on_press(true),
@@ -409,7 +409,7 @@ pub fn popover(s: &Workspace, viewport: [f32; 2]) -> El {
     };
     overlay()
         .modal_tx(true, |s: &mut Workspace, tx: &mut Tx| s.close_panel(tx))
-        .child(surface.absolute(x, TOOLBAR - 4.))
+        .child(surface.absolute(x, super::toolbar_reveal::bar_height(s) - 4.))
 }
 
 /// What the toolbar chip says while transfers are running.
@@ -425,22 +425,23 @@ pub struct ChipText {
 
 /// Window width below which the chip is `↓ 42%`, so the tab strip keeps room for the active
 /// tab. The full text stays in its tooltip and accessible name.
-const CHIP_FULL_WIDTH: f32 = 1000.;
+pub(super) const CHIP_FULL_WIDTH: f32 = 1000.;
 
 /// The chip's text, or `None` when nothing is being received. A transfer still waiting for
 /// Rex or for an answer to a question is not running yet: its dialog is the place for it.
 ///
 /// The tab strip gives way to every chip, so: the chip is short in a narrow window and while a
 /// key sequence is pending, and in a narrow window it steps aside for the pending-sequence chip
-/// (a moment's gap, and the strip keeps what little room it has). With the tabs in the sidebar
-/// nothing competes and the chip is always full.
+/// (a moment's gap, and the strip keeps what little room it has). Sidebar tabs leave room for
+/// the full label unless an active mode needs room on a narrow bar or beside a pending
+/// sequence. Width is measured in toolbar points, after interface zoom.
 pub fn chip_label(s: &Workspace) -> Option<ChipText> {
     let pending = s.bindings.sequence.depth > 0;
-    let narrow = s.viewport[0] < CHIP_FULL_WIDTH;
+    let narrow = s.viewport[0] / s.ui_scale() < CHIP_FULL_WIDTH;
     if !s.sidebar_tabs() && narrow && pending {
         return None;
     }
-    let compact = !s.sidebar_tabs() && (narrow || pending);
+    let compact = (!s.sidebar_tabs() || s.key_mode().is_some()) && (narrow || pending);
     let rows = s.download_rows();
     let running: Vec<&Row> = rows
         .iter()

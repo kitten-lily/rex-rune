@@ -18,7 +18,7 @@ pub fn source_dir(var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| var("HOME").map(|home| Path::new(&home).join(".local/share")))?;
-    Some(data.join("rex-linux/dracula-pro-ghostty"))
+    Some(data.join("rex-rune/dracula-pro-ghostty"))
 }
 
 pub struct Output {

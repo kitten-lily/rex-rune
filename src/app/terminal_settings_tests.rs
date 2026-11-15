@@ -2,9 +2,9 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
 use crate::app::{panel::SettingsSection, select_copy::memory, term};
-use rex_linux::{
+use rex_rune::{
     connection::Command,
-    settings::terminal::{CursorStyle, SelectionColor},
+    settings::terminal::{CursorStyle, OptionKey, SelectionColor},
     terminal::{CursorShape, Renderer, selection},
 };
 use std::sync::Arc;
@@ -98,7 +98,8 @@ fn the_page_is_headed_cards_in_order_with_a_preview_in_three_of_them() {
             "Keyboard",
             "Selection",
             "Default shell",
-            "Titles"
+            "Titles",
+            "Path browser"
         ]
     );
     // Each preview is the first row of its card: under its heading, inside the page, an
@@ -552,15 +553,420 @@ fn selection_colours_and_corners_follow_their_settings_in_panes_and_the_preview(
 }
 
 #[test]
+fn the_option_key_setting_is_a_macs_and_tells_the_window_what_option_is() {
+    let rt = terminal_settings(|_| {});
+    assert!(!has(&rt, "option-key"), "only where Alt is Option");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
+    let mut rt = terminal_settings(|ws| {
+        ws.option_choice = true;
+        ws.us_layout = Some(false);
+    });
+    rt.poll = Some(crate::app::poll);
+    // What the window gets once the frame that changed something is drawn.
+    let told = |rt: &mut Runtime<Workspace>| {
+        rt.frame(1. / 60.);
+        rt.option_as_alt()
+    };
+    assert!(!told(&mut rt), "a German layout types");
+    choose(&mut rt, "option-key", "Acts as Alt");
+    assert_eq!(rt.state.settings.terminal.option_key, OptionKey::Alt);
+    let saved = Settings::load(&rt.state.settings_path).unwrap();
+    assert_eq!(saved.terminal.option_key, OptionKey::Alt);
+    assert_eq!(
+        rt.state.option_as_alt,
+        Some(rune::OptionAsAlt::Both),
+        "asked for at once"
+    );
+    assert!(told(&mut rt), "the popup button is no field");
+    click(&mut rt, "settings-search");
+    assert!(
+        !told(&mut rt),
+        "Settings' own fields keep Option's characters"
+    );
+    rt.update(|s, _| {
+        s.settings_nav.search.text = "option".into();
+        s.settings_search_changed();
+    });
+    assert!(
+        rt.state
+            .settings_nav
+            .hits()
+            .iter()
+            .any(|h| h.label == "Option key" && h.place == "Terminal"),
+        "found by search"
+    );
+
+    rt.update(|s, tx| s.close_panel(tx));
+    assert!(
+        told(&mut rt),
+        "closing Settings gives the panes Alt in its own frame"
+    );
+    rt.update(|s, _| s.settings.terminal.option_key = OptionKey::Automatic);
+    assert!(!told(&mut rt), "a German layout types");
+    rt.update(|s, _| s.us_layout = Some(true));
+    assert!(told(&mut rt), "a U.S. layout's Option is Alt");
+    rt.update(|s, _| s.settings.terminal.option_key = OptionKey::Characters);
+    assert!(!told(&mut rt));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn a_character_option_composes_reaches_the_program_without_alt() {
+    let (mut ws, _rx) = tabbed_workspace("split");
+    let (sender, sent) = flume::unbounded();
+    for block in ["block:b", "block:c"] {
+        live_terminal(&mut ws, block, &sender);
+    }
+    let mut rt = runtime(ws);
+    rt.poll = Some(crate::app::poll);
+    let mods = |shift, ctrl, alt| Mods {
+        shift,
+        ctrl,
+        cmd: ctrl,
+        alt,
+        ..Mods::default()
+    };
+    let send = |rt: &mut Runtime<Workspace>, text: Option<&str>, mods: Mods| {
+        use rune::{PhysicalInput, PhysicalKeyCode as Code};
+        let (key, code, base) = match text {
+            None => (Key::Left, Code::ArrowLeft, None),
+            Some(t) => {
+                let (code, base) = match t {
+                    "@" => (Code::KeyL, 'l'),
+                    "€" => (Code::KeyE, 'e'),
+                    "x" => (Code::KeyX, 'x'),
+                    _ => (Code::KeyB, 'b'),
+                };
+                (Key::Text(t.into()), code, Some(base))
+            }
+        };
+        for pressed in [true, false] {
+            let input = PhysicalInput::Key {
+                key: code,
+                mods,
+                pressed,
+                repeat: false,
+            };
+            let event = KeyEvent {
+                key: key.clone(),
+                mods,
+            };
+            rt.physical_key_input(input, event, base);
+            for _ in 0..3 {
+                rt.frame(1. / 60.);
+            }
+        }
+        let keys = sent_keys(&sent);
+        assert_eq!(keys.len(), 2, "{text:?} {mods:?} sent {keys:?}");
+        let (press, release) = (&keys[0], &keys[1]);
+        assert_eq!(release["action"], "release");
+        assert_eq!(
+            release["consumed_mods"], press["consumed_mods"],
+            "{text:?} {mods:?}: a release as its press"
+        );
+        [&press["text"], &press["mods"], &press["consumed_mods"]]
+            .map(|v| v.as_str().unwrap().to_owned())
+    };
+    let option = mods(false, false, true);
+    // Where Alt is not a Mac's Option, it is always Alt.
+    assert_eq!(send(&mut rt, Some("@"), option), ["@", "alt", ""]);
+
+    rt.update(|s, _| {
+        s.option_choice = true;
+        s.us_layout = Some(false);
+    });
+    assert_eq!(send(&mut rt, Some("@"), option), ["@", "alt", "alt"]);
+    let shifted = mods(true, false, true);
+    assert_eq!(
+        send(&mut rt, Some("€"), shifted),
+        ["€", "shift+alt", "shift+alt"]
+    );
+    // A key that types nothing, and Option with Control, keep Alt.
+    assert_eq!(send(&mut rt, None, option), ["", "alt", ""]);
+    assert_eq!(
+        send(&mut rt, Some("x"), mods(false, true, true)),
+        ["x", "ctrl+alt", ""]
+    );
+    let command = Mods {
+        logo: true,
+        ..option
+    };
+    assert_eq!(send(&mut rt, Some("x"), command), ["x", "alt+super", ""]);
+
+    rt.update(|s, _| s.settings.terminal.option_key = OptionKey::Alt);
+    rt.frame(1. / 60.);
+    assert!(rt.option_as_alt());
+    assert_eq!(send(&mut rt, Some("b"), option), ["b", "alt", ""]);
+    assert_eq!(
+        send(&mut rt, Some("B"), shifted),
+        ["B", "shift+alt", "shift"]
+    );
+    // Rex's own fields keep Option's characters: the find bar's, from the frame that focuses
+    // it, and the pane has Alt again from the frame that closes it.
+    let shortcut = |rt: &mut Runtime<Workspace>, key: Key, mods: Mods| {
+        rt.key(KeyEvent { key, mods });
+        rt.frame(1. / 60.);
+        rt.option_as_alt()
+    };
+    let find = Mods {
+        ctrl: true,
+        shift: true,
+        ..Mods::default()
+    };
+    assert!(
+        !shortcut(&mut rt, Key::Text("F".into()), find),
+        "find has the keyboard"
+    );
+    assert!(
+        shortcut(&mut rt, Key::Escape, Mods::default()),
+        "Escape gives it back"
+    );
+    assert_eq!(send(&mut rt, Some("b"), option), ["b", "alt", ""]);
+}
+
+#[test]
+fn one_option_key_alone_is_offered_found_and_told_to_the_window() {
+    use rune::OptionAsAlt;
+    let mut rt = terminal_settings(|ws| {
+        ws.option_choice = true;
+        ws.us_layout = Some(true);
+    });
+    rt.poll = Some(crate::app::poll);
+    let told = |rt: &mut Runtime<Workspace>| {
+        rt.frame(1. / 60.);
+        rt.option_alt()
+    };
+    assert_eq!(
+        told(&mut rt),
+        OptionAsAlt::Both,
+        "a U.S. layout's Option is Alt"
+    );
+    reveal(&mut rt, "option-key");
+    click(&mut rt, "option-key");
+    settle(&mut rt);
+    let listed: Vec<String> = rt
+        .elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.role == "menuitem")
+        .filter_map(|e| e.label)
+        .collect();
+    assert_eq!(listed, OptionKey::ALL.map(OptionKey::name));
+    rt.key(KeyEvent {
+        key: Key::Escape,
+        mods: Mods::default(),
+    });
+    settle(&mut rt);
+
+    for (label, key, alt) in [
+        ("Left sends Alt", OptionKey::LeftAlt, OptionAsAlt::Left),
+        ("Right sends Alt", OptionKey::RightAlt, OptionAsAlt::Right),
+    ] {
+        choose(&mut rt, "option-key", label);
+        assert_eq!(rt.state.settings.terminal.option_key, key);
+        let saved = Settings::load(&rt.state.settings_path).unwrap();
+        assert_eq!(saved.terminal.option_key, key);
+        assert_eq!(rt.state.option_as_alt, Some(alt), "asked for at once");
+        assert_eq!(told(&mut rt), alt, "whatever the layout");
+        rt.update(|s, _| s.us_layout = Some(false));
+        assert_eq!(told(&mut rt), alt);
+        rt.update(|s, _| s.us_layout = Some(true));
+    }
+    click(&mut rt, "settings-search");
+    assert_eq!(
+        told(&mut rt),
+        OptionAsAlt::Neither,
+        "Settings' own fields keep both Options' characters"
+    );
+    for query in ["left sends alt", "right sends"] {
+        rt.update(|s, _| {
+            s.settings_nav.search.text = query.into();
+            s.settings_search_changed();
+        });
+        assert!(
+            rt.state
+                .settings_nav
+                .hits()
+                .iter()
+                .any(|h| h.label == "Option key" && h.place == "Terminal"),
+            "{query:?} finds the Option key row"
+        );
+    }
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
+fn one_option_key_alone_sends_alt_and_the_other_composes() {
+    use rune::{AltKeys, PhysicalInput, PhysicalKeyCode as Code};
+    let (sender, sent) = flume::unbounded();
+    let pane = |choice: OptionKey| {
+        let (mut ws, _rx) = tabbed_workspace("split");
+        for block in ["block:b", "block:c"] {
+            live_terminal(&mut ws, block, &sender);
+        }
+        ws.option_choice = true;
+        ws.us_layout = Some(true);
+        ws.settings.terminal.option_key = choice;
+        ws.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(
+            &serde_json::json!([{"keys": "alt+e", "action": "client.settings"}]),
+        );
+        ws.local_keymap = crate::app::actions::resolve(&ws.settings.shortcut_file.overrides);
+        ws.keymap_generation += 1;
+        let mut rt = runtime(ws);
+        rt.poll = Some(crate::app::poll);
+        rt.update(|s, tx| s.sync_option_key(tx, false));
+        rt.frame(1. / 60.);
+        rt
+    };
+    const NONE: AltKeys = AltKeys {
+        left: false,
+        right: false,
+    };
+    const LEFT: AltKeys = AltKeys {
+        left: true,
+        right: false,
+    };
+    const RIGHT: AltKeys = AltKeys {
+        left: false,
+        right: true,
+    };
+    const BOTH: AltKeys = AltKeys {
+        left: true,
+        right: true,
+    };
+    let option = |ctrl: bool, logo: bool| Mods {
+        alt: true,
+        ctrl,
+        cmd: ctrl,
+        logo,
+        ..Mods::default()
+    };
+    // A press and its release as the window delivers them: the key winit made of it (the
+    // unmodified character from an Option that is Alt, the composed one or a dead key from
+    // one that composes) and the Option keys held. Returns the press's text, mods, consumed
+    // mods and whether it is composing, if the pane was sent it.
+    let send = |rt: &mut Runtime<Workspace>, key: Key, code: Code, mods: Mods, held: AltKeys| {
+        let base = match code {
+            Code::KeyB => Some('b'),
+            Code::KeyE => Some('e'),
+            Code::KeyX => Some('x'),
+            _ => None,
+        };
+        for pressed in [true, false] {
+            let input = PhysicalInput::Key {
+                key: code,
+                mods,
+                pressed,
+                repeat: false,
+            };
+            let event = KeyEvent {
+                key: key.clone(),
+                mods,
+            };
+            rt.physical_key_input_alt(input, event, base, held);
+            for _ in 0..3 {
+                rt.frame(1. / 60.);
+            }
+        }
+        let keys = sent_keys(&sent);
+        let (press, release) = match &keys[..] {
+            [] => return None,
+            [press, release] => (press, release),
+            _ => panic!("{key:?} {held:?} sent {keys:?}"),
+        };
+        assert_eq!(release["action"], "release");
+        assert_eq!(
+            release["consumed_mods"], press["consumed_mods"],
+            "{key:?} {held:?}: a release as its press"
+        );
+        let s = |k: &str| press[k].as_str().unwrap().to_owned();
+        let composing = press["composing"].as_bool().unwrap();
+        Some([
+            s("text"),
+            s("mods"),
+            s("consumed_mods"),
+            composing.to_string(),
+        ])
+    };
+    let text = |t: &str| Key::Text(t.into());
+    let row = |press: [&str; 4]| Some(press.map(String::from));
+
+    for (choice, alt, composes) in [
+        (OptionKey::LeftAlt, LEFT, RIGHT),
+        (OptionKey::RightAlt, RIGHT, LEFT),
+    ] {
+        let mut rt = pane(choice);
+        let plain = option(false, false);
+        // The side that sends Alt: Option+B is Alt+B (ESC b), Shift kept.
+        let b = send(&mut rt, text("b"), Code::KeyB, plain, alt);
+        assert_eq!(b, row(["b", "alt", "", "false"]), "{choice:?}");
+        let shifted = Mods {
+            shift: true,
+            ..plain
+        };
+        let big = send(&mut rt, text("B"), Code::KeyB, shifted, alt);
+        assert_eq!(big, row(["B", "shift+alt", "shift", "false"]), "{choice:?}");
+        // The other side types what Option composes: ∫ on U.S.
+        let composed = send(&mut rt, text("∫"), Code::KeyB, plain, composes);
+        assert_eq!(composed, row(["∫", "alt", "alt", "false"]), "{choice:?}");
+        // Both held: the window made it Alt, and so does the pane.
+        let both = send(&mut rt, text("b"), Code::KeyB, plain, BOTH);
+        assert_eq!(both, row(["b", "alt", "", "false"]), "{choice:?}");
+        // A key that comes with no side composes, as the window leaves it.
+        let unknown = send(&mut rt, text("∫"), Code::KeyB, plain, NONE);
+        assert_eq!(unknown, row(["∫", "alt", "alt", "false"]), "{choice:?}");
+        // With Control or Command, and with a key that types nothing, Option is Alt on
+        // either side.
+        for held in [alt, composes] {
+            let ctrl = send(&mut rt, text("x"), Code::KeyX, option(true, false), held);
+            assert_eq!(ctrl, row(["x", "ctrl+alt", "", "false"]), "{held:?}");
+            let command = send(&mut rt, text("x"), Code::KeyX, option(false, true), held);
+            assert_eq!(command, row(["x", "alt+super", "", "false"]), "{held:?}");
+            let arrow = send(&mut rt, Key::Left, Code::ArrowLeft, plain, held);
+            assert_eq!(arrow, row(["", "alt", "", "false"]), "{held:?}");
+        }
+        // Option+E on the composing side is the system's dead key: the window hands it to the
+        // input method, which sends no key, so the Alt+E shortcut never sees it, and the pane
+        // gets the accented letter it composes with the next key. On the Alt side the window
+        // sends Alt+E, the shortcut's.
+        rt.update(|s, tx| {
+            crate::app::input::on_ime(s, &rune::Ime::Preedit("´".into(), None), tx);
+            crate::app::input::on_ime(s, &rune::Ime::Commit("é".into()), tx);
+        });
+        let pasted: Vec<String> = sent
+            .try_iter()
+            .filter_map(|c| match c {
+                HostCommand::Terminal {
+                    command: Command::Paste(text),
+                    ..
+                } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pasted, ["é"], "{choice:?}");
+        assert!(
+            rt.state.panel.is_none(),
+            "{choice:?}: a dead key is no shortcut"
+        );
+        let shortcut = send(&mut rt, text("e"), Code::KeyE, plain, alt);
+        assert_eq!(shortcut, None, "{choice:?}: the shortcut took it");
+        assert!(
+            rt.state.panel.is_some(),
+            "{choice:?}: Alt+E opened Settings"
+        );
+    }
+}
+
+#[test]
 fn key_sequence_hints_can_be_turned_off_without_changing_the_sequence() {
     use rune::{PhysicalInput, PhysicalKeyCode as Code};
     let pending = |hints: bool, hidden: bool| {
         let mut ws = workspace();
         ws.settings.terminal.key_sequence_hints = hints;
         if hidden {
-            ws.settings.interface.toolbar = rex_linux::settings::interface::ToolbarBehavior::Hidden;
+            ws.settings.interface.toolbar = rex_rune::settings::interface::ToolbarBehavior::Hidden;
         }
-        ws.settings.shortcut_file.overrides = rex_linux::keymap::Overrides::parse(
+        ws.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(
             &serde_json::json!([{"keys":"ctrl+b>c","action":"client.tab.new"}]),
         );
         ws.local_keymap = crate::app::actions::resolve(&ws.settings.shortcut_file.overrides);
@@ -683,6 +1089,11 @@ fn terminal_controls_are_indexed_and_reachable_at_minimum_size() {
             ("selection background", "Background", "selection-background"),
             ("rounded corners", "Rounded corners", "selection-rounded"),
             ("key sequence", "Show key sequence hints", "sequence-hints"),
+            (
+                "recently used paths",
+                "Show recently used paths",
+                "show-recent-paths",
+            ),
             (
                 "generated titles",
                 "Prefer generated titles",

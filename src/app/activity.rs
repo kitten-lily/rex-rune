@@ -4,16 +4,17 @@
 use super::{
     activity_list::PaneRef,
     notify::{Command, Kind, Note, NoteTarget, Notifier, Sound},
+    program_icons::{ProgramIcon, program_icon, shell},
     theme::*,
     workspace::{HostId, Workspace},
 };
-use rex_linux::connection::{
+use rex_rune::connection::{
     DEFAULT_TAB_LABEL, HostModel,
     activity::{
         BlockedKind, ProgramState, StatusRecord, TERMINAL as TERMINAL_CREATOR, TerminalProgress,
     },
 };
-use rex_linux::settings::NotificationsConfig;
+use rex_rune::settings::NotificationsConfig;
 use rexrs::api::session;
 use rune::{El, LoopSpec, Tx, el, row};
 use std::{borrow::Cow, collections::HashMap};
@@ -30,6 +31,10 @@ pub struct TabActivity {
     pub source: Option<String>,
     /// The focused block's program: the one reporting, else the foreground process.
     pub program: Option<String>,
+    /// The executable behind the focused block's foreground process, for its icon.
+    pub executable: Option<String>,
+    /// The path of the focused block's foreground script, for its icon.
+    pub script: Option<String>,
     /// The tab's OSC 9;4 progress: an error, else a pause, else progress, across its panes.
     pub progress: Option<TerminalProgress>,
 }
@@ -125,7 +130,7 @@ pub fn pane_activity(model: &HostModel, block: &str) -> TabActivity {
 
 /// A pane's icon source: its deciding status record's program, else its foreground process.
 /// Shared so a tab icon count of one is exactly `TabActivity::program`.
-fn block_program(model: &HostModel, block: &str) -> Option<String> {
+pub(super) fn block_program(model: &HostModel, block: &str) -> Option<String> {
     model
         .activity
         .get(block)
@@ -134,14 +139,53 @@ fn block_program(model: &HostModel, block: &str) -> Option<String> {
         .or_else(|| model.programs.get(block).cloned())
 }
 
+/// What a pane runs, for its icon: the program [`block_program`] names, and the executable
+/// and script behind its foreground process.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PaneProgram {
+    pub name: Option<String>,
+    pub executable: Option<String>,
+    pub script: Option<String>,
+}
+
+impl PaneProgram {
+    pub fn of(model: &HostModel, block: &str) -> Self {
+        Self {
+            name: block_program(model, block),
+            executable: model.executables.get(block).cloned(),
+            script: model.scripts.get(block).cloned(),
+        }
+    }
+
+    pub fn icon(&self) -> &'static ProgramIcon {
+        program_icon(
+            self.name.as_deref(),
+            self.script.as_deref(),
+            self.executable.as_deref(),
+        )
+    }
+}
+
+#[cfg(test)]
+impl TabActivity {
+    /// The focused pane's icon.
+    pub fn icon(&self) -> &'static ProgramIcon {
+        program_icon(
+            self.program.as_deref(),
+            self.script.as_deref(),
+            self.executable.as_deref(),
+        )
+    }
+}
+
 /// Cached programs, focused pane first then stable server layer/block order.
 /// Aggregate tab severity never sorts panes. Missing focus falls back to the first block.
-pub fn tab_programs(model: &HostModel, window: &session::Window) -> Vec<Option<String>> {
+pub fn tab_programs(model: &HostModel, window: &session::Window) -> Vec<PaneProgram> {
     let focused = focused_block(window);
     focused
         .into_iter()
         .chain(blocks(window).filter(|b| Some(*b) != focused))
-        .map(|b| block_program(model, b))
+        .map(|b| PaneProgram::of(model, b))
         .collect()
 }
 
@@ -164,6 +208,8 @@ fn fold_activity<'a>(
             .flat_map(|records| records.values()),
     );
     let program = focused.and_then(|b| block_program(model, b));
+    let executable = focused.and_then(|b| model.executables.get(b).cloned());
+    let script = focused.and_then(|b| model.scripts.get(b).cloned());
     // A program's own OSC 9;4 report wins over the percentage in its status record.
     let progress = blocks
         .filter_map(|b| model.progress.get(b).copied())
@@ -180,23 +226,9 @@ fn fold_activity<'a>(
         live: top.is_some_and(|r| r.live),
         source: top.and_then(|r| r.program().map(str::to_owned)),
         program,
+        executable,
+        script,
         progress,
-    }
-}
-
-/// The icon for a program; shells and anything unknown keep the terminal glyph.
-pub fn program_icon(program: Option<&str>) -> &'static rune::Icon {
-    match program.map(str::to_ascii_lowercase).as_deref() {
-        Some("claude" | "claude-code") => &CLAUDE,
-        Some("codex") => &CODEX,
-        Some("opencode") => &OPENCODE,
-        // OMP is built on Pi and shares its skill.
-        Some("pi" | "omp") => &PI,
-        Some("nvim" | "vim" | "vi") => &VIM,
-        Some("git" | "lazygit" | "tig") => &GIT,
-        Some("cargo" | "rustc" | "rustup") => &CRATE,
-        Some("ssh" | "mosh") => &KEY,
-        _ => &TERMINAL,
     }
 }
 
@@ -380,16 +412,20 @@ fn finished(before: ProgramState, now: ProgramState) -> bool {
 }
 
 impl Workspace {
-    /// The tab is in front of the user: this window has focus and shows that tab.
-    pub fn tab_seen(&self, index: usize, session: &str, window: &str) -> bool {
+    /// The tab this window shows, whether or not the window has focus.
+    pub fn tab_in_front(&self, index: usize, session: &str, window: &str) -> bool {
         let model = &self.hosts[index].model;
-        self.window_focused
-            && index == self.active
+        index == self.active
             && model.selected.as_deref() == Some(session)
             && model
                 .views
                 .get(session)
                 .is_some_and(|v| v.active_window_id.as_deref() == Some(window))
+    }
+
+    /// The tab is in front of the user: this window has focus and shows that tab.
+    pub fn tab_seen(&self, index: usize, session: &str, window: &str) -> bool {
+        self.window_focused && self.tab_in_front(index, session, window)
     }
 
     /// Compare each pane of host `index` with its last state: latch unseen Done, clear what
@@ -619,7 +655,7 @@ impl Workspace {
     pub fn deliver_program_notices(
         &mut self,
         index: usize,
-        notices: Vec<rex_linux::connection::activity::DesktopNotice>,
+        notices: Vec<rex_rune::connection::activity::DesktopNotice>,
     ) {
         let messages = self.settings.notifications.messages;
         if !messages.desktop {
@@ -774,7 +810,7 @@ impl Workspace {
         self.select_window(index, session.clone(), window, tx);
         self.send(
             index,
-            rex_linux::connection::HostCommand::Request {
+            rex_rune::connection::HostCommand::Request {
                 method: "session.focus_block".into(),
                 payload: serde_json::json!({
                     "session_id": session,
@@ -865,6 +901,23 @@ impl Workspace {
     pub fn session_progress(&self, host: usize, session: &str) -> Option<(Option<u8>, u32)> {
         let (fold, _) = super::activity_list::session_activity(&self.hosts[host].model, session)?;
         shown_progress(&self.settings.notifications, &fold)
+    }
+
+    /// A session's icon: its current tab's focused program, else its first tab's; Shell for a
+    /// session whose layout this client hasn't read.
+    pub fn session_icon(&self, host: usize, session: &str) -> &'static ProgramIcon {
+        let model = &self.hosts[host].model;
+        model
+            .views
+            .get(session)
+            .and_then(|view| {
+                view.windows
+                    .iter()
+                    .find(|w| w.window_id.is_some() && w.window_id == view.active_window_id)
+                    .or_else(|| view.windows.first())
+            })
+            .and_then(focused_block)
+            .map_or_else(shell, |block| PaneProgram::of(model, block).icon())
     }
 
     pub fn unseen_on(&self, host: usize, window: &str) -> bool {
@@ -999,7 +1052,7 @@ mod tests {
                 model.programs.insert("block".into(), "vim".into());
                 model.places.insert(
                     "block".into(),
-                    rex_linux::connection::titles::Place {
+                    rex_rune::connection::titles::Place {
                         cwd: Some("/home/u/rex".into()),
                         home: Some("/home/u".into()),
                         shell: Some(1),

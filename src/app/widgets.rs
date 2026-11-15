@@ -1,10 +1,41 @@
 //! Building blocks on the Midnight tokens: chrome icon buttons, pill buttons, list rows with a
 //! sliding highlight, scroll thumbs and hint lines.
-use super::{keycaps::keycaps, theme::*, workspace::Workspace};
-use rune::{Color, Cursor, El, Icon, Live, LiveText, ScrollPos, Tx, el, icon, row, text};
+use super::{keycaps::keycaps, program_icons::ProgramIcon, theme::*, workspace::Workspace};
+use rune::{Color, Cursor, El, Icon, KeyEvent, Live, LiveText, ScrollPos, Tx, el, icon, row, text};
 
 pub fn glyph(i: &'static Icon, size: f32, color: Color) -> El {
     icon(i, size).color(color)
+}
+
+/// A program's glyph in one colour, in a `slot`-point square: the set's glyphs fill their
+/// square, where Rex's own icons leave a margin, so it is drawn a little smaller.
+pub fn program_glyph(program: &'static ProgramIcon, slot: f32, color: Color) -> El {
+    program_glyph_hovering(program, slot, color, None)
+}
+
+/// A program glyph that returns to `hover` while a hover group around it is hovered, as the
+/// pane header's name does under the pointer. `None` keeps its colour at rest.
+pub fn program_glyph_hovering(
+    program: &'static ProgramIcon,
+    slot: f32,
+    color: Color,
+    hover: Option<Color>,
+) -> El {
+    let mut image = icon(&program.glyph, (slot * 0.87).round())
+        .color(color)
+        .icon_one_color();
+    if let Some(hover) = hover {
+        image = image.group_color(hover);
+    }
+    el().size(slot, slot).center().child(image)
+}
+
+/// The tile before a session's name in the sidebar and the switcher.
+pub const SESSION_TILE: f32 = 18.;
+
+/// A program's tile in its own colours, `size` points wide.
+pub fn program_tile(program: &'static ProgramIcon, size: f32) -> El {
+    icon(&program.tile, size)
 }
 
 /// Official artwork, shared by the identity chip and empty state. Keep the same
@@ -57,7 +88,10 @@ pub enum Pill {
 }
 
 /// A pill button: accent gradient (primary), chip (neutral) or tinted (danger, warning). Shows a
-/// 2pt accent focus ring outside its shape when focused from the keyboard.
+/// 2pt accent focus ring outside its shape when focused from the keyboard. Enter presses it
+/// while it has the keyboard on Linux and Windows (see
+/// [`RETURN_PRESSES_FOCUSED`](super::platform::keys::RETURN_PRESSES_FOCUSED)); Space presses it
+/// anywhere, and Return presses the default button while no button has focus.
 pub fn pill(
     key: &str,
     label: &str,
@@ -95,7 +129,10 @@ pub fn pill(
                 .hover(rgb(warning()).alpha(0.18)),
         ),
     };
-    e.key(key.to_owned())
+    let press = std::rc::Rc::new(f);
+    let on_press = press.clone();
+    let mut e = e
+        .key(key.to_owned())
         .role("button")
         .label(label.to_owned())
         .h(height)
@@ -106,15 +143,35 @@ pub fn pill(
         .cursor(Cursor::Pointer)
         .focusable(true)
         .focus_ring(2., 2., rgb(accent()))
-        .on_press_tx(f)
+        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| on_press(s, tx))
         .child(
             text(label.to_owned())
                 .font(medium(if height < 28. { 11.5 } else { 13. }))
                 .color(fg),
-        )
+        );
+    // A focused button is what Return presses on Linux and Windows, ahead of the dialog's
+    // default button; macOS leaves Return to the default one and Space to this. An `on_key`
+    // handler also makes a control a Tab stop where Tab visits only fields and keyed controls
+    // (macOS without Full Keyboard Access), so macOS adds none.
+    if super::platform::keys::RETURN_PRESSES_FOCUSED {
+        e = e.on_key(move |s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx| {
+            if !super::platform::keys::return_presses_focused(ev) {
+                return false;
+            }
+            // A held Return presses once, as Rune's own button press does.
+            if tx.key_repeat() {
+                return true;
+            }
+            press(s, tx);
+            true
+        });
+    }
+    e
 }
 
 pub struct Row<'a> {
+    /// A session's program, drawn as its tile before the label.
+    pub program: Option<&'static ProgramIcon>,
     pub key: String,
     /// The surface's own highlight id, so it slides within one list only.
     pub surface: &'a str,
@@ -226,6 +283,9 @@ pub fn list_row(
         } else {
             el()
         }));
+    }
+    if let Some(program) = r.program {
+        e = e.child(program_tile(program, SESSION_TILE));
     }
     let label = text(r.label.to_owned())
         .font(if r.selected { medium(13.) } else { ui(13.) })

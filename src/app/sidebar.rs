@@ -2,8 +2,8 @@
 //! (keyboard session navigation is the Ctrl K switcher, so arrows never switch sessions).
 use super::{
     activity::{
-        TabActivity, activity_word, program_icon, progress_bar, shown_progress, shown_word,
-        shown_working, tab_activity, tab_name, tab_programs, working_dots,
+        TabActivity, activity_word, progress_bar, shown_progress, shown_word, shown_working,
+        tab_activity, tab_name, tab_programs, working_dots,
     },
     activity_list::{ActivityGroup, ActivityRow, TaskLine, activity_groups},
     keycaps::keycaps,
@@ -12,10 +12,10 @@ use super::{
     tab_icons,
     tabs::{muted_mark, target_ring},
     theme::*,
-    widgets::{chrome_button, glyph},
+    widgets::{SESSION_TILE, chrome_button, glyph, program_glyph, program_tile},
     workspace::Workspace,
 };
-use rex_linux::{
+use rex_rune::{
     connection::{
         HostCommand,
         activity::{ProgramState, TerminalProgress},
@@ -260,11 +260,7 @@ fn session_row(s: &Workspace, index: usize, id: &str, label: &str, prefixed: boo
         .child(if s.settings.vertical_tabs {
             el()
         } else {
-            glyph(
-                &TERMINAL,
-                14.,
-                rgb(if selected { accent() } else { muted() }),
-            )
+            program_tile(s.session_icon(index, id), SESSION_TILE)
         })
         .child(name);
     if let Some((word, tone, needing)) = s.session_word(index, id) {
@@ -355,6 +351,7 @@ fn window_row(s: &Workspace, index: usize, session: &str, tab: &rexrs::api::sess
         &icons,
         active,
         s.settings.interface.tab_icon_color,
+        1.,
     )
     .child(
         text(label)
@@ -615,7 +612,7 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
             s.open_pane(&target, tx);
             tx.blur();
         })
-        .child(glyph(program_icon(row_.icon_program()), 15., rgb(muted())))
+        .child(program_glyph(row_.icon(), 15., rgb(muted())))
         .child(body)
 }
 

@@ -20,7 +20,7 @@ use super::{
     splits::SplitWay,
     workspace::Workspace,
 };
-use rex_linux::{connection::HostCommand, settings::PaneDensity};
+use rex_rune::{connection::HostCommand, settings::PaneDensity};
 use rune::Tx;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -585,7 +585,7 @@ impl Workspace {
             .map(|(id, entry)| Command::row(id, G, entry).section(3)),
         );
         for action in ["pane.move", "pane.resize"] {
-            for side in rex_linux::layout::Side::ALL {
+            for side in rex_rune::layout::Side::ALL {
                 rows.push(
                     Command::new(
                         format!("{action}.{}", side.arg()),
@@ -731,6 +731,14 @@ impl Workspace {
             // It folds the sidebar's list, so there is nothing to see with the sidebar closed.
             .enabled(self.sidebar.is_open() && self.other_hosts_expanded())
             .keywords("sessions sidebar fold"),
+            Command::action(
+                "host.stop_server",
+                G,
+                "Stop server…",
+                super::server_page::STOP,
+            )
+            .enabled(self.can_stop_server())
+            .destructive(),
             Command::new(
                 "host.remove",
                 G,
@@ -823,6 +831,17 @@ impl Workspace {
             .enabled(super::toolbar_reveal::can_reveal(self))
             .keywords("show hidden hover window"),
             Command::action(
+                "view.full_screen",
+                G,
+                if self.in_full_screen() {
+                    "Exit full screen"
+                } else {
+                    "Enter full screen"
+                },
+                super::actions::FULL_SCREEN,
+            )
+            .keywords("fullscreen maximize window"),
+            Command::action(
                 "view.pane_headers",
                 G,
                 if self.header_reveal.pinned {
@@ -914,8 +933,8 @@ impl Workspace {
                     "app.update",
                     G,
                     format!(
-                        "Update Rex Linux ({})…",
-                        rex_linux::format_version(&update.version)
+                        "Update Rex Rune ({})…",
+                        rex_rune::format_version(&update.version)
                     ),
                     Intent::Updates,
                 )
@@ -924,7 +943,7 @@ impl Workspace {
             );
         }
         rows.extend([
-            Command::action("app.about", G, "About Rex Linux", about::ABOUT)
+            Command::action("app.about", G, "About Rex Rune", about::ABOUT)
                 .keywords("version build license credits"),
             Command::row("app.help", G, help::command()).keywords("guide docs documentation"),
             Command::action("app.report_issue", G, "Report an issue", REPORT_ISSUE)

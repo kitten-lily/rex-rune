@@ -90,7 +90,7 @@ fn char_name(c: char) -> Option<String> {
 }
 
 pub fn mods(m: Mods) -> String {
-    let ctrl = m.ctrl || (m.cmd && !cfg!(target_os = "macos"));
+    let ctrl = super::platform::keys::control(m);
     [
         (m.shift, "shift"),
         (ctrl, "ctrl"),
@@ -182,10 +182,30 @@ pub fn payload(
     }))
 }
 
+/// Marks Alt consumed in the `payload` of `ev`, a press or its release, when Option composed
+/// its text (∫ for B, @ for L on a German layout), so the program gets that character rather
+/// than Alt with the key. With Control or Command held, Option stays a modifier.
+pub fn option_composed(payload: &mut Value, ev: &KeyEvent) {
+    let held = |name: &str| {
+        payload["mods"]
+            .as_str()
+            .is_some_and(|m| m.split('+').any(|m| m == name))
+    };
+    if !held("alt") || held("ctrl") || held("super") || text(ev).is_empty() {
+        return;
+    }
+    let consumed = payload["consumed_mods"].as_str().unwrap_or_default();
+    payload["consumed_mods"] = json!(if consumed.is_empty() {
+        "alt".to_owned()
+    } else {
+        format!("{consumed}+alt")
+    });
+}
+
 /// Explicit, layout-free pane.send_key: use the regular payload builder for both edges,
 /// never a US shifted-character table. Physical spellings carry no invented text.
 pub fn synthesize(spelling: &str) -> Option<[Value; 2]> {
-    use rex_linux::keymap::{Chord, Key as K};
+    use rex_rune::keymap::{Chord, Key as K};
     let chord = Chord::parse(spelling).ok()?;
     let mods = Mods {
         ctrl: chord.modifiers.ctrl,

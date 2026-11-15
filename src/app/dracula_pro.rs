@@ -1,6 +1,6 @@
 //! Chrome palettes for the generated Dracula Pro themes, built once from their tokens.
 use super::theme::{MIDNIGHT, Palette};
-use rex_linux::dracula_pro::THEMES;
+use rex_rune::dracula_pro::THEMES;
 use std::sync::LazyLock;
 
 static PALETTES: LazyLock<Vec<Option<Palette>>> = LazyLock::new(|| {
@@ -21,7 +21,7 @@ pub fn palette(i: u8) -> &'static Palette {
 
 #[cfg(test)]
 mod tests {
-    use rex_linux::dracula_pro::derive;
+    use rex_rune::dracula_pro::derive;
 
     #[test]
     fn the_build_checks_use_the_apps_fills() {

@@ -1,7 +1,7 @@
 //! Named workspace actions shared by keyboard, pointer and Commands dispatch.
 //! The registry structure follows Andrea Zito (nivox), commit 8037d78.
 use super::{panel::Intent, splits::SplitWay, workspace::Workspace};
-use rex_linux::{connection::Command, settings::ActivityGrouping};
+use rex_rune::{connection::Command, settings::ActivityGrouping};
 use rune::Tx;
 use serde_json::{Value, json};
 
@@ -16,6 +16,7 @@ pub const TOGGLE_ACTIVITY: &str = "client.sidebar.activity.toggle";
 pub const ACTIVITY_BY_SESSION: &str = "client.sidebar.activity.by_session";
 pub const ACTIVITY_BY_PRIORITY: &str = "client.sidebar.activity.by_priority";
 pub const DOWNLOAD: &str = "pane.download";
+pub const FULL_SCREEN: &str = "client.full_screen.toggle";
 
 #[derive(Clone, Copy)]
 enum Handler {
@@ -28,6 +29,7 @@ enum Handler {
     ToggleActivity,
     ActivityBySession,
     ActivityByPriority,
+    FullScreen,
     Close,
     Search,
     NewTab,
@@ -41,6 +43,7 @@ enum Handler {
     ZoomOut,
     ZoomReset,
     SwitchSession,
+    StopServer,
     SelectSession,
     NewSession,
     Split,
@@ -109,6 +112,7 @@ specs! {
     TOGGLE_ACTIVITY => ToggleActivity,
     ACTIVITY_BY_SESSION => ActivityBySession,
     ACTIVITY_BY_PRIORITY => ActivityByPriority,
+    FULL_SCREEN => FullScreen,
     "client.close" => Close,
     SEARCH => Search,
     "client.tab.new" => NewTab,
@@ -122,6 +126,7 @@ specs! {
     "client.zoom.out" => ZoomOut,
     "client.zoom.reset" => ZoomReset,
     "session.switch" => SwitchSession,
+    super::server_page::STOP => StopServer,
     SELECT_SESSION => SelectSession,
     "session.new" => NewSession,
     "pane.split" => Split,
@@ -259,7 +264,7 @@ impl Spec {
             Download => Remote::Never(
                 "Only the person at this computer can choose a file to download; nothing a host sends can start one.",
             ),
-            Palette | Settings | Search | SwitchSession | PaneActions | Shortcuts => {
+            Palette | Settings | Search | SwitchSession | StopServer | PaneActions | Shortcuts => {
                 Remote::Never("Only the person at this computer can open dialogs and popups.")
             }
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
@@ -277,6 +282,9 @@ impl Spec {
                 "Only the person at this computer can clear or reset terminals from here.",
             ),
             Toolbar => Remote::Never("Only the person at this computer can reveal the toolbar."),
+            FullScreen => {
+                Remote::Never("Only the person at this computer can make the window full screen.")
+            }
             PaneHeaders => {
                 Remote::Never("Only the person at this computer can show or hide pane headers.")
             }
@@ -326,7 +334,7 @@ impl Spec {
     pub fn requires_person(&self) -> bool {
         matches!(
             self.handler,
-            Handler::Download | Handler::InsertPath | Handler::GoToDirectory
+            Handler::Download | Handler::InsertPath | Handler::GoToDirectory | Handler::StopServer
         )
     }
     pub fn global(&self) -> bool {
@@ -380,6 +388,7 @@ impl Spec {
             Handler::ToggleActivity => "Toggle Activity",
             Handler::ActivityBySession => "Show Activity by session",
             Handler::ActivityByPriority => "Show Activity by priority",
+            Handler::FullScreen => "Toggle full screen",
             Handler::Close => "Close pane or tab",
             Handler::Search => "Search terminal",
             Handler::NewTab => "New tab",
@@ -393,6 +402,7 @@ impl Spec {
             Handler::ZoomOut => "Decrease interface zoom",
             Handler::ZoomReset => "Reset interface zoom",
             Handler::SwitchSession => "Switch session",
+            Handler::StopServer => "Stop server…",
             Handler::SelectSession => "Show session",
             Handler::NewSession => "New session",
             Handler::Split => "Split pane",
@@ -437,7 +447,7 @@ impl Spec {
             Handler::ChooseTheme => "Change terminal theme",
             Handler::CopyVersion => "Copy version info",
             Handler::ReportIssue => "Report an issue",
-            Handler::About => "About Rex Linux",
+            Handler::About => "About Rex Rune",
             Handler::CopyDebug => "Copy debug info",
         }
     }
@@ -446,11 +456,13 @@ impl Spec {
             Handler::Compatibility => super::compatibility::category(self.name),
             Handler::Palette
             | Handler::Settings
+            | Handler::StopServer
             | Handler::Sidebar
             | Handler::ViewActivity
             | Handler::ToggleActivity
             | Handler::ActivityBySession
             | Handler::ActivityByPriority
+            | Handler::FullScreen
             | Handler::ZoomIn
             | Handler::ZoomOut
             | Handler::ZoomReset
@@ -629,6 +641,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::ActivityByPriority => s.show_activity_by(ActivityGrouping::Priority),
         Handler::PaneHeaders => s.toggle_pane_headers(),
         Handler::Toolbar => s.toggle_toolbar(),
+        Handler::FullScreen => tx.toggle_full_screen(),
         Handler::Close => s.close_focused(tx),
         Handler::Search => s.open_search(),
         Handler::FindNext => s.find_step(true),
@@ -644,6 +657,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::ZoomOut => s.change_ui_scale(-1, tx),
         Handler::ZoomReset => s.change_ui_scale(0, tx),
         Handler::SwitchSession => s.picker(true),
+        Handler::StopServer => s.stop_server(),
         Handler::SelectSession => {
             let visit = s.session_visit(s.active, args);
             match visit {
@@ -850,10 +864,10 @@ pub(super) fn covers_context(
 /// Bindings that can actually win, including prefix-vs-key conflicts. Parsed chords,
 /// not display strings, decide equality. Mode bindings compete only within their mode.
 pub fn effective<'a>(
-    map: &'a rex_linux::keymap::Resolved,
+    map: &'a rex_rune::keymap::Resolved,
     server: &[rexrs::api::client::InspectResponseAction],
-) -> Vec<&'a rex_linux::keymap::ResolvedBinding> {
-    let mut result: Vec<&rex_linux::keymap::ResolvedBinding> = Vec::new();
+) -> Vec<&'a rex_rune::keymap::ResolvedBinding> {
+    let mut result: Vec<&rex_rune::keymap::ResolvedBinding> = Vec::new();
     for candidate in &map.bindings {
         let Some(chords) = candidate.chords.as_ref() else {
             continue;
@@ -892,6 +906,12 @@ pub fn binding_title(binding: &rexrs::api::client::Binding) -> String {
             .replace('_', " ")
     };
     match binding.action.as_str() {
+        "client.activity" if matches!(args["view"].as_str(), Some("priority" | "session")) => {
+            format!(
+                "Show activity by {}",
+                args["view"].as_str().unwrap_or_default()
+            )
+        }
         "pane.split" => format!("Split {}", direction()),
         "pane.focus" => format!("Focus pane {}", direction()),
         "client.tab.move" => format!("Move tab {}", direction()),
@@ -933,16 +953,16 @@ pub fn declarations() -> Vec<rexrs::api::client::InspectResponseAction> {
 /// Resolve once per file generation, including argument diagnostics. Invalid bindings
 /// are skipped at match time, so a lower valid action can still be selected.
 #[cfg(test)]
-pub fn resolve(overrides: &rex_linux::keymap::Overrides) -> rex_linux::keymap::Resolved {
+pub fn resolve(overrides: &rex_rune::keymap::Overrides) -> rex_rune::keymap::Resolved {
     resolve_all(&[overrides])
 }
 
 /// [`resolve`] with every override layer, lowest first: the user's file, then what was
 /// recorded in Settings.
-pub fn resolve_all(overrides: &[&rex_linux::keymap::Overrides]) -> rex_linux::keymap::Resolved {
+pub fn resolve_all(overrides: &[&rex_rune::keymap::Overrides]) -> rex_rune::keymap::Resolved {
     let actions = declarations();
     let mut map =
-        rex_linux::keymap::resolve_all(&[rex_linux::keymap::defaults()], overrides, &actions);
+        rex_rune::keymap::resolve_all(&[rex_rune::keymap::defaults()], overrides, &actions);
     diagnose_compatibility(&mut map);
     for binding in &map.bindings {
         let binding = &binding.binding;
@@ -963,7 +983,7 @@ pub fn resolve_all(overrides: &[&rex_linux::keymap::Overrides]) -> rex_linux::ke
 }
 
 /// Client-specific limitations must also appear for bindings returned by a server.
-pub fn diagnose_compatibility(map: &mut rex_linux::keymap::Resolved) {
+pub fn diagnose_compatibility(map: &mut rex_rune::keymap::Resolved) {
     for row in &map.bindings {
         if let Some(message) = super::compatibility::unsupported(&row.binding.action)
             && !map.diagnostics.iter().any(|d| {
@@ -993,7 +1013,7 @@ mod tests {
     fn registry_is_unique_and_covers_every_default() {
         let names: std::collections::HashSet<_> = SPECS.iter().map(|s| s.name).collect();
         assert_eq!(names.len(), SPECS.len());
-        for binding in rex_linux::keymap::defaults().bindings {
+        for binding in rex_rune::keymap::defaults().bindings {
             let spec = find(&binding.action).expect("default action is registered");
             assert!(
                 spec.accepts(binding.args.as_ref().unwrap_or(&Value::Null)),

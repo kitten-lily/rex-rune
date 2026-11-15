@@ -1,6 +1,6 @@
 //! The chrome palette's tokens, the kit pinned to them, shared surfaces (chips, glass,
 //! cards) and the app's icons.
-use rex_linux::settings::ChromeTheme;
+use rex_rune::settings::ChromeTheme;
 use rune::{Color, El, Icon, Shadow, Spring, SpringPair, TextStyle, Transition};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use std::sync::OnceLock;
@@ -142,7 +142,7 @@ pub static GRUVBOX_DARK: Palette = Palette {
 
 impl Palette {
     /// A palette from derived tokens. The card is the ground.
-    pub fn from_tokens(t: &rex_linux::dracula_pro::derive::ChromeTokens) -> Palette {
+    pub fn from_tokens(t: &rex_rune::dracula_pro::derive::ChromeTokens) -> Palette {
         Palette {
             ground: t.ground,
             card: t.ground,
@@ -538,76 +538,6 @@ icon!(
     r#"path d="m4 4 12 12""#
 );
 
-// Programs a tab can show instead of the terminal glyph (`activity::program_icon`).
-icon!(
-    CLAUDE,
-    "rex-claude",
-    r#"path d="M10 3.5v13""#,
-    r#"path d="M3.5 10h13""#,
-    r#"path d="m5.4 5.4 9.2 9.2""#,
-    r#"path d="m14.6 5.4-9.2 9.2""#
-);
-icon!(
-    CODEX,
-    "rex-codex",
-    r#"path d="M10 2.75 16.25 6.4v7.2L10 17.25 3.75 13.6V6.4Z""#,
-    r#"path d="m8 8 2 2-2 2""#,
-    r#"path d="M11 12.5h1.5""#
-);
-icon!(
-    VIM,
-    "rex-vim",
-    r#"path d="m5 5 5 10.5L15 5""#,
-    r#"path d="M3.5 5h4""#,
-    r#"path d="M12.5 5h4""#
-);
-icon!(
-    GIT,
-    "rex-git",
-    r#"circle cx="6.5" cy="5" r="1.75""#,
-    r#"circle cx="6.5" cy="15" r="1.75""#,
-    r#"circle cx="13.5" cy="7" r="1.75""#,
-    r#"path d="M6.5 6.75v6.5""#,
-    r#"path d="M13.5 8.75c0 3-7 2.25-7 4.5""#
-);
-icon!(
-    CRATE,
-    "rex-crate",
-    r#"path d="M10 3 16.25 6.5v7L10 17l-6.25-3.5v-7Z""#,
-    r#"path d="M3.75 6.5 10 10l6.25-3.5""#,
-    r#"path d="M10 10v7""#
-);
-icon!(
-    KEY,
-    "rex-key",
-    r#"circle cx="7" cy="13" r="3""#,
-    r#"path d="m9.2 10.8 6.3-6.3""#,
-    r#"path d="m13.5 6.5 2 2""#
-);
-
-/// Solid marks drawn in `currentColor`, for logos that outlines make unrecognisable.
-macro_rules! mark {
-    ($name:ident, $id:literal, $body:literal) => {
-        pub static $name: Icon = Icon {
-            name: $id,
-            view: 20.0,
-            body: $body,
-        };
-    };
-}
-// Pi: a rounded tile with a block P and dot cut out of it.
-mark!(
-    PI,
-    "rex-pi",
-    r#"<path fill="currentColor" fill-rule="evenodd" d="M5.5 2.5h9a3 3 0 0 1 3 3v9a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3v-9a3 3 0 0 1 3-3ZM6 5.5h7v5.5H9v3.5H6ZM9 7.5h1.75v1.5H9ZM13 12h2v2.5h-2Z"/>"#
-);
-// OpenCode: a heavy block O whose lower counter is shaded.
-mark!(
-    OPENCODE,
-    "rex-opencode",
-    r#"<path fill="currentColor" fill-rule="evenodd" d="M4 2.5h12v15H4ZM7.5 6v8h5V6Z"/><path fill="currentColor" fill-opacity=".45" d="M7.5 10h5v4h-5Z"/>"#
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,7 +605,7 @@ mod tests {
 
     #[test]
     fn from_tokens_copies_every_role() {
-        use rex_linux::dracula_pro::derive::ChromeTokens;
+        use rex_rune::dracula_pro::derive::ChromeTokens;
         let t = ChromeTokens {
             ground: 0x010203,
             popover: 0x111213,
@@ -753,13 +683,11 @@ mod tests {
                 gap.min(360. - gap) >= 30.,
                 "{name}: warning and danger differ in hue"
             );
-            assert!(
-                p.card == p.ground,
-                "{name}: card and ground are one surface"
-            );
-            let paired = rex_linux::terminal_theme::paired(chrome);
-            assert!(
-                (paired.theme)().background == Some(p.ground),
+            assert_eq!(p.card, p.ground, "{name}: one surface");
+            let paired = rex_rune::terminal_theme::paired(chrome);
+            assert_eq!(
+                (paired.theme)().background,
+                Some(p.ground),
                 "{name}: the paired theme sits on the ground"
             );
             set_palette(p);

@@ -2,13 +2,14 @@
 //! ranked by how much it needs the user, with the subtasks its program reports.
 use super::{
     activity::{self, TabActivity},
+    program_icons::{ProgramIcon, program_icon},
     workspace::HostId,
 };
-use rex_linux::connection::{
+use rex_rune::connection::{
     HostModel,
     activity::{ProgramState, StatusRecord, TERMINAL as TERMINAL_CREATOR},
 };
-use rex_linux::settings::ActivityGrouping;
+use rex_rune::settings::ActivityGrouping;
 use std::collections::HashSet;
 
 /// Where a row leads: the pane to focus.
@@ -48,6 +49,16 @@ impl ActivityRow {
     pub fn icon_program(&self) -> Option<&str> {
         let a = &self.activity;
         a.source.as_deref().or(a.program.as_deref())
+    }
+
+    /// The row's icon: [`Self::icon_program`], else what its script or executable is.
+    pub fn icon(&self) -> &'static ProgramIcon {
+        let a = &self.activity;
+        program_icon(
+            self.icon_program(),
+            a.script.as_deref(),
+            a.executable.as_deref(),
+        )
     }
 }
 
@@ -297,7 +308,7 @@ pub fn session_activity(model: &HostModel, session: &str) -> Option<(TabActivity
 mod tests {
     use super::*;
     use crate::app::activity::activity_word;
-    use rex_linux::connection::activity::{BlockedKind, TerminalProgress};
+    use rex_rune::connection::activity::{BlockedKind, TerminalProgress};
     use rexrs::api::session;
     use std::collections::BTreeMap;
 

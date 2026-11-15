@@ -1,6 +1,6 @@
 [package]
-name = "rex-linux"
-version = "0.7.5"
+name = "rex-rune"
+version = "0.10.1"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
@@ -8,7 +8,39 @@ publish = false
 
 [features]
 default = ["ui"]
-ui = ["dep:arboard", "dep:rune", "dep:rune-kit", "dep:rune-theme-opencode", "dep:zbus", "dep:image"]
+ui = [
+    "dep:arboard",
+    "dep:rune",
+    "dep:rune-kit",
+    "dep:rune-theme-opencode",
+    "dep:zbus",
+    "dep:image",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-user-notifications",
+    "dep:block2",
+]
+
+# Desktop notifications over D-Bus, with Rune's own zbus build, where the freedesktop
+# service exists: Linux and the BSDs.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy"], optional = true }
+
+# Desktop notifications through the notification centre on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.5.3", optional = true }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSError", "NSObject", "NSString"], optional = true }
+objc2-user-notifications = { version = "0.2.2", optional = true, features = [
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+block2 = { version = "0.5.1", optional = true }
 
 [dependencies]
 anyhow = "1"
@@ -42,8 +74,6 @@ ring = "0.17"
 sha2 = "0.10"
 ureq = { version = "3.5.0", default-features = false, features = ["rustls"] }
 url = "2"
-# Desktop notifications over D-Bus, with Rune's own zbus build.
-zbus = { version = "6", default-features = false, features = ["tokio", "proxy"], optional = true }
 unicode-segmentation = "1"
 qrcode = { version = "0.14", default-features = false }
 
@@ -55,7 +85,7 @@ debug = false
 opt-level = 2
 
 [[bin]]
-name = "rex-linux"
+name = "rex-rune"
 path = "src/main.rs"
 required-features = ["ui"]
 
@@ -81,7 +111,7 @@ rune = { path = "vendor/rune/crates/rune" }
 rune-motion = { path = "vendor/rune/crates/rune-motion" }
 rune-staging = { path = "vendor/rune/crates/rune-staging" }
 
-# Revision-13 generated types and explicit negotiation range (vendor/rexrs/REX-LINUX.md).
+# Revision-13 generated types and explicit negotiation range (vendor/rexrs/REX-RUNE.md).
 [patch."https://github.com/a10y/rexrs"]
 rexrs = { path = "vendor/rexrs" }
 

@@ -10,11 +10,12 @@ use super::{
     panel::{Intent, PanelKind},
     workspace::{HostId, Workspace},
 };
-use rex_linux::connection::Command;
+use rex_rune::connection::Command;
 use rune::{Ime, Key, KeyEvent, PhysicalKeyCode as Code, Tx};
 
+/// The platform's shortcut modifier: Control, or Command on a Mac.
 fn ctrl(ev: &KeyEvent) -> bool {
-    ev.mods.ctrl || ev.mods.cmd
+    super::platform::keys::primary(ev.mods)
 }
 
 fn space(ev: &KeyEvent, tx: &Tx) -> bool {
@@ -57,15 +58,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
         connected: s.model().connected,
     };
     if s.bindings.context.as_ref() != Some(&context) {
-        if s.bindings.context.as_ref().is_some_and(|old| {
-            old.host != context.host
-                || old.session != context.session
-                || old.generation != context.generation
-                || old.server_revision != context.server_revision
-                || old.connected != context.connected
-        }) {
-            s.bindings.clear_modes();
-        }
+        s.bindings.adopt_modes(context.owner());
         s.bindings.sequence.clear();
         s.bindings.context = Some(context);
     }
@@ -188,7 +181,7 @@ fn dispatch(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, global_only: bool) ->
                     }
                     s.send(
                         s.active,
-                        rex_linux::connection::HostCommand::Action {
+                        rex_rune::connection::HostCommand::Action {
                             generation: s.keymap_generation,
                             request: Box::new(request),
                         },
@@ -290,7 +283,15 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if s.recording().is_some() {
         return super::recorder::key(s, ev, tx);
     }
+    use super::platform::keys::{WindowMenuKey, window_menu_key};
+    let window_key = window_menu_key(&ev.key, ev.mods);
     if let Some(panel) = &s.panel {
+        // The system's Close would fall through to the window and quit Rex: with a popup
+        // or Settings open, Command+W closes that instead.
+        if window_key == Some(WindowMenuKey::Close) {
+            s.cancel_panel(tx);
+            return true;
+        }
         if panel.is_list() && tx.focused().is_none() {
             return list_key(s, ev, tx);
         }
@@ -308,6 +309,11 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if dispatch(s, ev, tx, false) {
         return true;
     }
+    // Unbound, these are the window's: Minimize, and Close if its shortcut was taken away.
+    // Left untaken, the system's window menu acts on them instead of the program.
+    if window_key.is_some() {
+        return false;
+    }
     forward(s, ev, tx, Vec::new())
 }
 
@@ -323,6 +329,7 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
         Action::Press
     };
     let base = tx.key_base();
+    let composes = s.option_composes(tx.alt_keys());
     let Some(term) = s.active_terminal_mut() else {
         return true;
     };
@@ -330,7 +337,10 @@ fn forward(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx, prefix: Vec<String>) -
         return true;
     }
     term.clear_selection();
-    if let Some(payload) = keys::payload(ev, code, base, action) {
+    if let Some(mut payload) = keys::payload(ev, code, base, action) {
+        if composes {
+            keys::option_composed(&mut payload, ev);
+        }
         term.send(if prefix.is_empty() {
             Command::Key(payload)
         } else {
@@ -369,10 +379,14 @@ pub fn on_key_up(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if !s.forwarded.remove(&identity) {
         return consumed || s.panel.is_none();
     }
+    let composes = s.option_composes(tx.alt_keys());
     if let Some(term) = s.active_terminal_mut()
         && term.status().live
-        && let Some(payload) = keys::payload(ev, code, base, Action::Release)
+        && let Some(mut payload) = keys::payload(ev, code, base, Action::Release)
     {
+        if composes {
+            keys::option_composed(&mut payload, ev);
+        }
         term.send(Command::Key(payload));
     }
     true

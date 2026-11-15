@@ -95,6 +95,9 @@ async fn watch(ready: mpsc::SyncSender<()>) {
             store(&value);
         }
     }
+    // WATCH starts once. Keep the last colour preference, and report only the loss
+    // of this optional subscription, not notification-service health or recovery.
+    eprintln!("Rune: desktop appearance updates unavailable; keeping the current appearance.");
 }
 
 #[cfg(test)]

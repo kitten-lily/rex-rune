@@ -271,7 +271,11 @@ impl ThemeDirs {
     /// `$XDG_CONFIG_HOME/ghostty/themes` (default `~/.config`), then
     /// `$GHOSTTY_RESOURCES_DIR/themes`, then `ghostty/themes` under each `$XDG_DATA_DIRS`.
     pub fn from_env() -> Self {
-        Self::from_vars(|key| std::env::var_os(key))
+        let mut dirs = Self::from_vars(|key| std::env::var_os(key));
+        // Last: an explicit `GHOSTTY_RESOURCES_DIR` and the data folders come first.
+        dirs.system
+            .extend(crate::platform::dirs::ghostty_app_themes());
+        dirs
     }
 
     fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
@@ -479,7 +483,7 @@ selection-foreground = #1e1e2e
 
     #[test]
     fn a_users_theme_overrides_ghosttys_and_names_never_leave_the_directory() {
-        let root = std::env::temp_dir().join(format!("rex-linux-themes-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("rex-rune-themes-{}", std::process::id()));
         let (user, system) = (root.join("user"), root.join("system"));
         std::fs::create_dir_all(&user).unwrap();
         std::fs::create_dir_all(&system).unwrap();
@@ -616,29 +620,36 @@ selection-foreground = #1e1e2e
 
     #[test]
     fn the_user_directory_follows_xdg_config_home() {
-        let env = |config: &'static str| {
-            move |key: &str| {
-                Some(OsString::from(match key {
-                    "XDG_CONFIG_HOME" => config,
-                    "HOME" => "/home/someone",
-                    "GHOSTTY_RESOURCES_DIR" => "/opt/ghostty",
-                    "XDG_DATA_DIRS" => "/usr/share:relative",
-                    _ => return None,
-                }))
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let resources = root.path().join("resources");
+        let data = root.path().join("share");
+        let config = root.path().join("xdg");
+        // Drive-qualified absolute paths and the host's path-list separator on Windows;
+        // still include a relative entry to verify it is ignored on every platform.
+        let data_dirs = std::env::join_paths([data.as_path(), Path::new("relative")]).unwrap();
+        let env = |config: &Path| {
+            let config = config.as_os_str().to_owned();
+            let home = home.as_os_str().to_owned();
+            let resources = resources.as_os_str().to_owned();
+            let data_dirs = data_dirs.clone();
+            move |key: &str| match key {
+                "XDG_CONFIG_HOME" => Some(config.clone()),
+                "HOME" => Some(home.clone()),
+                "GHOSTTY_RESOURCES_DIR" => Some(resources.clone()),
+                "XDG_DATA_DIRS" => Some(data_dirs.clone()),
+                _ => None,
             }
         };
-        let dirs = ThemeDirs::from_vars(env("/tmp/xdg"));
-        assert_eq!(dirs.user, Some(PathBuf::from("/tmp/xdg/ghostty/themes")));
+        let dirs = ThemeDirs::from_vars(env(&config));
+        assert_eq!(dirs.user, Some(config.join("ghostty/themes")));
         assert_eq!(
             dirs.system,
-            [
-                PathBuf::from("/opt/ghostty/themes"),
-                PathBuf::from("/usr/share/ghostty/themes")
-            ]
+            [resources.join("themes"), data.join("ghostty/themes")]
         );
         assert_eq!(
-            ThemeDirs::from_vars(env("")).user,
-            Some(PathBuf::from("/home/someone/.config/ghostty/themes")),
+            ThemeDirs::from_vars(env(Path::new(""))).user,
+            Some(home.join(".config/ghostty/themes")),
             "an empty XDG_CONFIG_HOME means ~/.config"
         );
     }

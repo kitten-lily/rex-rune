@@ -25,7 +25,7 @@ if [ -z "$dir" ]; then
         echo "warning: Dracula Pro themes not fetched (no checkout directory: HOME is unset); building with no Dracula Pro themes. Check access with: gh auth status && gh auth setup-git" >&2
         exit 0
     fi
-    dir=$data/rex-linux/dracula-pro-ghostty
+    dir=$data/rex-rune/dracula-pro-ghostty
 fi
 # A trailing slash would put the temporary clone inside the directory.
 while [ "${dir%/}" != "$dir" ] && [ "$dir" != "/" ]; do dir=${dir%/}; done

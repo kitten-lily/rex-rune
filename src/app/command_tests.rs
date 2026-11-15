@@ -6,7 +6,7 @@ use crate::app::{
     commands::{self, Run},
     navigation::Visit,
 };
-use rex_linux::settings::PaneDensity;
+use rex_rune::settings::PaneDensity;
 use rexrs::api::client::{Binding, InspectResponseAction};
 use serde_json::{Value, json};
 
@@ -85,6 +85,7 @@ const IDS: &[&str] = &[
     "host.remote_control",
     "host.reconnect",
     "host.collapse_others",
+    "host.stop_server",
     "host.remove",
     "view.sidebar",
     "view.activity",
@@ -94,6 +95,7 @@ const IDS: &[&str] = &[
     "view.tab_position",
     "view.pane_density",
     "view.toolbar",
+    "view.full_screen",
     "view.pane_headers",
     "view.terminal_theme",
     "view.interface_theme",
@@ -193,7 +195,7 @@ fn notices(ws: &Workspace) -> Vec<&str> {
 }
 
 fn overrides(ws: &mut Workspace, value: Value) {
-    ws.settings.shortcut_file.overrides = rex_linux::keymap::Overrides::parse(&value);
+    ws.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(&value);
     ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);
     ws.keymap_generation += 1;
 }
@@ -206,9 +208,9 @@ fn server_map(ws: &mut Workspace, bindings: Vec<Binding>, actions: Vec<InspectRe
         ..Default::default()
     };
     ws.hosts[0].model.keymap = Some(std::sync::Arc::new(
-        rex_linux::connection::keymap::Snapshot {
+        rex_rune::connection::keymap::Snapshot {
             generation: ws.keymap_generation,
-            resolved: rex_linux::keymap::Resolved::from_server(
+            resolved: rex_rune::keymap::Resolved::from_server(
                 &reply,
                 &ws.settings.shortcut_file.overrides,
             ),
@@ -375,7 +377,7 @@ fn a_search_is_one_list_with_the_best_match_first() {
     search(&mut ws, "quit");
     assert_eq!(labels(&ws), ["Close app"]);
     search(&mut ws, "view");
-    assert_eq!(labels(&ws).len(), 17, "every View command");
+    assert_eq!(labels(&ws).len(), 18, "every View command");
     // A shortcut is found as typed, not by its letters.
     search(&mut ws, "ctrl shift d");
     // The exact D shortcut ranks ahead of the Down prefix.
@@ -408,8 +410,8 @@ fn a_search_still_finds_sessions_and_tabs_after_the_commands() {
     // Commands come first when both match.
     search(&mut ws, "server");
     let groups: Vec<String> = ws.entries().into_iter().map(|e| e.group).collect();
-    assert_eq!(groups, ["Commands", "Tabs · test-0 / s-label"]);
-    assert_eq!(labels(&ws), ["Add host…", "server"]);
+    assert_eq!(groups, ["Commands", "Commands", "Tabs · test-0 / s-label"]);
+    assert_eq!(labels(&ws), ["Stop server…", "Add host…", "server"]);
     std::fs::remove_file(&ws.settings_path).ok();
 }
 
@@ -666,6 +668,22 @@ fn view_commands_name_the_change_they_make() {
     assert_eq!(relaunch(&ws).settings.pane_density, PaneDensity::Compact);
     choose(&mut ws, "view.pane_density");
     assert_eq!(ws.settings.pane_density, PaneDensity::Comfortable);
+
+    assert_eq!(label(&ws, "view.full_screen"), "Enter full screen");
+    ws.traffic_lights(0., 38.);
+    assert_eq!(label(&ws, "view.full_screen"), "Exit full screen");
+    ws.traffic_lights(76., 38.);
+    assert_eq!(label(&ws, "view.full_screen"), "Enter full screen");
+    // A window with no traffic lights says so itself.
+    ws.window_resized([1920., 1080.], false, true);
+    assert_eq!(label(&ws, "view.full_screen"), "Exit full screen");
+    ws.window_resized([1024., 700.], false, false);
+    assert_eq!(label(&ws, "view.full_screen"), "Enter full screen");
+    let full_screen = crate::app::actions::find(crate::app::actions::FULL_SCREEN).unwrap();
+    assert!(matches!(
+        full_screen.remote(),
+        crate::app::actions::Remote::Never(_)
+    ));
 
     // A zoom step that would change nothing is disabled, as the font steps are.
     let zoom = |ws: &Workspace| {

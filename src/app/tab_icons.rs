@@ -1,32 +1,38 @@
-//! Cached program glyphs and local colour policy. No assets, fetching or shell themes.
-use super::{activity::program_icon, theme::*, widgets::glyph, workspace::Workspace};
-use rex_linux::settings::interface::{InterfaceConfig, TabIconColor};
-use rune::{El, Icon, col, el, row, text};
+//! Cached program glyphs and local colour policy. No fetching or shell themes.
+use super::{
+    activity::PaneProgram,
+    program_icons::{ProgramIcon, shell},
+    theme::*,
+    widgets::program_glyph_hovering,
+    workspace::Workspace,
+};
+use rex_rune::settings::interface::{InterfaceConfig, TabIconColor};
+use rune::{El, col, el, row, text};
 
 pub struct TabIcon {
-    pub icon: &'static Icon,
+    pub icon: &'static ProgramIcon,
     pub program: Option<String>,
 }
 
-/// Deduplicate resolved glyphs (vim/nvim, shells/unknowns), not process names.
-pub fn icons_of(programs: &[Option<String>], count: u8) -> Vec<TabIcon> {
+/// Deduplicate resolved icons (vim/vi, shells/unknowns), not process names.
+pub fn icons_of(programs: &[PaneProgram], count: u8) -> Vec<TabIcon> {
     let mut icons: Vec<TabIcon> = Vec::new();
     let count = usize::from(count.min(InterfaceConfig::MAX_TAB_ICONS));
     for program in programs {
         if icons.len() == count {
             break;
         }
-        let icon = program_icon(program.as_deref());
-        if icons.iter().all(|other| other.icon.name != icon.name) {
+        let icon = program.icon();
+        if icons.iter().all(|other| other.icon.slug != icon.slug) {
             icons.push(TabIcon {
                 icon,
-                program: program.clone(),
+                program: program.name.clone(),
             });
         }
     }
     if count > 0 && icons.is_empty() {
         icons.push(TabIcon {
-            icon: program_icon(None),
+            icon: shell(),
             program: None,
         });
     }
@@ -39,31 +45,61 @@ pub fn leading_width(count: usize) -> f32 {
 }
 
 /// Append directly to the existing 8pt-gap row: one keeps the original toolbar tree
-/// and geometry, and zero has no spacer. Preview and both tab surfaces share this.
+/// and geometry, and zero has no spacer. Preview and both tab surfaces share this, and a
+/// pane header too, which passes its own fading as `fade`: it multiplies the glyph's
+/// resting colour and nothing else.
 pub fn append(
+    parent: El,
+    key: &str,
+    icons: &[TabIcon],
+    active: bool,
+    mode: TabIconColor,
+    fade: f32,
+) -> El {
+    each(parent, key, icons, active, mode, fade, false)
+}
+
+/// As [`append`], and each glyph returns to its own resting colour while a hover group around
+/// it is hovered, as the pane header's name beside it does under the pointer.
+pub fn append_restoring(
+    parent: El,
+    key: &str,
+    icons: &[TabIcon],
+    active: bool,
+    mode: TabIconColor,
+    fade: f32,
+) -> El {
+    each(parent, key, icons, active, mode, fade, true)
+}
+
+fn each(
     mut parent: El,
     key: &str,
     icons: &[TabIcon],
     active: bool,
     mode: TabIconColor,
+    fade: f32,
+    restore: bool,
 ) -> El {
     for (index, icon) in icons.iter().enumerate() {
+        let rest = if in_color(mode, active, index == 0) {
+            icon.icon.tint
+        } else if active {
+            ink()
+        } else {
+            muted()
+        };
         let mut cell = el()
             .key(if index == 0 {
                 key.to_owned()
             } else {
                 format!("{key}:{index}")
             })
-            .child(glyph(
+            .child(program_glyph_hovering(
                 icon.icon,
                 15.,
-                rgb(if in_color(mode, active, index == 0) {
-                    tint(icon.icon)
-                } else if active {
-                    ink()
-                } else {
-                    muted()
-                }),
+                rgb(rest).alpha(fade),
+                restore.then(|| rgb(rest)),
             ));
         if let Some(program) = &icon.program {
             cell = cell.help(program.clone());
@@ -84,23 +120,6 @@ pub fn in_color(mode: TabIconColor, on_screen: bool, focused: bool) -> bool {
     }
 }
 
-/// Finite authored-glyph colours, adapted from the read-only cc8bdad prototype.
-/// Lightened for the current palettes' selected/hover surfaces (including the
-/// Settings preview). Shells/unknowns keep the prompt, without tiles or theme imports.
-pub fn tint(icon: &Icon) -> u32 {
-    match icon.name {
-        "rex-claude" => 0xffccaa,
-        "rex-codex" => 0x8cebc9,
-        "rex-opencode" => 0xffd1a8,
-        "rex-pi" => 0xe0d1ff,
-        "rex-vim" => 0xb6e889,
-        "rex-git" => 0xffcad1,
-        "rex-crate" => 0xefd0b6,
-        "rex-key" => 0xf5dc8c,
-        _ => 0xa1edac,
-    }
-}
-
 impl Workspace {
     pub fn step_tab_icons(&mut self, step: i8) {
         self.settings.interface.tab_icon_count = self
@@ -117,7 +136,11 @@ impl Workspace {
 /// A deliberately inert sample, not a fabricated server tab. Uses the real glyph
 /// resolver and row layout, including the zero-icon case.
 pub fn preview(s: &Workspace) -> El {
-    let programs = ["zsh", "claude", "nvim", "git", "cargo"].map(|p| Some(p.to_owned()));
+    let programs = ["zsh", "claude", "nvim", "git", "cargo"].map(|p| PaneProgram {
+        name: Some(p.to_owned()),
+        executable: Some(p.to_owned()),
+        script: None,
+    });
     let icons = icons_of(&programs, s.settings.interface.tab_icon_count);
     let mut samples = col()
         .key("tab-icons-preview")
@@ -143,6 +166,7 @@ pub fn preview(s: &Workspace) -> El {
             &icons,
             active,
             s.settings.interface.tab_icon_color,
+            1.,
         )
         .child(text(label).font(medium(12.5)).color(rgb(if active {
             ink()

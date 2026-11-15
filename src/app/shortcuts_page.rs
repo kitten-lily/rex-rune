@@ -22,7 +22,7 @@ use super::{
     theme::*,
     workspace::Workspace,
 };
-use rex_linux::keymap::{Chord, Key as BoundKey, RECORDED, Resolved};
+use rex_rune::keymap::{Chord, Key as BoundKey, RECORDED, Resolved};
 use rexrs::api::client::{Binding, InspectResponseAction, Removal};
 use rune::{El, Key, KeyEvent, Tx, col, row, text};
 use rune_kit::TextInput;
@@ -38,7 +38,8 @@ const SERVER: &str = "Server";
 
 const HERE: &str = "Recorded here";
 const HELP: &str = "Press a row’s keys to replace or remove them, or Record shortcut to give it some. Filter by a name or a key, such as ctrl+k.";
-const LAYERS: &str = "Shortcuts recorded here override shortcuts.json, which overrides the host's Rex configuration and the Linux defaults. Keys in a named mode apply only while that mode is active; within each mode, bindings are listed in priority order.";
+const HELP_COMMAND: &str = "Press a row’s keys to replace or remove them, or Record shortcut to give it some. Filter by a name or a key, such as cmd+k.";
+const LAYERS: &str = "Shortcuts recorded here override shortcuts.json, which overrides the host's Rex configuration and the built-in defaults. Keys in a named mode apply only while that mode is active; within each mode, bindings are listed in priority order.";
 
 /// One action on the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -214,7 +215,14 @@ fn argument_words(args: &Value) -> String {
 /// Presentation metadata from the existing schema, not another action registry.
 fn argument(spec: &actions::Spec) -> Option<(String, Vec<String>)> {
     let schema = spec.schema()?;
-    let name = schema["required"][0].as_str()?.to_owned();
+    let name = schema["required"][0]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            // An optional enum has explicit choices as well as the no-argument action.
+            let properties = schema["properties"].as_object()?;
+            (properties.len() == 1).then(|| properties.keys().next().unwrap().clone())
+        })?;
     let choices = schema["properties"][&name]["enum"]
         .as_array()
         .map(|values| {
@@ -232,7 +240,7 @@ fn argument(spec: &actions::Spec) -> Option<(String, Vec<String>)> {
 /// an id one for each value something is bound with (or one that says what it needs).
 fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<Plan> {
     let mut plans = Vec::new();
-    let defaults = rex_linux::keymap::defaults().bindings;
+    let defaults = rex_rune::keymap::defaults().bindings;
     for spec in actions::SPECS {
         // Supported actions are discoverable unbound. Aliases and unsupported spellings
         // appear only when bound; diagnostics continue to explain unsupported bindings.
@@ -251,6 +259,9 @@ fn client_plans(groups: &[(Identity, Vec<usize>)], bound: &[Bound<'_>]) -> Vec<P
                 .map(|choice| Some(json!({ name.as_str(): choice })))
                 .collect(),
         };
+        if argument.is_some() && spec.accepts(&Value::Null) {
+            listed.insert(0, None);
+        }
         if alias {
             listed.retain(|args| {
                 groups
@@ -665,9 +676,9 @@ pub fn holder<'a>(
 }
 
 /// Say on a row which of its keys was taken off it on this page.
-pub fn note_recorded_removals(rows: &mut [Row], changes: &[rex_linux::settings::recorded::Change]) {
+pub fn note_recorded_removals(rows: &mut [Row], changes: &[rex_rune::settings::recorded::Change]) {
     for change in changes.iter().filter(|change| change.remove) {
-        let Ok(chords) = rex_linux::keymap::parse_keys(&change.keys) else {
+        let Ok(chords) = rex_rune::keymap::parse_keys(&change.keys) else {
             continue;
         };
         if let Some(row) = rows.iter_mut().find(|row| {
@@ -693,7 +704,7 @@ pub fn note_recorded_removals(rows: &mut [Row], changes: &[rex_linux::settings::
 /// Say on a row which of its default keys shortcuts.json took away, so an action that had a
 /// key says where it went.
 pub fn note_removals(rows: &mut [Row], removals: &[Removal]) {
-    for default in rex_linux::keymap::defaults().bindings {
+    for default in rex_rune::keymap::defaults().bindings {
         let removed = removals.iter().any(|removal| {
             removal.mode.is_none()
                 && removal.keys == default.keys
@@ -702,7 +713,7 @@ pub fn note_removals(rows: &mut [Row], removals: &[Removal]) {
                     .as_ref()
                     .is_none_or(|action| *action == default.action)
         });
-        let Some(chords) = rex_linux::keymap::parse_keys(&default.keys)
+        let Some(chords) = rex_rune::keymap::parse_keys(&default.keys)
             .ok()
             .filter(|_| removed)
         else {
@@ -952,7 +963,7 @@ fn problems_and_files(s: &Workspace, sections: &mut Vec<El>) {
     files.push(file(
         "shortcuts.json",
         "shortcuts-path",
-        rex_linux::settings::shortcuts::Shortcuts::path(&s.settings_path)
+        rex_rune::settings::shortcuts::Shortcuts::path(&s.settings_path)
             .display()
             .to_string(),
         None,
@@ -981,7 +992,12 @@ pub fn page(s: &Workspace) -> El {
     let found = listing(all, &query);
     let mut sections = Vec::new();
     if query.is_empty() {
-        sections.push(footnote(HELP).key("shortcuts-help"));
+        let help = if rex_rune::keymap::command_key() {
+            HELP_COMMAND
+        } else {
+            HELP
+        };
+        sections.push(footnote(help).key("shortcuts-help"));
     }
     if found.is_empty() {
         let nothing = match &found.key {

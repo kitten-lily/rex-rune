@@ -16,7 +16,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-linux"))
+BINARY = os.environ.get("REX_BIN", str(ROOT / "target/release/rex-rune"))
 work = Path(tempfile.mkdtemp(prefix="rex-m27-padding-", dir=Path.home() / ".cache/agent-ws"))
 for tool in ("rex", "Xvfb", "openbox", "xdotool", "import"):
     assert shutil.which(tool), f"{tool} required"
@@ -86,8 +86,9 @@ try:
     sid, block = accept.session("M2.7 private padding")
     desk = accept.Desktop()
     config = work / "workspace.json"
+    # No header row on the single pane: the sizes and the grid origin below are the terminal's.
     config.write_text(json.dumps({"sidebar_open": False, "font_family": "IBM Plex Mono",
-                                 "pane_padding": 24, "interface": {"pane_padding_vertical": 2},
+                                 "pane_header": "hidden", "pane_padding": 24, "interface": {"pane_padding_vertical": 2},
                                  "terminal": {"font": {"line_height": 20, "spacing": 20,
                                                           "spacing_unit": "percent"}}}))
     log = (work / "client.log").open("w")

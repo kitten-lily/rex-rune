@@ -3,7 +3,7 @@ use crate::app::{
     panel::SettingsSection,
     tailscale::{qr_modules, status_words},
 };
-use rex_linux::connection::tailscale::{Call, Status};
+use rex_rune::connection::tailscale::{Call, Status};
 use serde_json::{Value, json};
 
 fn status(value: Value) -> Status {

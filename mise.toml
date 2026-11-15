@@ -9,15 +9,15 @@ run = "bash scripts/fetch-dracula-pro.sh"
 [tasks.build]
 description = "Build the release application"
 depends = ["fetch-dracula-pro"]
-run = "REX_DRACULA_PRO_REV=\"$(bash scripts/fetch-dracula-pro.sh --rev)\" cargo build --locked --release --bin rex-linux && touch target/release/.rex-linux-build.stamp"
+run = "REX_DRACULA_PRO_REV=\"$(bash scripts/fetch-dracula-pro.sh --rev)\" cargo build --locked --release --bin rex-rune && touch target/release/.rex-rune-build.stamp"
 
 [tasks.install]
-description = "Build Rex Linux and install it with a launcher for the current user"
+description = "Build Rex Rune and install it with a launcher for the current user"
 depends = ["build"]
 run = "bash scripts/install-desktop.sh --copy"
 
 [tasks.uninstall]
-description = "Remove the current user's Rex Linux installation"
+description = "Remove the current user's Rex Rune installation"
 run = "bash scripts/install-desktop.sh --uninstall"
 
 [tasks.test]

@@ -2,7 +2,7 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect};
 use super::*;
 use crate::app::{pane_header, panel::SettingsSection, theme::*};
-use rex_linux::settings::{PaneDensity, PaneHeader};
+use rex_rune::settings::{PaneDensity, PaneHeader};
 
 fn settle(rt: &mut Runtime<Workspace>) {
     for _ in 0..90 {
@@ -37,8 +37,17 @@ fn assert_same(a: &[rune::ElementInfo], b: &[rune::ElementInfo]) {
     }
 }
 
+/// The drawn glyph under a key, a child of the cell that carries its colour.
+fn drawn(rt: &Runtime<Workspace>, key: &str) -> Option<rune::Color> {
+    subtree(rt, key)
+        .into_iter()
+        .find(|e| e.text_color.is_some())
+        .unwrap_or_else(|| panic!("no glyph under {key}"))
+        .text_color
+}
+
 fn cues(ws: &mut Workspace) {
-    use rex_linux::connection::activity::{ProgramState, TerminalProgress};
+    use rex_rune::connection::activity::{ProgramState, TerminalProgress};
     let error = record(ProgramState::Working, true);
     ws.hosts[0]
         .model
@@ -198,6 +207,7 @@ fn header_fading_matrix_changes_only_names_and_enabled_icons() {
                                         let name =
                                             a.key.as_deref() == Some(&format!("pane-name:{block}"));
                                         let icon = [
+                                            "pane-icon:",
                                             "pane-close:",
                                             "pane-split-right:",
                                             "pane-split-down:",
@@ -390,19 +400,47 @@ fn header_name_hover_restores_colour_without_focus_or_input() {
         let mut rt = runtime(ws);
         settle(&mut rt);
         let key = format!("pane-name:{block}");
+        let icon_key = format!("pane-icon:{block}");
         let original = element(&rt, &key).text_color.unwrap();
+        assert!(has(&rt, &icon_key), "the header draws its glyph");
+        let lit = drawn(&rt, &icon_key).unwrap();
         let grid = subtree(&rt, &format!("grid:{block}"));
         rt.update(|s, _| s.settings.interface.fade_pane_headers_in_inactive_window = true);
         settle(&mut rt);
         let faded = Some(original.alpha(original.a * pane_header::FADE));
+        let faded_icon = lit.alpha(lit.a * pane_header::FADE);
         assert_eq!(element(&rt, &key).text_color, faded);
+        assert_eq!(drawn(&rt, &icon_key), Some(faded_icon));
         let [x, y, w, h] = rect(&rt, &key);
         rt.pointer_move(x + w / 2., y + h / 2.);
         settle(&mut rt);
         assert_eq!(element(&rt, &key).text_color, Some(original));
+        assert_eq!(
+            drawn(&rt, &icon_key),
+            Some(lit),
+            "the icon returns with the name"
+        );
         rt.pointer_move(0., 0.);
         settle(&mut rt);
         assert_eq!(element(&rt, &key).text_color, faded);
+        assert_eq!(drawn(&rt, &icon_key), Some(faded_icon));
+        // The glyph has its own hover target, inside the same header.
+        let [x, y, w, h] = rect(&rt, &icon_key);
+        rt.pointer_move(x + w / 2., y + h / 2.);
+        settle(&mut rt);
+        assert_eq!(
+            drawn(&rt, &icon_key),
+            Some(lit),
+            "hovering the glyph restores it too"
+        );
+        assert_eq!(
+            element(&rt, &key).text_color,
+            Some(original),
+            "the name comes back with it"
+        );
+        rt.pointer_move(0., 0.);
+        settle(&mut rt);
+        assert_eq!(drawn(&rt, &icon_key), Some(faded_icon));
         assert_same(&grid, &subtree(&rt, &format!("grid:{block}")));
         assert!(quiet(&host) && sent.is_empty() && rt.state.claimed.is_empty());
         std::fs::remove_file(&rt.state.settings_path).ok();

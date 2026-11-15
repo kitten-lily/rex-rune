@@ -1,5 +1,6 @@
 //! Settings → Updates and the non-blocking in-app update notice.
-//! Checks signed metadata; verified install.sh installs can update in a background worker.
+//! Checks signed metadata; verified install.sh installs can update in a background worker,
+//! and a pacman install can ask its package's root helper to (`rex_rune::update::pacman`).
 use super::{
     panel::{Intent, PanelKind, SettingsSection},
     settings_kit::{self, button, card, page, row_frame, setting, unavailable, value, words},
@@ -7,11 +8,12 @@ use super::{
     widgets::{Pill, glyph, pill},
     workspace::Workspace,
 };
-use rex_linux::update::{
-    AvailableUpdate, CHECK_INTERVAL_SECS, CheckConfig, CheckOutcome, InstallChannel, STARTUP_DELAY,
-    UpdateState, check_for_updates,
+use rex_rune::update::{
+    AvailableUpdate, CHECK_INTERVAL_SECS, ChannelGuidance, CheckConfig, CheckOutcome,
+    InstallChannel, STARTUP_DELAY, UpdateState, check_for_updates,
     installer::{self, Progress},
     now_epoch_secs,
+    pacman::{CLIENT, Helper, Outcome},
 };
 use rune::{Cursor, El, Tx, col, el, row, text};
 use rune_kit::Switch;
@@ -44,6 +46,25 @@ pub struct Updates {
     pub last_error: Option<String>,
     pub next_check: Option<Instant>,
     pub env_opt_out: bool,
+    /// The pacman package's update helper and `pkexec`, when this is that package's
+    /// install and both are there. Without it a pacman install gets instructions only.
+    pub pacman: Option<Helper>,
+}
+
+/// The pacman install's own words once Update now can be offered for it.
+const PACMAN_DETAIL: &str = "Installed from the signed Arch repository. Update now asks for your password (an administrator's) and upgrades this one package; restart when ready.";
+const OMARCHY_DETAIL: &str = "Installed from the signed Arch / Omarchy repository. `omarchy update` is the recommended way: it updates Rex Rune with the rest of the system. Update now asks for your password (an administrator's) and upgrades this one package on its own.";
+
+/// Whether this pacman install is Rex's own package, which is the one that has the helper.
+/// A package from elsewhere says how to update it in its marker (`custom_hint`).
+fn own_package(channel: &InstallChannel) -> bool {
+    matches!(
+        channel,
+        InstallChannel::Pacman {
+            custom_hint: None,
+            ..
+        }
+    )
 }
 
 impl Default for Updates {
@@ -55,7 +76,7 @@ impl Default for Updates {
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
             let config = CheckConfig {
                 state_path: std::env::temp_dir().join(format!(
-                    "rex-linux-test-updates-{}-{id}.json",
+                    "rex-rune-test-updates-{}-{id}.json",
                     std::process::id()
                 )),
                 ..CheckConfig::default()
@@ -69,6 +90,7 @@ impl Default for Updates {
                 next_check: None,
                 env_opt_out: false,
                 installation: Installation::Idle,
+                pacman: None,
             }
         }
         #[cfg(not(test))]
@@ -76,7 +98,8 @@ impl Default for Updates {
             let channel = InstallChannel::detect();
             let config = CheckConfig::default();
             let state = UpdateState::load(&config.state_path);
-            let env_opt_out = rex_linux::update::env_disabled();
+            let env_opt_out = rex_rune::update::env_disabled();
+            let pacman = own_package(&channel).then(Helper::installed).flatten();
             Self {
                 channel,
                 state,
@@ -86,6 +109,7 @@ impl Default for Updates {
                 next_check: None,
                 env_opt_out,
                 installation: Installation::Idle,
+                pacman,
             }
         }
     }
@@ -103,6 +127,42 @@ impl Updates {
             return None;
         }
         self.available().filter(|u| !u.dismissed)
+    }
+
+    /// The helper to ask, when Update now can be offered for a pacman install.
+    pub fn pacman_helper(&self) -> Option<&Helper> {
+        self.pacman.as_ref().filter(|_| own_package(&self.channel))
+    }
+
+    /// Whether Update now can install `available` here: an install.sh install, or Rex's
+    /// pacman package with its helper.
+    pub fn can_install(&self, available: &AvailableUpdate) -> bool {
+        available.unsupported_floor.is_none()
+            && (self.channel == InstallChannel::Tarball || self.pacman_helper().is_some())
+    }
+
+    /// The channel's instructions, saying Update now where a pacman install has it. The
+    /// command stays as the fallback.
+    pub fn guidance(&self, version: &str) -> ChannelGuidance {
+        let mut guidance = self.channel.guidance(version);
+        if self.pacman_helper().is_some() {
+            let omarchy = matches!(self.channel, InstallChannel::Pacman { omarchy: true, .. });
+            let version = rex_rune::format_version(version);
+            guidance.summary = if omarchy {
+                format!(
+                    "Rex Rune {version} is available. Run `omarchy update`, or open Settings → Updates to install it."
+                )
+            } else {
+                format!("Rex Rune {version} is available. Open Settings → Updates to install it.")
+            };
+            guidance.detail = if omarchy {
+                OMARCHY_DETAIL
+            } else {
+                PACMAN_DETAIL
+            }
+            .into();
+        }
+        guidance
     }
 
     /// Whether automatic background checks are enabled by channel, environment, and preference.
@@ -144,13 +204,13 @@ impl Updates {
 pub fn section(s: &Workspace) -> El {
     let k = kit();
     let u = &s.updates;
-    let current = &rex_linux::format_version(&u.config.current_version);
+    let current = &rex_rune::format_version(&u.config.current_version);
     let channel_label = u.channel.label();
     let auto_allowed = u.channel.checks_by_default() && !u.env_opt_out;
     let switch_on = s.settings.updates.check && auto_allowed;
 
     let toggle_detail = if u.env_opt_out {
-        "Turned off by REX_LINUX_NO_UPDATE_CHECK=1 in the environment."
+        "Turned off by REX_RUNE_NO_UPDATE_CHECK=1 in the environment."
     } else if !u.channel.checks_by_default() {
         "Source builds never check on their own; use Check now."
     } else {
@@ -166,16 +226,16 @@ pub fn section(s: &Workspace) -> El {
     } else if let Some(avail) = u.available() {
         match &avail.unsupported_floor {
             Some(floor) => format!(
-                "Rex Linux {} is available (requires upgrading to {floor}+ first).",
-                rex_linux::format_version(&avail.version)
+                "Rex Rune {} is available (requires upgrading to {floor}+ first).",
+                rex_rune::format_version(&avail.version)
             ),
             None => format!(
-                "Rex Linux {} is available.",
-                rex_linux::format_version(&avail.version)
+                "Rex Rune {} is available.",
+                rex_rune::format_version(&avail.version)
             ),
         }
     } else if u.state.last_checked.is_some() {
-        format!("Rex Linux {current} is up to date.")
+        format!("Rex Rune {current} is up to date.")
     } else {
         "Not checked yet.".into()
     };
@@ -253,10 +313,10 @@ pub fn section(s: &Workspace) -> El {
     }
 
     if let Some(avail) = u.available() {
-        let guidance = u.channel.guidance(&avail.version);
+        let guidance = u.guidance(&avail.version);
         let notes_url = avail.notes_url.clone();
         let version_for_dismiss = avail.version.clone();
-        let can_install = u.channel == InstallChannel::Tarball && avail.unsupported_floor.is_none();
+        let can_install = u.can_install(&avail);
         let mut actions = col().gap(8.);
         if can_install && !u.installation.busy() && !u.checking {
             actions = actions.child(button(
@@ -291,7 +351,7 @@ pub fn section(s: &Workspace) -> El {
         };
         let mut rows = vec![
             setting(
-                &format!("Rex Linux {}", rex_linux::format_version(&avail.version)),
+                &format!("Rex Rune {}", rex_rune::format_version(&avail.version)),
                 &detail,
                 actions,
             )
@@ -344,11 +404,11 @@ pub fn section(s: &Workspace) -> El {
 /// Non-blocking toast card for an available update, with What's new, Updates…, and Dismiss.
 pub fn toast_card(s: &Workspace) -> Option<El> {
     let avail = s.updates.visible_notice(s.settings.updates.check)?;
-    let guidance = s.updates.channel.guidance(&avail.version);
+    let guidance = s.updates.guidance(&avail.version);
     let summary = match &avail.unsupported_floor {
         Some(floor) => format!(
-            "Rex Linux {} is available (manual upgrade via {floor}+ required).",
-            rex_linux::format_version(&avail.version)
+            "Rex Rune {} is available (manual upgrade via {floor}+ required).",
+            rex_rune::format_version(&avail.version)
         ),
         None => guidance.summary,
     };
@@ -445,19 +505,19 @@ impl Workspace {
     // Settings-only actions: intentionally absent from Commands and remote client.perform.
     // Installing and re-exec must remain local, deliberate actions (or explicit saved opt-in).
     pub fn install_update_now(&mut self) {
-        if self.updates.channel != InstallChannel::Tarball
-            || self.updates.installation.busy()
-            || self.updates.checking
-        {
+        if self.updates.installation.busy() || self.updates.checking {
             return;
         }
         let Some(available) = self
             .updates
             .available()
-            .filter(|u| u.unsupported_floor.is_none())
+            .filter(|u| self.updates.can_install(u))
         else {
             return;
         };
+        if let Some(helper) = self.updates.pacman_helper().cloned() {
+            return self.update_pacman_package(helper, available.version);
+        }
         self.updates.installation =
             Installation::Working("Verifying install receipt and signed release…".into());
         let config = self.updates.config.clone();
@@ -493,6 +553,43 @@ impl Workspace {
             self.updates.installation =
                 Installation::Failed(format!("could not start update worker: {error}"));
         }
+    }
+
+    /// Ask the package's root helper for `version`, on a worker: it waits for polkit's
+    /// dialog and then for the whole update. The helper reports nothing until it ends.
+    fn update_pacman_package(&mut self, helper: Helper, version: String) {
+        self.updates.installation = Installation::Working(format!(
+            "Waiting for your password, then downloading, checking and installing Rex Rune {}…",
+            rex_rune::format_version(&version)
+        ));
+        let handle = self.handle.clone();
+        let spawn = std::thread::Builder::new()
+            .name("rex-pacman-update".into())
+            .spawn(move || {
+                let outcome = helper.update(&version);
+                handle.update(move |s, _| s.finish_pacman_update(outcome));
+            });
+        if let Err(error) = spawn {
+            self.updates.installation =
+                Installation::Failed(format!("could not start update worker: {error}"));
+        }
+    }
+
+    /// What the helper's exit means here. Only an upgrade offers Restart, into the client
+    /// the package installs; a closed dialog is not a failure; anything else names the
+    /// reason and leaves the command to copy.
+    pub fn finish_pacman_update(&mut self, outcome: Outcome) {
+        self.updates.installation = match outcome {
+            Outcome::Installed => {
+                self.inform("Update installed. Settings → Updates offers Restart to finish.");
+                Installation::Ready(CLIENT.into())
+            }
+            Outcome::Dismissed => {
+                self.inform("Update cancelled. Nothing was installed.");
+                Installation::Idle
+            }
+            Outcome::Refused(refusal) => Installation::Failed(refusal.sentence()),
+        };
     }
 
     fn restart_after_update(&mut self, tx: &mut Tx) {
@@ -612,13 +709,16 @@ impl Workspace {
                     }
                     CheckOutcome::UpToDate { version } => {
                         if manual {
-                            self.inform(format!("Rex Linux {version} is up to date."));
+                            self.inform(format!("Rex Rune {version} is up to date."));
                         }
                     }
                 }
                 self.updates.state = state;
                 self.updates.schedule(self.settings.updates.check, now);
+                // Never on its own for a pacman install: that would open a password dialog
+                // nobody asked for.
                 if self.settings.updates.install_automatically
+                    && self.updates.channel == InstallChannel::Tarball
                     && self.updates.auto_check_enabled(self.settings.updates.check)
                     && matches!(self.updates.installation, Installation::Idle)
                 {

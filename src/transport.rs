@@ -16,15 +16,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 pub type Socket = WebSocketStream<tokio_tungstenite::MaybeTlsStream<Box<dyn Io>>>;
 
 pub fn local_endpoint() -> String {
-    std::env::var("REX_SERVER").unwrap_or_else(|_| {
-        let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
-        format!("unix://{runtime}/rex/server.sock")
-    })
+    crate::platform::local::default_endpoint()
 }
 
 async fn io(endpoint: &str, url: &url::Url) -> Result<Box<dyn Io>> {
     if let Some(path) = endpoint.strip_prefix("unix://") {
-        return Ok(Box::new(tokio::net::UnixStream::connect(path).await?));
+        return crate::platform::local::connect(std::path::Path::new(path)).await;
     }
     let host = url.host_str().context("endpoint needs a host")?;
     let port = url
@@ -48,7 +45,7 @@ fn detect_silent_peer(tcp: &tokio::net::TcpStream) -> std::io::Result<()> {
             .with_interval(Duration::from_secs(5))
             .with_retries(3),
     )?;
-    socket.set_tcp_user_timeout(Some(Duration::from_secs(30)))
+    crate::platform::net::set_unacknowledged_limit(tcp, Duration::from_secs(30))
 }
 
 pub async fn socket(endpoint: &str, path: &str, protocol: &str) -> Result<Socket> {
@@ -214,7 +211,7 @@ pub async fn control_with_label(
     // This is an attachment-only client. Server lifetime and listener configuration
     // belong to the existing upstream Rex server, including its Tailscale identity.
     let socket = socket(endpoint, "/api/control", "rex.control.v1").await?;
-    connect(socket, reconnect, "Rex Linux", label).await
+    connect(socket, reconnect, "Rex Rune", label).await
 }
 
 pub(crate) async fn control_from_socket(
@@ -236,7 +233,6 @@ async fn connect(
         .name(name)
         .version(env!("CARGO_PKG_VERSION"))
         .api_revisions(MIN_API_REVISION..=API_REVISION)
-        .platform("linux")
         .kind(rexrs::ClientKind::App);
     if let Some(token) = reconnect {
         builder = builder.reconnect_token(token);
@@ -259,7 +255,8 @@ async fn connect(
     Ok(client)
 }
 
-#[cfg(test)]
+// socket2 exposes the keepalive time and interval getters only on Unix.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -281,9 +278,12 @@ mod tests {
             Duration::from_secs(5)
         );
         assert_eq!(socket.tcp_keepalive_retries().unwrap(), 3);
-        assert_eq!(
-            socket.tcp_user_timeout().unwrap(),
-            Some(Duration::from_secs(30))
-        );
+        // Linux and macOS have an option for it; elsewhere keepalive is all there is.
+        let limit = crate::platform::net::unacknowledged_limit(&tcp).unwrap();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert_eq!(limit, Some(Duration::from_secs(30)));
+        } else {
+            assert_eq!(limit, None);
+        }
     }
 }

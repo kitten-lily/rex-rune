@@ -42,9 +42,20 @@ pub(crate) fn reduced_motion() -> bool {
 unsafe fn gnome_animations() -> Option<bool> {
     use std::ffi::{c_char, c_void};
     type Ptr = *mut c_void;
-    // SAFETY: signatures match GIO/GLib's public C API; every reference is released while
-    // the library is loaded. Null source/schema/settings are handled before use.
+    // SAFETY: signatures match GIO/GLib's public C API. The static library outlives
+    // retained references/callbacks. Null source/schema/settings are handled before use.
     unsafe {
+        struct SessionBus { ptr: Ptr, unref: unsafe extern "C" fn(Ptr) }
+        // SAFETY: GDBusConnection methods and GObject ref/unref are thread-safe. The
+        // mutex transfers one owned reference; it never lends the pointer to callers.
+        unsafe impl Send for SessionBus {}
+        impl Drop for SessionBus {
+            fn drop(&mut self) {
+                // SAFETY: owns one non-null g_bus_get_sync reference; GIO stays loaded.
+                unsafe { (self.unref)(self.ptr); }
+            }
+        }
+        static SESSION_BUS: std::sync::Mutex<Option<SessionBus>> = std::sync::Mutex::new(None);
         static GIO: std::sync::OnceLock<Option<libloading::Library>> = std::sync::OnceLock::new();
         let gio = GIO.get_or_init(|| libloading::Library::new("libgio-2.0.so.0").ok()).as_ref()?;
         let default = gio.get::<unsafe extern "C" fn() -> Ptr>(b"g_settings_schema_source_get_default\0").ok()?;
@@ -54,11 +65,41 @@ unsafe fn gnome_animations() -> Option<bool> {
         let get = gio.get::<unsafe extern "C" fn(Ptr, *const c_char) -> i32>(b"g_settings_get_boolean\0").ok()?;
         let schema_unref = gio.get::<unsafe extern "C" fn(Ptr)>(b"g_settings_schema_unref\0").ok()?;
         let unref = gio.get::<unsafe extern "C" fn(Ptr)>(b"g_object_unref\0").ok()?;
+        let bus_get = gio.get::<unsafe extern "C" fn(i32, Ptr, *mut Ptr) -> Ptr>(b"g_bus_get_sync\0").ok()?;
+        let exit_on_close = gio.get::<unsafe extern "C" fn(Ptr, i32)>(b"g_dbus_connection_set_exit_on_close\0").ok()?;
+        let is_closed = gio.get::<unsafe extern "C" fn(Ptr) -> i32>(b"g_dbus_connection_is_closed\0").ok()?;
         let source = default();
         if source.is_null() { return None; }
         let schema = lookup(source, c"org.gnome.desktop.interface".as_ptr(), 1);
         if schema.is_null() { return None; }
         if has_key(schema, c"enable-animations".as_ptr()) == 0 { schema_unref(schema); return None; }
+        // GSettings' dconf backend can initialize GVfs, which acquires GIO's shared
+        // session bus with exit-on-close enabled. Desktop preferences are optional:
+        // set that connection's policy before constructing the backend. dconf also
+        // acquires the shared connection asynchronously, AFTER construction returns:
+        // keep one current reference across samples so it gets the protected object.
+        // A successful read after reconnection replaces/releases the old reference.
+        // GIO can return a retained closed singleton. Release ours before asking
+        // for its replacement. is_closed only reads a thread-safe local flag.
+        let closed = {
+            let mut current = SESSION_BUS.lock().unwrap();
+            if current.as_ref().is_some_and(|bus| is_closed(bus.ptr) != 0) { current.take() } else { None }
+        };
+        drop(closed);
+        // G_BUS_TYPE_SESSION = 2; null cancellable/error are allowed by GIO's API.
+        let bus = bus_get(2, std::ptr::null_mut(), std::ptr::null_mut());
+        if bus.is_null() { schema_unref(schema); return None; }
+        // GIO/backend references can keep the closed singleton alive. Do not call
+        // a cached GSettings value a successful read: sampling may remain unavailable
+        // until app restart. We do not drive GLib callbacks or add appearance recovery.
+        if is_closed(bus) != 0 { unref(bus); schema_unref(schema); return None; }
+        exit_on_close(bus, 0);
+        let previous = {
+            let mut current = SESSION_BUS.lock().unwrap();
+            current.replace(SessionBus { ptr: bus, unref: *unref })
+        };
+        // No lock across connection I/O, backend construction or object destruction.
+        drop(previous);
         let settings = new(schema, std::ptr::null_mut(), std::ptr::null());
         schema_unref(schema);
         if settings.is_null() { return None; }

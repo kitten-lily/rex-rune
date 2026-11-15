@@ -228,6 +228,8 @@ impl Probes {
         let event = match done.probe {
             Probe::Status => {
                 let records = activity::parse_status(reply);
+                // A record reported live from now on is a state this client watched begin.
+                model.status_read.insert(block.clone());
                 if records.is_empty() {
                     model.activity.remove(&block);
                 } else {
@@ -572,6 +574,8 @@ mod tests {
                 Probe::Process,
                 BlockEvent::Process {
                     name: Some("live".into()),
+                    executable: None,
+                    script: None,
                     pids: vec![],
                     place: Default::default(),
                 },

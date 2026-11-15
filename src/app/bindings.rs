@@ -1,6 +1,6 @@
 //! Layout-aware matching and sequence/repeat state, adapted from Andrea Zito
 //! (nivox), 8037d78. Input is plain data: no Tx or workspace needed by the matcher.
-use rex_linux::keymap::{Chord, Key as BindingKey, Modifiers, Resolved};
+use rex_rune::keymap::{Chord, Key as BindingKey, Resolved};
 use rune::{Key, KeyEvent, PhysicalKeyCode as Code};
 
 #[derive(Clone, Copy)]
@@ -63,13 +63,13 @@ fn character(key: &Key) -> Option<char> {
 }
 
 pub fn matches(chord: &Chord, input: Input<'_>) -> bool {
+    matches_on(chord, input, rex_rune::keymap::command_key())
+}
+
+/// [`matches`] where shortcuts are on Command (a Mac) or on Control.
+pub fn matches_on(chord: &Chord, input: Input<'_>, command: bool) -> bool {
     let m = input.event.mods;
-    let mods = Modifiers {
-        ctrl: m.ctrl || m.cmd,
-        alt: m.alt,
-        shift: m.shift,
-        logo: m.logo,
-    };
+    let mods = super::platform::keys::modifiers_on(m, command);
     if chord.modifiers != mods {
         return false;
     }
@@ -129,16 +129,16 @@ pub fn matches(chord: &Chord, input: Input<'_>) -> bool {
 /// are; a key with neither by its physical code. None for a modifier on its own, a dead key
 /// and a key that has no spelling.
 pub fn chord_of(input: Input<'_>) -> Option<Chord> {
+    chord_of_on(input, rex_rune::keymap::command_key())
+}
+
+/// [`chord_of`] where shortcuts are on Command (a Mac) or on Control.
+pub fn chord_of_on(input: Input<'_>, command: bool) -> Option<Chord> {
     if matches!(input.event.key, Key::Modifier { .. } | Key::Dead(_)) {
         return None;
     }
     let m = input.event.mods;
-    let modifiers = Modifiers {
-        ctrl: m.ctrl || m.cmd,
-        alt: m.alt,
-        shift: m.shift,
-        logo: m.logo,
-    };
+    let modifiers = super::platform::keys::modifiers_on(m, command);
     let typed = character(&input.event.key);
     let mut spellings: Vec<String> = Vec::new();
     match &input.event.key {
@@ -181,7 +181,7 @@ pub fn chord_of(input: Input<'_>) -> Option<Chord> {
             chord.modifiers = modifiers;
             Some(chord)
         })
-        .find(|chord| matches(chord, input))
+        .find(|chord| matches_on(chord, input, command))
 }
 
 #[derive(Default)]
@@ -284,9 +284,37 @@ pub struct Context {
     pub connected: bool,
 }
 
+/// What a key mode belongs to: the host, session, keymap generation, server revision and
+/// connection it was entered under. A panel, a pane or the focused control may change without
+/// ending one. One record serves entry, the next key and the state changes in between, so a
+/// mode ends at the change rather than at the key after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Owner {
+    pub host: super::workspace::HostId,
+    pub session: Option<String>,
+    pub generation: u64,
+    pub server_revision: u64,
+    pub connected: bool,
+}
+
+impl Context {
+    /// The ownership part of this per-key context.
+    pub fn owner(&self) -> Owner {
+        Owner {
+            host: self.host,
+            session: self.session.clone(),
+            generation: self.generation,
+            server_revision: self.server_revision,
+            connected: self.connected,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct State {
     pub modes: Vec<(String, bool)>,
+    /// Who the mode stack belongs to; `None` until a mode is entered.
+    pub owner: Option<Owner>,
     /// Map used for the current sequence, including mode blocks and priority.
     pub mode_map: Option<Resolved>,
     pub sequence: Sequence,
@@ -303,6 +331,15 @@ impl State {
     pub fn enter_mode(&mut self, name: &str, once: bool) {
         self.sequence.clear();
         self.modes.push((name.into(), once));
+    }
+    /// Take the mode stack as `owner`'s: a stack entered under another host, session, keymap
+    /// generation, server revision or connection ends here, so switching away and back cannot
+    /// show a mode nobody entered again.
+    pub fn adopt_modes(&mut self, owner: Owner) {
+        if self.owner.as_ref() != Some(&owner) {
+            self.clear_modes();
+        }
+        self.owner = Some(owner);
     }
     pub fn exit_mode(&mut self) {
         self.sequence.clear();

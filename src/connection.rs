@@ -69,6 +69,39 @@ pub struct Options {
 }
 
 impl Options {
+    /// The command line of this process. Started through the old `rex-linux` name, it names
+    /// itself that way: the 0.7.x updater and older scripts check that `--version` prints
+    /// exactly `rex-linux X.Y.Z` before they install or accept the binary.
+    pub fn from_command_line() -> Self {
+        Self::from_arguments(std::env::args_os(), crate::legacy::invoked_as_legacy())
+    }
+
+    fn from_arguments(
+        arguments: impl IntoIterator<Item = std::ffi::OsString>,
+        legacy_name: bool,
+    ) -> Self {
+        use clap::{CommandFactory as _, FromArgMatches as _};
+        let mut command = Self::command();
+        if legacy_name {
+            command = command.name(crate::legacy::NAME);
+        }
+        let matches = command.get_matches_from(arguments);
+        Self::from_arg_matches(&matches).unwrap_or_else(|error| error.exit())
+    }
+
+    /// What `--version` prints, under the current name or the old one.
+    #[cfg(test)]
+    fn version_line(legacy_name: bool) -> String {
+        use clap::CommandFactory as _;
+        let mut command = Self::command();
+        if legacy_name {
+            command = command.name(crate::legacy::NAME);
+        }
+        command.render_version()
+    }
+}
+
+impl Options {
     pub fn startup_size(&self, settings: &crate::settings::Settings) -> (f32, f32) {
         self.window_size
             .as_deref()
@@ -205,6 +238,9 @@ pub struct ProtocolStats {
     pub data_connect_requests: u64,
 }
 
+/// What the person is told when the server took a stop request.
+const STOP_ACCEPTED: &str = "Server stop accepted. Rex Rune will not start it again.";
+
 #[derive(Clone, Default)]
 pub struct HostModel {
     /// A successful SSH lookup found no default server; setup may be offered, never run.
@@ -223,6 +259,8 @@ pub struct HostModel {
     /// This launch's downloads from the host, oldest first; see [`crate::download`].
     pub downloads: Vec<crate::download::Transfer>,
     pub connection_epoch: u64,
+    /// Last explicit stop outcome, kept on Server settings as well as in the host notice.
+    pub server_stop_result: Option<String>,
     pub protocol: ProtocolStats,
     pub sessions: Vec<session::Session>,
     pub selected: Option<String>,
@@ -236,6 +274,11 @@ pub struct HostModel {
     pub activity: HashMap<String, BTreeMap<String, StatusRecord>>,
     /// Each terminal block's foreground program, when the server named one.
     pub programs: HashMap<String, String>,
+    /// The executable behind each block's foreground program (a script's interpreter), for
+    /// its icon only.
+    pub executables: HashMap<String, String>,
+    /// The path of each block's foreground script, for its icon only.
+    pub scripts: HashMap<String, String>,
     /// Each terminal block's foreground process and its ancestors, by pid.
     pub foreground: HashMap<String, Vec<u64>>,
     /// Each terminal block's title, as a program last set it, and the pid that set it.
@@ -258,6 +301,9 @@ pub struct HostModel {
     /// Bumped whenever `activity` is dropped wholesale (on reconnect), so the UI starts its
     /// before-and-after comparison over instead of reading the gap as programs finishing.
     pub activity_epoch: u64,
+    /// Panes whose program status was read on this connection: a first report from one of
+    /// these is a state this client watched begin. Presentation only.
+    pub status_read: HashSet<String>,
     /// The server refused `set_theme`, so this host is never sent a theme again.
     pub themes_unsupported: bool,
     /// A theme was declared to this server, by `set_theme` or in a new block's layout.
@@ -330,8 +376,11 @@ impl HostModel {
     /// Apply an event, live or a probe's answer.
     fn record_block_event(&mut self, session: &str, block: String, event: BlockEvent) {
         match event {
-            BlockEvent::StatusChanged { id, record } => {
-                self.activity.entry(block).or_default().insert(id, record);
+            BlockEvent::StatusChanged { id, mut record } => {
+                let read = self.status_read.contains(&block);
+                let records = self.activity.entry(block).or_default();
+                record.observe_at(records.get(&id), read, std::time::Instant::now());
+                records.insert(id, record);
             }
             BlockEvent::StatusRemoved { ids } => {
                 if let Some(records) = self.activity.get_mut(&block) {
@@ -343,7 +392,13 @@ impl HostModel {
                     }
                 }
             }
-            BlockEvent::Process { name, pids, place } => {
+            BlockEvent::Process {
+                name,
+                executable,
+                script,
+                pids,
+                place,
+            } => {
                 self.set_place(&block, place);
                 // A progress report belongs to the program in the foreground; one that ends
                 // without clearing its report (a crash, a kill) must not leave it on the tab.
@@ -358,6 +413,14 @@ impl HostModel {
                 match name {
                     Some(name) => self.programs.insert(block.clone(), name),
                     None => self.programs.remove(&block),
+                };
+                match executable {
+                    Some(executable) => self.executables.insert(block.clone(), executable),
+                    None => self.executables.remove(&block),
+                };
+                match script {
+                    Some(script) => self.scripts.insert(block.clone(), script),
+                    None => self.scripts.remove(&block),
                 };
                 if left || self.programs.get(&block) != was.as_ref() {
                     self.progress.remove(&block);
@@ -409,6 +472,8 @@ impl HostModel {
     fn forget_block(&mut self, block: &str) {
         self.activity.remove(block);
         self.programs.remove(block);
+        self.executables.remove(block);
+        self.scripts.remove(block);
         self.foreground.remove(block);
         self.titles.remove(block);
         self.cwds.remove(block);
@@ -444,6 +509,10 @@ impl HostModel {
 }
 
 pub enum HostCommand {
+    /// A person's confirmed, single attempt on this connection only. Never replayed.
+    StopServer {
+        epoch: u64,
+    },
     PerformReply {
         epoch: u64,
         call_id: String,
@@ -1507,10 +1576,18 @@ async fn run_host(
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
+                // A server is answering again, so "stop accepted" is no longer the news. A
+                // refusal or an unconfirmed stop stays: the person has not seen it resolved.
+                if m.server_stop_result.as_deref() == Some(STOP_ACCEPTED) {
+                    m.server_stop_result = None;
+                }
                 m.views.clear();
                 // Reports made while disconnected were missed; queries refill what's shown.
                 m.activity.clear();
+                m.status_read.clear();
                 m.programs.clear();
+                m.executables.clear();
+                m.scripts.clear();
                 m.foreground.clear();
                 m.titles.clear();
                 m.cwds.clear();
@@ -1686,6 +1763,35 @@ async fn run_host(
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
                         if matches!(command, HostCommand::Reconnect) { return Ok(false); }
+                        if let HostCommand::StopServer { epoch } = command {
+                            if epoch != shared.model.lock().expect("host model").connection_epoch {
+                                shared.update(|m| m.notice = Some("Stop not sent: the connection changed. Review Stop server again.".into()));
+                                continue;
+                            }
+                            match request(&mut control, "server.stop", json!({})).await {
+                                Ok(_) => {
+                                    shared.update(|m| {
+                                        m.notice = Some(STOP_ACCEPTED.into());
+                                        m.server_stop_result = m.notice.clone();
+                                    });
+                                    // The API replies before shutdown and asks the caller to close.
+                                    let _ = control.close().await;
+                                    return Ok(false);
+                                }
+                                Err(error) => {
+                                    let api = error.downcast_ref::<rexrs::Error>().and_then(|e| e.api());
+                                    let message = api.map(|e| crate::download::display_text(&e.to_string()));
+                                    shared.update(|m| {
+                                        m.notice = Some(message.map_or_else(
+                                            || "Could not confirm server stop: the connection dropped or did not reply. Check the host before trying again. Nothing was retried.".into(),
+                                            |message| format!("Could not stop server: {message}. Nothing was retried.")));
+                                        m.server_stop_result = m.notice.clone();
+                                    });
+                                    if api.is_none() { return Err(error); }
+                                }
+                            }
+                            continue;
+                        }
                         if let HostCommand::Keymap(new) = command {
                             keymap::refresh(&mut control, shared, &new).await;
                             keymap = Some(new);
@@ -1835,6 +1941,15 @@ async fn run_host(
                 HostCommand::Download(request) => {
                     downloads::refuse(shared, *request, crate::download::Failure::Disconnected)
                 }
+                // Confirmed, but the connection failed before it was read: say so, since
+                // the dialog has already closed.
+                HostCommand::StopServer { .. } => shared.update(|m| {
+                    m.notice = Some(
+                        "Stop not sent: the connection dropped first. Check the host before trying again. Nothing was retried."
+                            .into(),
+                    );
+                    m.server_stop_result = m.notice.clone();
+                }),
                 _ => {}
             }
         }
@@ -2257,6 +2372,7 @@ async fn handle_command(
         HostCommand::ListDir(_)
         | HostCommand::Reconnect
         | HostCommand::Shutdown
+        | HostCommand::StopServer { .. }
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)
         | HostCommand::KeepTailscale(_)

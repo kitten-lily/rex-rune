@@ -13,8 +13,8 @@ use super::{
     theme::*,
     workspace::Workspace,
 };
-use rex_linux::settings::{
-    terminal::{CursorStyle, SelectionColor, TerminalConfig},
+use rex_rune::settings::{
+    terminal::{CursorStyle, OptionKey, SelectionColor, TerminalConfig},
     typography::FontStyle,
 };
 use rune::{El, TextStyle, col, row, text};
@@ -158,19 +158,35 @@ fn cursor(s: &Workspace, inks: &Inks) -> El {
 }
 
 fn keyboard(s: &Workspace) -> El {
-    section(
-        "Keyboard",
-        [card([setting(
+    let hints = setting(
+        "Show key sequence hints",
+        "The keys pressed so far of a multi-key shortcut, in the toolbar.",
+        toggle(
+            "sequence-hints",
             "Show key sequence hints",
-            "The keys pressed so far of a multi-key shortcut, in the toolbar.",
-            toggle(
-                "sequence-hints",
-                "Show key sequence hints",
-                s.settings.terminal.key_sequence_hints,
-                |c| &mut c.key_sequence_hints,
-            ),
-        )])],
-    )
+            s.settings.terminal.key_sequence_hints,
+            |c| &mut c.key_sequence_hints,
+        ),
+    );
+    let option = s.option_choice.then(|| {
+        select_row(
+            "option-key",
+            "Option key",
+            "Automatic sends Alt on a U.S. layout and types characters on others. Left sends \
+             Alt and Right sends Alt keep the other Option for characters.",
+            &OptionKey::ALL.map(OptionKey::name),
+            OptionKey::ALL
+                .iter()
+                .position(|key| *key == s.settings.terminal.option_key)
+                .unwrap_or_default(),
+            |s, i, tx| {
+                s.settings.terminal.option_key = OptionKey::ALL[i.min(OptionKey::ALL.len() - 1)];
+                s.save();
+                s.sync_option_key(tx, false);
+            },
+        )
+    });
+    section("Keyboard", [card(option.into_iter().chain([hints]))])
 }
 
 /// The choice at `index` of a selection colour's list.
@@ -196,67 +212,75 @@ fn selection(s: &Workspace, inks: &Inks) -> El {
     section(
         "Selection",
         [
-            card([
-                preview(
-                    s,
-                    "selection-preview",
-                    "Selection preview: selected terminal text in the chosen colours.",
-                    inks,
-                    &sample,
-                ),
-                setting(
-                    "Copy on selection",
-                    "Copy selected text when you release the pointer.",
-                    toggle(
-                        "copy-on-selection",
+            card(
+                [
+                    preview(
+                        s,
+                        "selection-preview",
+                        "Selection preview: selected terminal text in the chosen colours.",
+                        inks,
+                        &sample,
+                    ),
+                    setting(
                         "Copy on selection",
-                        config.copy_on_selection,
-                        |c| &mut c.copy_on_selection,
+                        "Copy selected text when you release the pointer.",
+                        toggle(
+                            "copy-on-selection",
+                            "Copy on selection",
+                            config.copy_on_selection,
+                            |c| &mut c.copy_on_selection,
+                        ),
                     ),
-                ),
-                setting(
-                    "Primary selection",
-                    "Selecting also sets the primary selection, and a middle-click pastes it.",
-                    toggle(
-                        "primary-selection",
+                ]
+                .into_iter()
+                // A desktop without a primary selection is not offered the setting.
+                .chain(super::platform::selection::AVAILABLE.then(|| {
+                    setting(
                         "Primary selection",
-                        config.primary_selection,
-                        |c| &mut c.primary_selection,
+                        "Selecting also sets the primary selection, and a middle-click pastes it.",
+                        toggle(
+                            "primary-selection",
+                            "Primary selection",
+                            config.primary_selection,
+                            |c| &mut c.primary_selection,
+                        ),
+                    )
+                }))
+                .chain([
+                    select_row(
+                        "selection-foreground",
+                        "Foreground",
+                        "",
+                        &names,
+                        at(config.selection_foreground),
+                        |s, i, _| {
+                            s.settings.terminal.selection_foreground = selection_color(i);
+                            s.save();
+                        },
                     ),
-                ),
-                select_row(
-                    "selection-foreground",
-                    "Foreground",
-                    "",
-                    &names,
-                    at(config.selection_foreground),
-                    |s, i, _| {
-                        s.settings.terminal.selection_foreground = selection_color(i);
-                        s.save();
-                    },
-                ),
-                select_row(
-                    "selection-background",
-                    "Background",
-                    "",
-                    &names,
-                    at(config.selection_background),
-                    |s, i, _| {
-                        s.settings.terminal.selection_background = selection_color(i);
-                        s.save();
-                    },
-                ),
-                setting(
-                    "Rounded corners",
-                    "",
-                    toggle(
-                        "selection-rounded",
+                    select_row(
+                        "selection-background",
+                        "Background",
+                        "",
+                        &names,
+                        at(config.selection_background),
+                        |s, i, _| {
+                            s.settings.terminal.selection_background = selection_color(i);
+                            s.save();
+                        },
+                    ),
+                    setting(
                         "Rounded corners",
-                        config.selection_rounded,
-                        |c| &mut c.selection_rounded,
+                        "",
+                        toggle(
+                            "selection-rounded",
+                            "Rounded corners",
+                            config.selection_rounded,
+                            |c| &mut c.selection_rounded,
+                        ),
                     ),
-                ),
-            ]),
+                ]),
+            ),
             footnote(
                 "Theme uses the terminal theme's selection colours; Cell foreground and Cell background use each selected cell's own.",
             ),
@@ -268,8 +292,8 @@ fn selection(s: &Workspace, inks: &Inks) -> El {
 fn terminal_font(s: &Workspace) -> El {
     let saved = &s.settings.font_family;
     let (label, helper) = ("Terminal font", "Applies when you reopen the client.");
-    // The saved family is not installed: this launch asked for it and got the bundled font
-    // instead, or the families fontconfig knows, once read, have none of that name.
+    // The saved family is not installed: this launch asked for it and got a stand-in
+    // instead, or the installed families, once read, have none of that name.
     let missing = if s.terminal_family.is_none() && saved.eq_ignore_ascii_case(&s.launch_font) {
         true
     } else {
@@ -282,8 +306,14 @@ fn terminal_font(s: &Workspace) -> El {
         .child(text(label).font(ui(13.)).color(rgb(ink())));
     if missing {
         heading = heading.child(state_chip(
-            "font-missing", "Not installed", ChipTone::Attention,
-            "fontconfig has no family of this name. An unavailable primary uses bundled IBM Plex Mono on reopen.",
+            "font-missing",
+            "Not installed",
+            ChipTone::Attention,
+            &format!(
+                "{}. An unavailable primary uses {} on reopen.",
+                super::platform::fonts::NOT_FOUND,
+                super::fonts::stand_in_words()
+            ),
         ));
     }
     let title = col()
@@ -326,7 +356,10 @@ fn terminal_font(s: &Workspace) -> El {
 
 fn typography(s: &Workspace, inks: &Inks) -> El {
     let saved = &s.settings.font_family;
-    let active = s.terminal_family.unwrap_or("IBM Plex Mono (bundled)");
+    let active = s
+        .terminal_family
+        .or(s.stand_in_family)
+        .unwrap_or("IBM Plex Mono (bundled)");
     // The row's helper is one sentence. What terminals are drawn in now goes under the card,
     // and only while that isn't the family the row names.
     let drawn = if *saved != s.launch_saved_font {
@@ -481,9 +514,40 @@ pub fn terminal(s: &Workspace) -> El {
             ],
         ),
         super::titles::titles(s),
+        section(
+            "Path browser",
+            [
+                card([setting(
+                    "Show recently used paths",
+                    "",
+                    rune_kit::Switch::new(s.settings.terminal.show_recent_paths)
+                        .label("Show recently used paths")
+                        .hide_label()
+                        .on_toggle(|s: &mut Workspace| {
+                            s.set_show_recent_paths(!s.settings.terminal.show_recent_paths);
+                        })
+                        .build(kit())
+                        .key("show-recent-paths"),
+                )]),
+                footnote(
+                    "Insert path and Go to directory remember paths per host, on this computer. Turning this off forgets them.",
+                ),
+            ],
+        ),
     ])
 }
 impl Workspace {
+    pub fn set_show_recent_paths(&mut self, show: bool) {
+        self.settings.terminal.show_recent_paths = show;
+        if !show {
+            self.settings.recent_paths.clear();
+            // Normally Settings replaces the browser. Also forget already-built rows
+            // if this preference is changed while a browser is held open.
+            self.hide_recent_paths();
+        }
+        self.save();
+    }
+
     /// The cursor every terminal draws until its program asks for a shape of its own: saved,
     /// and told to each pane's worker, which shows it at once where no program has chosen.
     pub fn set_cursor_style(&mut self, style: CursorStyle) {

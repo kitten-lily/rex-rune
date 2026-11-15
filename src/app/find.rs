@@ -20,7 +20,7 @@ use super::{
     widgets::glyph,
     workspace::{HostId, Workspace},
 };
-use rex_linux::connection::Command;
+use rex_rune::connection::Command;
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Icon, KeyEvent, TextEdit, Tx, el, row, text};
 use rune_kit::TextInput;
@@ -167,9 +167,13 @@ impl Pane {
 }
 
 /// Whether `block`'s exception strip floats in its top-right corner: a terminal that is not
-/// live, in a pane with no header row to hold the strip.
+/// live, in a pane with no header row, or title row, to hold the strip.
 pub fn lowered(s: &Workspace, window: &Window, block: &str, t: &Term) -> bool {
-    !t.status().live && pane_header::placement(s, window, block) != Placement::Row
+    !t.status().live
+        && !matches!(
+            pane_header::placement(s, window, block),
+            Placement::Row | Placement::Title
+        )
 }
 
 impl Term {

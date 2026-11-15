@@ -8,7 +8,7 @@ use super::{
     theme::{palette_of, set_palette},
     widgets::ScrollFx,
 };
-use rex_linux::{
+use rex_rune::{
     connection::{
         Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options,
         tailscale::valid_name,
@@ -16,7 +16,7 @@ use rex_linux::{
     layout::{Divider, shell_layout},
     settings::{
         ChromeTheme, Host, NoticePosition, SessionList, Settings, SidebarMode, TerminalThemeChoice,
-        validate_host,
+        terminal::OptionSides, validate_host,
     },
     terminal_theme::{TerminalTheme, ThemeDirs, ThemeInfo, paired},
 };
@@ -76,7 +76,7 @@ pub struct Workspace {
     /// Keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<super::bindings::Identity>,
     pub bindings: super::bindings::State,
-    pub local_keymap: rex_linux::keymap::Resolved,
+    pub local_keymap: rex_rune::keymap::Resolved,
     pub keymap_generation: u64,
     pub navigation: super::navigation::History,
     pub last_keypress: Option<std::time::Instant>,
@@ -86,6 +86,33 @@ pub struct Workspace {
     pub claimed: HashSet<(HostId, String)>,
     pub handle: AppHandle<Workspace>,
     pub window_focused: bool,
+    /// Whether Rex draws the window's frame (`platform::chrome`): its own close button and
+    /// resize bands. Headless tests draw it on every platform unless they turn it off.
+    pub own_frame: bool,
+    /// Whether the toolbar is the window's title bar (`platform::chrome::UNIFIED`, macOS):
+    /// one shorter row beside the traffic lights, holding a lone pane's header too. Headless
+    /// tests draw the separate toolbar unless they turn it on.
+    pub unified_title: bool,
+    /// What the traffic lights take of the title row's leading end, in window points: 0 in
+    /// full screen, where they are hidden, and wherever Rex has no unified title row.
+    pub title_inset: f32,
+    /// The traffic lights are hidden for full screen. Known only where Rex's title row is.
+    pub full_screen: bool,
+    /// The window says it is full screen (`Cx::window_full_screen`); read when it resizes or
+    /// its traffic lights move. On X11 the window manager entering or leaving full screen is
+    /// not seen: after it takes Rex out of a full screen Rex entered, this stays true until
+    /// Rex toggles it again.
+    pub window_full_screen: bool,
+    /// The title row's session button, where its list opens.
+    pub title_session: [f32; 4],
+    /// Whether Alt is a Mac's Option key and Terminal settings offer what it does
+    /// (`platform::keys::OPTION_COMPOSES`). Headless tests leave it out unless they turn it on.
+    pub option_choice: bool,
+    /// Whether the layout in use is U.S., read again when the person picks another one.
+    pub us_layout: Option<bool>,
+    /// The panes' Option keys, as last asked of Rune (`Tx::set_option_alt`); Rune drops them
+    /// while a field has focus.
+    pub option_as_alt: Option<rune::OptionAsAlt>,
     /// The pane a file drag from another app is over.
     pub drop_hover: Option<String>,
     /// Pane headers brought out by the pointer or by Reveal pane headers.
@@ -99,6 +126,9 @@ pub struct Workspace {
     pub sidebar: rune_kit::PaneState,
     /// The resolved terminal family, or None when the requested one isn't installed.
     pub terminal_family: Option<&'static str>,
+    /// The platform's monospaced family the grid uses instead when that is None
+    /// (`fonts::Fonts::stand_in`); None as well leaves bundled IBM Plex Mono.
+    pub stand_in_family: Option<&'static str>,
     /// The family this launch asked for, after `--font`.
     pub launch_font: String,
     /// The saved family when the client started, to tell a pending font change from the
@@ -189,14 +219,14 @@ impl Workspace {
         let fonts = super::font_picker::FontState::new(&options, &settings);
         let explicit = options.session.is_some()
             || options.new.is_some()
-            || options.endpoint != rex_linux::transport::local_endpoint();
+            || options.endpoint != rex_rune::transport::local_endpoint();
         if !settings
             .hosts
             .iter()
             .any(|h| h.endpoint == options.endpoint)
         {
             settings.hosts.push(Host {
-                label: rex_linux::settings::endpoint_label(&options.endpoint),
+                label: rex_rune::settings::endpoint_label(&options.endpoint),
                 endpoint: options.endpoint.clone(),
                 remote_control: false,
                 keep_tailscale: false,
@@ -260,6 +290,15 @@ impl Workspace {
             claimed: HashSet::new(),
             handle,
             window_focused: true,
+            own_frame: cfg!(test) || super::platform::chrome::OWN_FRAME,
+            unified_title: !cfg!(test) && super::platform::chrome::UNIFIED,
+            option_choice: !cfg!(test) && super::platform::keys::OPTION_COMPOSES,
+            us_layout: None,
+            option_as_alt: None,
+            title_inset: 0.,
+            full_screen: false,
+            window_full_screen: false,
+            title_session: [0.; 4],
             drop_hover: None,
             header_reveal: Default::default(),
             toolbar_reveal: Default::default(),
@@ -268,6 +307,7 @@ impl Workspace {
             resized: None,
             sidebar,
             terminal_family,
+            stand_in_family: None,
             launch_font,
             launch_saved_font,
             fonts,
@@ -425,6 +465,7 @@ impl Workspace {
         self.forget_host(state);
         let host = self.settings.hosts.remove(index);
         self.settings.sessions.remove(&host.endpoint);
+        self.settings.recent_paths.remove(&host.endpoint);
         // Menus and drags name hosts by position, which just shifted.
         self.panel = None;
         self.drag = None;
@@ -460,6 +501,8 @@ impl Workspace {
             host.tailscale_name = None;
             let old = std::mem::replace(&mut host.endpoint, endpoint);
             self.settings.sessions.remove(&old);
+            // An endpoint edit means another machine, not a history migration.
+            self.settings.recent_paths.remove(&old);
             let state = self.spawn_host(index, false);
             let old = std::mem::replace(&mut self.hosts[index], state);
             self.forget_host(old);
@@ -566,6 +609,10 @@ impl Workspace {
             );
         }
         self.hosts[index].model = model;
+        if index == self.active {
+            // The session, keymap revision or connection above is what a mode belongs to.
+            self.revalidate_key_modes();
+        }
         self.announce_keymap_problems(index);
         self.poll_remote_navigation(std::time::Instant::now());
         for pending in performs {
@@ -579,7 +626,11 @@ impl Workspace {
         for queued in client_actions {
             // File dialogs need this person's own key or click, whatever a host returns.
             if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
-                self.inform("Returned client action skipped: a host cannot start a download or open the path browser.");
+                self.inform(if queued.action.action == super::server_page::STOP {
+                    "Returned client action skipped: only the person at this computer can stop a server."
+                } else {
+                    "Returned client action skipped: a host cannot start a download or open the path browser."
+                });
                 continue;
             }
             // Focus events following the reply may legitimately move to another pane.
@@ -608,7 +659,7 @@ impl Workspace {
             && self.window_focused
             && self.panel.is_none()
             && index == self.active
-            && rex_linux::connection::clipboard::accepts(
+            && rex_rune::connection::clipboard::accepts(
                 &self.hosts[index].model,
                 &copy.session,
                 &copy.block,
@@ -699,20 +750,62 @@ impl Workspace {
         }
     }
 
-    pub(super) fn keymap_declaration(&self) -> rex_linux::connection::keymap::Declaration {
+    pub(super) fn keymap_declaration(&self) -> rex_rune::connection::keymap::Declaration {
         let overrides = self.settings.shortcut_file.overrides.clone();
-        rex_linux::connection::keymap::Declaration {
+        rex_rune::connection::keymap::Declaration {
             generation: self.keymap_generation,
             request: rexrs::api::client::Keymap::new()
                 .actions(super::actions::declarations())
                 .server_actions("all")
-                .defaults([rex_linux::keymap::defaults()])
+                .defaults([rex_rune::keymap::defaults()])
                 .overrides(super::recorder::layers(&self.settings)),
             overrides,
         }
     }
 
-    pub fn effective_keymap(&self) -> &rex_linux::keymap::Resolved {
+    /// The innermost active key mode, while it still belongs to the host, session and keymap on
+    /// screen. `input.rs` ends modes when any of those changes, and `revalidate_key_modes` does
+    /// the same where the change happens, so a mode left on another host or session never
+    /// names itself again on this one.
+    pub fn key_mode(&self) -> Option<&str> {
+        if *self.bindings.owner.as_ref()? != self.mode_owner() {
+            return None;
+        }
+        self.bindings.modes.last().map(|(name, _)| name.as_str())
+    }
+
+    /// What a mode entered now would belong to.
+    pub(super) fn mode_owner(&self) -> super::bindings::Owner {
+        let model = self.model();
+        super::bindings::Owner {
+            host: self.hosts[self.active].id,
+            session: model.selected.clone(),
+            generation: self.keymap_generation,
+            server_revision: model.keymap_revision,
+            connected: model.connected,
+        }
+    }
+
+    /// Enter a mode from an action the client accepted, by key or from a host's reply: the
+    /// stack belongs to the host, session, keymap and connection on screen from that moment,
+    /// so the name is drawn before the next key and never outlives them.
+    pub(super) fn enter_key_mode(&mut self, name: &str, once: bool) {
+        let owner = self.mode_owner();
+        self.bindings.adopt_modes(owner);
+        self.bindings.enter_mode(name, once);
+    }
+
+    /// End modes where their host, session, keymap or connection changes, rather than at the
+    /// next key: the declared ownership rule reaches the state change itself.
+    pub(super) fn revalidate_key_modes(&mut self) {
+        if self.bindings.modes.is_empty() {
+            return;
+        }
+        let owner = self.mode_owner();
+        self.bindings.adopt_modes(owner);
+    }
+
+    pub fn effective_keymap(&self) -> &rex_rune::keymap::Resolved {
         self.hosts[self.active]
             .model
             .keymap
@@ -722,14 +815,14 @@ impl Workspace {
             .unwrap_or(&self.local_keymap)
     }
 
-    pub fn keymap_snapshot(&self) -> Option<&rex_linux::connection::keymap::Snapshot> {
+    pub fn keymap_snapshot(&self) -> Option<&rex_rune::connection::keymap::Snapshot> {
         self.model()
             .keymap
             .as_deref()
             .filter(|k| self.model().connected && k.generation == self.keymap_generation)
     }
 
-    pub fn effective_bindings(&self) -> Vec<&rex_linux::keymap::ResolvedBinding> {
+    pub fn effective_bindings(&self) -> Vec<&rex_rune::keymap::ResolvedBinding> {
         super::actions::effective(
             self.effective_keymap(),
             self.keymap_snapshot()
@@ -799,7 +892,7 @@ impl Workspace {
         let previous = self.settings.shortcut_file.overrides.clone();
         if force {
             self.settings.shortcut_file =
-                rex_linux::settings::shortcuts::Shortcuts::load(&self.settings_path);
+                rex_rune::settings::shortcuts::Shortcuts::load(&self.settings_path);
         } else if !self.settings.shortcut_file.reload(&self.settings_path) {
             return false;
         }
@@ -844,7 +937,7 @@ impl Workspace {
         self.push_notice(text.into(), false);
     }
 
-    /// Hand `uri` to the desktop's handler with `xdg-open`, off the UI thread. A failure
+    /// Hand `uri` to the desktop's handler (`platform::open`), off the UI thread. A failure
     /// becomes a notice.
     pub fn open_link(&mut self, uri: String) {
         #[cfg(test)]
@@ -859,17 +952,9 @@ impl Workspace {
         let _ = std::thread::Builder::new()
             .name("rex-open-link".into())
             .spawn(move || {
-                use std::process::{Command, Stdio};
-                let error = match Command::new("xdg-open")
-                    .arg(&uri)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                {
-                    Ok(status) if status.success() => return,
-                    Ok(status) => status.to_string(),
-                    Err(error) => error.to_string(),
+                use super::platform::open;
+                let Err(error) = open::run(open::command(&uri)) else {
+                    return;
                 };
                 handle.update(move |s, _| s.notify(format!("Couldn't open {uri}: {error}")));
             });
@@ -957,11 +1042,15 @@ impl Workspace {
         self.hosts[host].model.notice = None;
     }
 
-    /// Keep window points, not zoomed content points. Maximizing leaves the saved normal
-    /// size alone and cancels any pending save from the preceding resize.
-    pub fn window_resized(&mut self, size: [f32; 2], maximized: bool) {
+    /// Keep window points, not zoomed content points. Maximizing or full screen leaves the
+    /// saved normal size alone and cancels any pending save from the preceding resize.
+    pub fn window_resized(&mut self, size: [f32; 2], maximized: bool, full_screen: bool) {
         self.viewport = size;
-        if maximized || self.settings.window_size == Some(size.map(f32::round)) {
+        self.window_full_screen = full_screen;
+        if maximized
+            || self.in_full_screen()
+            || self.settings.window_size == Some(size.map(f32::round))
+        {
             self.resized = None;
             return;
         }
@@ -969,6 +1058,67 @@ impl Workspace {
             self.handle.wake();
         }
         self.resized = Some(std::time::Instant::now());
+    }
+
+    /// Where the traffic lights end, `leading` window points in from the window's edge of a
+    /// title bar `height` tall: none in full screen.
+    pub fn traffic_lights(&mut self, leading: f32, height: f32) {
+        self.title_inset = leading;
+        self.full_screen = height > 0. && leading == 0.;
+        if self.full_screen {
+            // The resize into full screen can come a frame before the traffic lights go.
+            self.resized = None;
+        }
+    }
+
+    /// Whether the window is full screen, as the window or its traffic lights say.
+    pub fn in_full_screen(&self) -> bool {
+        self.full_screen || self.window_full_screen
+    }
+
+    /// Asks Rune for the panes' Option when the setting or the layout has changed. Main
+    /// thread only: `layout_changed` reads the layout again.
+    pub fn sync_option_key(&mut self, tx: &mut Tx, layout_changed: bool) {
+        if !self.option_choice {
+            return;
+        }
+        // Tests never read or watch the real layout; they set `us_layout`.
+        if self.us_layout.is_none() && !cfg!(test) {
+            let handle = self.handle.clone();
+            super::platform::keys::watch_layout(move || {
+                handle.update(|s, tx| s.sync_option_key(tx, true));
+            });
+        }
+        if (layout_changed && !cfg!(test)) || self.us_layout.is_none() {
+            self.us_layout = Some(cfg!(test) || super::platform::keys::us_layout());
+        }
+        // Rune keeps Option's characters for whichever of Rex's own fields has focus (@ in an
+        // address, é in a search), so this is the panes' Option.
+        let alt = match self.option_sides() {
+            OptionSides::BOTH => rune::OptionAsAlt::Both,
+            OptionSides::LEFT => rune::OptionAsAlt::Left,
+            OptionSides::RIGHT => rune::OptionAsAlt::Right,
+            _ => rune::OptionAsAlt::Neither,
+        };
+        if self.option_as_alt != Some(alt) {
+            tx.set_option_alt(alt);
+            self.option_as_alt = Some(alt);
+        }
+    }
+
+    /// The Option keys Terminal settings make Alt with the layout in use.
+    fn option_sides(&self) -> OptionSides {
+        (self.settings.terminal.option_key).alt_sides(self.us_layout != Some(false))
+    }
+
+    /// Whether Option composes the text of a key typed with the `held` Option keys
+    /// (`Tx::alt_keys`), which the program then gets without Alt.
+    pub fn option_composes(&self, held: rune::AltKeys) -> bool {
+        let held = OptionSides {
+            left: held.left,
+            right: held.right,
+        };
+        self.option_choice && !self.option_sides().alt_with(held)
     }
 
     /// A drag writes preferences once, after the window has kept its size for a second.
@@ -1225,7 +1375,7 @@ impl Workspace {
             TerminalThemeChoice::FollowChrome => "Follow chrome",
             // A Dracula Pro theme this build lacks follows the chrome.
             choice if choice.follows_chrome() => "Follow chrome",
-            TerminalThemeChoice::Named(id) => match rex_linux::terminal_theme::builtin(id) {
+            TerminalThemeChoice::Named(id) => match rex_rune::terminal_theme::builtin(id) {
                 Some(b) => b.name,
                 None => id,
             },
@@ -1255,7 +1405,11 @@ impl Workspace {
         self.update_title(tx);
     }
 
+    /// Every active-host transition calls this. A key mode belongs to the host it was entered
+    /// on, so it ends here rather than at the next key: switching away and back must not bring
+    /// back a mode nobody entered again.
     pub fn update_visibility(&mut self) {
+        self.revalidate_key_modes();
         for term in self.terminals.values_mut() {
             term.end_selection();
         }
@@ -1305,7 +1459,7 @@ impl Workspace {
     }
 
     /// Groups the Activity list and shows it.
-    pub fn show_activity_by(&mut self, grouping: rex_linux::settings::ActivityGrouping) {
+    pub fn show_activity_by(&mut self, grouping: rex_rune::settings::ActivityGrouping) {
         self.settings.activity_grouping = grouping;
         self.show_activity();
     }
@@ -1875,7 +2029,10 @@ impl Workspace {
         panel.back = self
             .panel
             .take()
-            .filter(|p| matches!(p.kind, PanelKind::Picker(true)))
+            .filter(|p| {
+                matches!(p.kind, PanelKind::Picker(true))
+                    || method == "server.stop" && matches!(p.kind, PanelKind::Settings)
+            })
             .map(|mut p| {
                 p.rename = None;
                 Box::new(p)
@@ -2061,7 +2218,7 @@ impl Workspace {
             .as_ref()
             .is_some_and(|p| matches!(p.kind, PanelKind::Directory(_)))
         {
-            self.list_directory();
+            self.directory_field_changed();
             return;
         }
         let first = self.entries().iter().position(|e| e.enabled).unwrap_or(0);
@@ -2236,6 +2393,14 @@ impl Workspace {
             PanelKind::Confirm {
                 method, payload, ..
             } => {
+                if method == "server.stop" {
+                    let target = self.panel.as_ref().and_then(|p| p.stop_server.clone());
+                    self.cancel_panel(tx);
+                    if let Some(target) = target {
+                        self.confirm_stop_server(target);
+                    }
+                    return;
+                }
                 let target = self.panel.as_ref().and_then(|p| p.target.clone());
                 let session = self.panel.as_ref().and_then(|p| p.session.clone());
                 let tab = self.panel.as_ref().and_then(|p| p.tab.clone());

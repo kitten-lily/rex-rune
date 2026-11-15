@@ -190,45 +190,7 @@ impl Target {
 
 /// Where every process's tunnel sockets live.
 fn tunnels_directory() -> PathBuf {
-    match std::env::var("XDG_RUNTIME_DIR") {
-        Ok(runtime) if !runtime.is_empty() => PathBuf::from(runtime).join("rex-linux"),
-        _ => std::env::temp_dir().join(format!("rex-linux-{}", uid())),
-    }
-}
-
-/// Remove the socket directories of processes that are gone, which a crash or a kill leaves
-/// behind. Only `ssh-<pid>` directories whose process no longer exists are touched.
-fn sweep_stale_tunnels(directory: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("ssh-"))
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        if pid != std::process::id() && !process_exists(pid) {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
-fn process_exists(pid: u32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
-}
-
-fn uid() -> String {
-    std::fs::metadata("/proc/self")
-        .ok()
-        .map(|m| {
-            use std::os::unix::fs::MetadataExt;
-            m.uid().to_string()
-        })
-        .unwrap_or_else(|| "user".into())
+    crate::platform::dirs::runtime()
 }
 
 /// Finds the Rex socket on the other machine, trying in order: the path `rex server status`
@@ -269,26 +231,11 @@ impl Tunnel {
     /// Find the Rex socket on `target`, then forward it to a local socket and wait until the
     /// local end accepts connections.
     pub async fn open(target: &Target) -> Result<Tunnel> {
+        crate::platform::local::require_ssh()?;
         let remote = resolve(target).await?;
         let local = target.local_socket();
         if let Some(parent) = local.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create {}", parent.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                for directory in [parent, parent.parent().unwrap_or(parent)] {
-                    let _ = tokio::fs::set_permissions(
-                        directory,
-                        std::fs::Permissions::from_mode(0o700),
-                    )
-                    .await;
-                }
-            }
-            if let Some(all) = parent.parent() {
-                sweep_stale_tunnels(all);
-            }
+            crate::platform::local::prepare_tunnel_directory(parent).await?;
         }
         // Only this process's own earlier forward of the endpoint can be here.
         let _ = tokio::fs::remove_file(&local).await;
@@ -321,7 +268,7 @@ impl Tunnel {
             if let Some(status) = tunnel.child.try_wait()? {
                 bail!("{}", tunnel.exit_message(status));
             }
-            if tokio::net::UnixStream::connect(&tunnel.local).await.is_ok() {
+            if crate::platform::local::connect(&tunnel.local).await.is_ok() {
                 return Ok(tunnel);
             }
             ensure!(
@@ -500,7 +447,8 @@ async fn resolve(target: &Target) -> Result<String> {
     }
 }
 
-#[cfg(test)]
+// Tunnel fixtures execute Unix shells and depend on Unix socket paths.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
@@ -605,25 +553,6 @@ mod tests {
             own.as_str(),
             "another instance forwarding the same endpoint uses another directory"
         );
-    }
-
-    #[test]
-    fn stale_tunnel_directories_of_gone_processes_are_swept() {
-        let root = std::env::temp_dir().join(format!("rex-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        // Linux pids never exceed 4194304, so this process is gone.
-        let gone = root.join("ssh-4194305");
-        let own = root.join(format!("ssh-{}", std::process::id()));
-        let other = root.join("notes");
-        for d in [&gone, &own, &other] {
-            std::fs::create_dir_all(d).unwrap();
-            std::fs::write(d.join("x.sock"), b"").unwrap();
-        }
-        sweep_stale_tunnels(&root);
-        assert!(!gone.exists(), "a gone process's directory is removed");
-        assert!(own.exists(), "this process's directory stays");
-        assert!(other.exists(), "anything else is left alone");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

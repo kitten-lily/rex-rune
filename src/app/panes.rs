@@ -1,20 +1,21 @@
 //! The pane area: server-placed terminals as floating cards in 8pt gutters, each with a header
-//! (label, activity, exception pill and the pane's buttons), drag handles in the gutters, and
-//! empty states. A tab with a single pane draws it edge to edge instead. Compact density
-//! removes card decorations and gaps from every placement. Where a header is, and whether it
-//! is a row or floats over the terminal, is `pane_header`'s to say.
+//! (its program's glyph, label, activity, exception pill and the pane's buttons), drag handles
+//! in the gutters, and empty states. A tab with a single pane draws it edge to edge instead.
+//! Compact density removes card decorations and gaps from every placement. Where a header is,
+//! and whether it is a row or floats over the terminal, is `pane_header`'s to say.
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
-    activity::{pane_activity, progress_bar, shown_progress, shown_word},
+    activity::{PaneProgram, pane_activity, progress_bar, shown_progress, shown_word},
     find,
     pane_header::{self, Placement, full_bleed},
     panel::{Form, Intent, PanelKind},
+    tab_icons,
     term::{self, CursorLook, GridLook, Metrics, MouseGesture},
     theme::*,
     widgets::{Pill, pill},
     workspace::{DividerDrag, Workspace},
 };
-use rex_linux::{
+use rex_rune::{
     connection::Command,
     layout,
     settings::{PaneDensity, PaneHeader},
@@ -22,6 +23,7 @@ use rex_linux::{
 };
 use rexrs::api::session::Window;
 use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, el, row, text};
+use std::borrow::Cow;
 
 /// The area cards are laid out in, in the pane area's own points.
 fn inner(s: &Workspace) -> [f32; 4] {
@@ -89,31 +91,25 @@ fn header(
     m: &Metrics,
 ) -> El {
     let label = s.pane_name(block);
-    // The tab's words for this pane alone; Done and Bell stay with the tab, which they latch.
     let activity = pane_activity(s.model(), block);
-    let word =
-        shown_word(&s.settings.notifications, &activity, false, false).map(|(word, colour)| {
-            let w = text(word)
-                .key(format!("pane-word:{block}"))
-                .font(medium(11.))
-                .color(rgb(colour));
-            match activity.msg.clone() {
-                Some(msg) => w.help(msg),
-                None => w,
-            }
-        });
+    let word = pane_word_of(s, block);
+    let chip = pane_header::zoomed_chip(window, block);
     let id = block.to_owned();
     let menu_id = block.to_owned();
+    let fade = pane_header::header_opacity(s, block);
+    let lead = pane_header::lead(s, window);
     let h = row()
         .key(format!("pane-header:{block}"))
         .hover_group()
         .w_full()
         .h(CARD_HEADER)
-        .pl(14.)
+        // On a card the glyph clears the corner; edge to edge it lines up with the
+        // terminal's text under it, and the name follows it.
+        .pl(lead)
         // The trailing buttons stay clear of the card's 12 pt corner, where a hover fill
         // 4 pt from the edge all but touched the curve of the border.
-        .pr(8.)
-        .gap(8.)
+        .pr(pane_header::HEADER_TAIL)
+        .gap(pane_header::HEADER_GAP)
         .center_y()
         .preserve_focus_on_press(true)
         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
@@ -126,31 +122,56 @@ fn header(
         })
         .on_secondary_press(move |s: &mut Workspace, p, _| {
             s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
-        })
-        .child(
-            text(label.clone())
-                .key(format!("pane-name:{block}"))
-                .font(medium(11.5))
-                .color(
-                    rgb(if focused { ink() } else { muted() })
-                        .alpha(pane_header::header_opacity(s, block)),
-                )
-                .group_color(rgb(if focused { ink() } else { muted() }))
-                .truncate()
-                .help_when_truncated(label)
-                .shrink(),
+        });
+    // The pane's own program before its name, as the title row draws the lone pane's: the
+    // tab glyph rule, lit with its pane, and faded with the name where headers fade. The
+    // glyph is decided from the room the row will have: its pads and gaps, the buttons it
+    // draws, and the word, chip and reconnecting strip beside the name. A header too narrow
+    // for all of them keeps its name and buttons instead, where the glyph would push Close out
+    // of the pane or Retry over the buttons.
+    let strip = strip(s, block, width, m);
+    let extras = pane_header::extras(
+        word.as_ref().map(|(word, _)| word.as_ref()),
+        chip.is_some(),
+        strip.as_ref().map(|_| label.as_str()),
+    );
+    let h = if pane_header::glyph_fits(width, lead, pane_header::buttons(width), extras) {
+        let icons = tab_icons::icons_of(
+            &[PaneProgram::of(s.model(), block)],
+            s.settings.interface.tab_icon_count.min(1),
         );
-    let h = match pane_header::zoomed_chip(window, block) {
+        tab_icons::append_restoring(
+            h,
+            &format!("pane-icon:{block}"),
+            &icons,
+            focused,
+            s.settings.interface.tab_icon_color,
+            fade,
+        )
+    } else {
+        h
+    }
+    .child(
+        text(label.clone())
+            .key(format!("pane-name:{block}"))
+            .font(medium(11.5))
+            .color(rgb(if focused { ink() } else { muted() }).alpha(fade))
+            .group_color(rgb(if focused { ink() } else { muted() }))
+            .truncate()
+            .help_when_truncated(label)
+            .shrink(),
+    );
+    let h = match chip {
         Some(chip) => h.child(chip),
         None => h,
     };
     // The label truncates first; the word always stays whole.
-    let h = match word {
-        Some(word) => h.child(word),
+    let h = match &word {
+        Some(word) => h.child(pane_word_el(s, block, word, 11.)),
         None => h,
     }
     .child(el().grow(1.));
-    let h = match strip(s, block, width, m) {
+    let h = match strip {
         Some(strip) => h.child(strip),
         None => h,
     };
@@ -165,8 +186,43 @@ fn header(
     h.child(pane_header::actions(s, window, block, width, focused))
 }
 
+/// The tab's words for this pane alone, at `size`; Done and Bell stay with the tab, which
+/// they latch.
+pub(super) fn pane_word(s: &Workspace, block: &str, size: f32) -> Option<El> {
+    let word = pane_word_of(s, block)?;
+    Some(pane_word_el(s, block, &word, size))
+}
+
+/// The word this pane's header draws beside its name, with its colour, when **Show activity in
+/// tabs** shows words at all.
+fn pane_word_of(s: &Workspace, block: &str) -> Option<(Cow<'static, str>, u32)> {
+    shown_word(
+        &s.settings.notifications,
+        &pane_activity(s.model(), block),
+        false,
+        false,
+    )
+}
+
+/// That word as an element, with the program's message as its tooltip.
+fn pane_word_el(
+    s: &Workspace,
+    block: &str,
+    (word, colour): &(Cow<'static, str>, u32),
+    size: f32,
+) -> El {
+    let w = text(word.clone())
+        .key(format!("pane-word:{block}"))
+        .font(medium(size))
+        .color(rgb(*colour));
+    match pane_activity(s.model(), block).msg.clone() {
+        Some(msg) => w.help(msg),
+        None => w,
+    }
+}
+
 /// The exception strip for a pane that is reconnecting, with its Retry action.
-fn strip(s: &Workspace, block: &str, width: f32, m: &Metrics) -> Option<El> {
+pub(super) fn strip(s: &Workspace, block: &str, width: f32, m: &Metrics) -> Option<El> {
     let key = s.term_key(block);
     let t = s.terminals.get(&key);
     let status = t.map(|t| t.status());
@@ -300,7 +356,15 @@ fn pane_card(
                 .box_shadow(shadow(0., 10., 30., black(0.45))),
         };
     }
+    let clear = if headed {
+        pane_header::clearance(s, rect)
+    } else {
+        0.
+    };
     if headed {
+        if clear > 0. {
+            c = c.child(el().key("pane-header-clear").w_full().h(clear));
+        }
         c = c.child(header(s, window, block, rect[2], focused, m));
     }
     let c = match s.terminals.get(&key) {
@@ -350,7 +414,7 @@ fn pane_card(
                     Cursor::Text
                 });
             // Middle presses go to mouse-reporting programs, or opt-in PRIMARY paste.
-            if t.tracking() || s.settings.terminal.primary_selection {
+            if t.tracking() || s.primary_selection() {
                 grid = grid.pointer_buttons([PointerButton::Middle]);
             }
             let grid = grid
@@ -379,8 +443,7 @@ fn pane_card(
                 .on_drag(move |s: &mut Workspace, d, tx| {
                     let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k2.1.as_str());
-                    let copies = s.settings.terminal.copy_on_selection
-                        || s.settings.terminal.primary_selection;
+                    let copies = s.settings.terminal.copy_on_selection || s.primary_selection();
                     let Some(t) = s.terminals.get_mut(&k2) else {
                         return;
                     };
@@ -400,7 +463,7 @@ fn pane_card(
                         // Ctrl+click opens a link, even over a program that tracks the mouse.
                         t.pressed_link = None;
                         if button == "left"
-                            && mods.ctrl
+                            && super::platform::keys::primary(mods)
                             && let Some((_, link)) = t.link_at(d.x, d.y, cell)
                         {
                             t.clear_selection();
@@ -499,7 +562,7 @@ fn pane_card(
                         return;
                     }
                     // Holding Ctrl shows the link a click would open.
-                    let link = if tx.mods().ctrl {
+                    let link = if super::platform::keys::primary(tx.mods()) {
                         t.link_at(p.x, p.y, cell)
                     } else {
                         None
@@ -618,7 +681,7 @@ fn pane_card(
             // terminal, and springs when it changes corner.
             match &t.search {
                 Some(edit) => {
-                    let above = if headed { CARD_HEADER } else { 0. } + lead + top;
+                    let above = if headed { CARD_HEADER + clear } else { 0. } + lead + top;
                     let pane = find::Pane {
                         size: (
                             (rect[2] - 2. * side).max(0.),
@@ -673,7 +736,10 @@ fn pane_card(
         None => c,
     };
     let c = if !headed && !searching && s.settings.pane_header == PaneHeader::OnHover {
-        c.child(pane_header::reveal_band(block))
+        c.child(pane_header::reveal_band(
+            block,
+            pane_header::clearance(s, rect),
+        ))
     } else {
         c
     };
@@ -681,6 +747,7 @@ fn pane_card(
         c.child(pane_header::floating(
             header(s, window, block, rect[2], focused, m),
             !bleed,
+            pane_header::clearance(s, rect),
         ))
     } else {
         c

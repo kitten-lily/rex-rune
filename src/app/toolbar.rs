@@ -55,9 +55,24 @@ pub(super) fn tab_actions(
             s.tab_menu(host, &session, &window, (p.x, p.y))
         })
 }
+/// Below this toolbar width (the window's width divided by interface zoom) the bar is narrow:
+/// the key-mode chip is only the mode's name, the `mode` word yielding its room to the name it
+/// introduces, and the identity chip keeps its floor while a live chip is drawn. The accessible
+/// names and tooltips keep everything at every width.
+const NARROW_BAR: f32 = 1000.;
+
+/// A live chip never shrinks below this: its name is cut to a word's beginning, with the whole
+/// name in the tooltip, rather than the bar's Settings and Close leaving the window.
+const MODE_CHIP_FLOOR: f32 = 56.;
+const SEQUENCE_CHIP_FLOOR: f32 = 48.;
+
+/// The tab track's floor while both arrows are drawn: their whole 26 pt hit areas, the track's
+/// padding and the gaps between it and the scrolling strip. The arrows must never paint over
+/// the live chips that took the rest of the row.
+const TAB_TRACK_ARROWS: f32 = 3. * 2. + 26. + 2. + 26. + 2.;
 
 /// A chip's press: consume it (chips never drag the window) and keep the terminal focused.
-fn chip_press(e: El) -> El {
+pub(super) fn chip_press(e: El) -> El {
     e.cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
         .tab_index(-1)
@@ -65,7 +80,7 @@ fn chip_press(e: El) -> El {
 
 /// The host line under the session's name: trouble always, and otherwise the host only while
 /// a second host is connected, when the session's name alone could be either's.
-fn identity_detail(s: &Workspace) -> Option<(String, u32)> {
+pub(super) fn identity_detail(s: &Workspace) -> Option<(String, u32)> {
     let host = &s.settings.hosts[s.active].label;
     if !s.model().connected {
         Some((format!("{host} · Reconnecting"), warning()))
@@ -74,6 +89,21 @@ fn identity_detail(s: &Workspace) -> Option<(String, u32)> {
     } else {
         None
     }
+}
+
+/// The bar's own width: the window's divided by interface zoom, which is what it lays out in.
+fn narrow_bar(s: &Workspace) -> bool {
+    s.viewport[0] / s.ui_scale() < NARROW_BAR
+}
+
+/// Whether a live chip shares the bar with the identity chip. A mode, a pending sequence and a
+/// receiving download each take a chip's worth of the row, so on a narrow bar the identity keeps
+/// its floor and lets them and the bar's controls fit; otherwise it is as wide as its words.
+fn live_chip_shown(s: &Workspace) -> bool {
+    s.key_mode().is_some()
+        || s.settings.terminal.key_sequence_hints
+            && s.bindings.pending_label(s.effective_keymap()).is_some()
+        || super::downloads_view::chip_label(s).is_some()
 }
 
 fn identity(s: &Workspace) -> El {
@@ -106,7 +136,11 @@ fn identity(s: &Workspace) -> El {
             // As wide as its words, between a floor that keeps it a comfortable target and
             // the width a long name truncates at.
             .min_w(IDENTITY_MIN)
-            .max_w(IDENTITY_MAX)
+            .max_w(if narrow_bar(s) && live_chip_shown(s) {
+                IDENTITY_MIN
+            } else {
+                IDENTITY_MAX
+            })
             .h(34.)
             .pl(6.)
             .pr(8.)
@@ -147,9 +181,10 @@ fn fill_floor(icons: usize, word: Option<&str>, quiet: bool) -> f32 {
     .max(96.)
 }
 
-/// The session's tabs on their track. With no tab to show (no session on screen, or one whose
-/// view hasn't arrived) there is no track: an empty one would be a sliver of chip.
-fn tab_track(s: &Workspace) -> El {
+/// The session's tabs on their track, `track` tall with `pill` tall tabs. With no tab to show
+/// (no session on screen, or one whose view hasn't arrived) there is no track: an empty one
+/// would be a sliver of chip.
+pub(super) fn tab_track(s: &Workspace, track: f32, pill: f32) -> El {
     let model = s.model();
     let tabs = model
         .view()
@@ -162,7 +197,7 @@ fn tab_track(s: &Workspace) -> El {
     let mut floors = -2.;
     let mut names = row()
         .key("tab-names")
-        .h(28.)
+        .h(pill)
         .gap(2.)
         .on_layout(|s: &mut Workspace, r| s.tab_strip.content = r[2]);
     if let Some(view) = model.view() {
@@ -244,6 +279,7 @@ fn tab_track(s: &Workspace) -> El {
                 &icons,
                 active,
                 s.settings.interface.tab_icon_color,
+                1.,
             );
             tab_el = tab_el.child(
                 text(label.clone())
@@ -295,7 +331,7 @@ fn tab_track(s: &Workspace) -> El {
         .key("tabs")
         .min_w(0.)
         .shrink()
-        .h(28.)
+        .h(pill)
         .scroll_x()
         .scroll_edge_fade(16.)
         .on_layout(|s: &mut Workspace, r| s.tab_strip.viewport = r[2])
@@ -311,7 +347,7 @@ fn tab_track(s: &Workspace) -> El {
         .child(names);
     let mut track = row()
         .key("tab-track")
-        .h(34.)
+        .h(track)
         .px(3.)
         .gap(2.)
         .center_y()
@@ -335,12 +371,14 @@ fn tab_track(s: &Workspace) -> El {
     }
     track = track.child(strip);
     if overflow {
-        track = track.child(
-            chrome_button("next-tabs", &RIGHT, "Scroll next tabs", 26., |s, tx| {
-                s.scroll_tabs(1, tx)
-            })
-            .live_opacity(&s.tab_fade[1]),
-        );
+        track = track
+            .child(
+                chrome_button("next-tabs", &RIGHT, "Scroll next tabs", 26., |s, tx| {
+                    s.scroll_tabs(1, tx)
+                })
+                .live_opacity(&s.tab_fade[1]),
+            )
+            .min_w(TAB_TRACK_ARROWS);
     }
     chip_press(chip(track).on_press(|_: &mut Workspace| {}))
 }
@@ -398,7 +436,7 @@ fn bar_button(
 /// One chip while a transfer receives, `↓ build.log 42%` or `↓ 3 files`, and none otherwise,
 /// like the pending-sequence chip. When the bar is short of room it is `↓ 42%` (see
 /// `downloads_view::chip_label`). A press opens the Downloads popover under the chip.
-fn download_chip(s: &Workspace) -> El {
+pub(super) fn download_chip(s: &Workspace) -> El {
     let Some(text_of) = super::downloads_view::chip_label(s) else {
         return el();
     };
@@ -444,6 +482,39 @@ fn download_chip(s: &Workspace) -> El {
     ))
 }
 
+/// The innermost active key mode stays visible for as long as it is active, in the toolbar or
+/// floating over the pane, whether or not key sequence hints are on: an exclusive mode swallows
+/// the keys it does not bind, so its name is how a person knows why nothing answers. The name
+/// truncates, and a narrow bar gives the `mode` word's room to the name. The accessible name
+/// and the tooltip keep the whole name at every width.
+pub fn mode_chip(s: &Workspace) -> Option<El> {
+    let name = s.key_mode()?;
+    let mut words = row()
+        .key("mode-chip")
+        .role("status")
+        .h(28.)
+        .shrink()
+        .min_w(MODE_CHIP_FLOOR)
+        .max_w(150.)
+        .px(8.)
+        .gap(5.)
+        .center_y()
+        .label(format!("Key mode: {name}"))
+        .help(format!("Key mode {name} · Escape to leave"));
+    if !narrow_bar(s) {
+        words = words.child(text("mode").font(ui(10.5)).color(rgb(muted())));
+    }
+    Some(chip(
+        words.child(
+            text(name.to_owned())
+                .key("mode-name")
+                .font(medium(11.5))
+                .color(rgb(ink()))
+                .truncate(),
+        ),
+    ))
+}
+
 /// A pending key sequence remains visible even without the toolbar row.
 pub fn sequence_chip(s: &Workspace) -> Option<El> {
     if !s.settings.terminal.key_sequence_hints {
@@ -453,9 +524,12 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
     Some(chip(
         el().key("pending-sequence")
             .h(28.)
+            .shrink()
+            .min_w(SEQUENCE_CHIP_FLOOR)
             .max_w(170.)
             .px(8.)
             .center_y()
+            .label(format!("Key sequence: {label}"))
             .help(format!(
                 "{label} — waiting for the next key; Escape cancels"
             ))
@@ -470,14 +544,16 @@ pub fn sequence_chip(s: &Workspace) -> Option<El> {
 
 /// Only live status chips float when the toolbar is absent, never invisible bar controls.
 pub fn floating_status(s: &Workspace) -> Option<El> {
+    let mode = mode_chip(s);
     let sequence = sequence_chip(s);
     let download = super::downloads_view::chip_label(s).is_some();
-    if sequence.is_none() && !download {
+    if mode.is_none() && sequence.is_none() && !download {
         return None;
     }
     Some(
         row()
             .gap(8.)
+            .children(mode)
             .children(sequence)
             .children(download.then(|| download_chip(s))),
     )
@@ -506,7 +582,12 @@ pub fn toolbar(s: &Workspace) -> El {
             |s, tx| s.perform(Intent::Sidebar, tx),
         ))
         .child(identity(s))
-        .child(if s.sidebar_tabs() { el() } else { tab_track(s) })
+        .child(if s.sidebar_tabs() {
+            el()
+        } else {
+            tab_track(s, 34., 28.)
+        })
+        .children(mode_chip(s))
         .child(sequence_chip(s).unwrap_or_else(el))
         .child(download_chip(s))
         // Always at least 48pt of window to drag, outside the tabs.
@@ -546,22 +627,26 @@ pub fn toolbar(s: &Workspace) -> El {
                     false,
                     |s, tx| s.perform(Intent::Settings, tx),
                 ))
-                .child(
+                // The system's frame has its own close button.
+                .children(s.own_frame.then(|| {
                     el().key("toolbar-divider")
                         .w(1.)
                         .h(16.)
                         .mx(6.)
-                        .fill(white(0.1)),
-                )
-                .child(bar_button(
-                    "close-app",
-                    &CLOSE,
-                    "Close app",
-                    "Close app · server programs keep running",
-                    36. + MARGIN,
-                    true,
-                    |_, tx| tx.close_window(),
-                )),
+                        .fill(white(0.1))
+                }))
+                .children(s.own_frame.then(|| {
+                    bar_button(
+                        "close-app",
+                        &CLOSE,
+                        "Close app",
+                        "Close app · server programs keep running",
+                        36. + MARGIN,
+                        true,
+                        |_, tx| tx.close_window(),
+                    )
+                }))
+                .pr(if s.own_frame { 0. } else { MARGIN }),
         )
 }
 

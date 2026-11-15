@@ -139,17 +139,7 @@ fn quote_arg(arg: &str) -> String {
 }
 
 fn local_rex() -> PathBuf {
-    if std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("rex").is_file()))
-    {
-        return "rex".into();
-    }
-    std::env::var_os("XDG_BIN_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin")))
-        .map(|dir| dir.join("rex"))
-        .filter(|p| p.is_file())
-        .unwrap_or_else(|| "rex".into())
+    crate::platform::tools::program("rex")
 }
 
 async fn output(program: &OsStr, args: &[String]) -> Result<String> {
@@ -200,6 +190,7 @@ fn require_api12(version: &str, location: &str) -> Result<()> {
 /// Call only after the person confirms. Every invocation authorizes one attempt, never a
 /// persistent auto-start setting. SSH config/aliases remain OpenSSH's responsibility.
 pub async fn start_personal(endpoint: &str) -> Result<Attachment, Failure> {
+    crate::platform::local::require_ssh()?;
     let target = Target::parse(endpoint)?.context("Setup requires an ssh:// host")?;
     start_with(&target, local_rex().as_os_str(), OsStr::new("ssh")).await
 }
@@ -233,7 +224,8 @@ async fn start_after_preflight(
     Ok(attachment(target, &status))
 }
 
-#[cfg(test)]
+// These fixtures execute Unix shell scripts with executable permissions.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

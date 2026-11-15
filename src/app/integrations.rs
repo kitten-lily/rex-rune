@@ -9,7 +9,7 @@ use super::{
         state_chip,
     },
     theme::*,
-    widgets::{Pill, glyph, pill},
+    widgets::{Pill, pill, program_glyph},
     workspace::Workspace,
 };
 use rune::{El, Tx, col, row, text};
@@ -282,15 +282,7 @@ impl Default for Integrations {
 }
 
 fn local_rex() -> Option<std::path::PathBuf> {
-    let directory = std::env::var_os("XDG_BIN_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|home| home.join(".local/bin"))
-        })?;
-    let path = directory.join("rex");
-    path.is_file().then_some(path)
+    rex_rune::platform::tools::off_path("rex")
 }
 
 fn rex_output(program: &std::ffi::OsStr, args: &[String]) -> std::io::Result<std::process::Output> {
@@ -525,8 +517,8 @@ fn agent_row(s: &Workspace, harness: &Harness) -> El {
         .center_y()
         .grow(1.)
         .min_w(0.)
-        .child(glyph(
-            super::activity::program_icon(Some(&id)),
+        .child(program_glyph(
+            super::program_icons::program_icon(Some(&id), None, None),
             16.,
             rgb(muted()),
         ))

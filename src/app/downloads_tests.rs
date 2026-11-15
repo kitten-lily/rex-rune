@@ -6,7 +6,7 @@ use crate::app::{
     actions::{self, Remote},
     panel::PaneAction,
 };
-use rex_linux::{
+use rex_rune::{
     connection::downloads::Request,
     download::{Confirmation, Failure, Reason, State, Transfer},
 };
@@ -18,7 +18,15 @@ use std::{
 /// A new empty folder for one test's downloads.
 fn scratch() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
+    // These tests read the folder back from dialogs and notices, which shorten a long one
+    // (that has its own tests). macOS's temporary folder is some fifty characters long.
+    let temp = std::env::temp_dir();
+    let temp = if temp.as_os_str().len() > 24 && Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        temp
+    };
+    let dir = temp.join(format!(
         "rex-download-ui-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
@@ -126,7 +134,7 @@ fn label_of(rt: &Runtime<Workspace>, key: &str) -> Option<(&'static str, String)
 
 /// A frame of `cols` columns where `text` is the screen, so a selection can be copied.
 fn screen_with(ws: &mut Workspace, block: &str, text: &[u8], selection: (usize, usize)) {
-    use rex_linux::connection::{Connection, TerminalSender};
+    use rex_rune::connection::{Connection, TerminalSender};
     let (sender, _sent) = flume::unbounded();
     let connection = Connection {
         model: Default::default(),
@@ -141,7 +149,7 @@ fn screen_with(ws: &mut Workspace, block: &str, text: &[u8], selection: (usize, 
     .unwrap();
     terminal.vt_write(text);
     let frame = std::sync::Arc::new(
-        rex_linux::terminal::Renderer::new()
+        rex_rune::terminal::Renderer::new()
             .unwrap()
             .frame(&terminal)
             .unwrap(),
@@ -207,7 +215,7 @@ fn a_returned_client_action_cannot_open_the_download_dialog() {
     let mut model = ws.hosts[0].model.clone();
     model
         .client_actions
-        .push(rex_linux::connection::actions::Queued {
+        .push(rex_rune::connection::actions::Queued {
             generation: ws.keymap_generation,
             session: Some("s".into()),
             block: Some("block:b".into()),
@@ -1052,7 +1060,7 @@ fn change_edits_the_folder_in_the_dialog_and_saves_downloads_directory() {
         rt.state.settings.downloads.directory.as_deref(),
         Some(other.display().to_string().as_str())
     );
-    let saved = rex_linux::settings::Settings::load(&rt.state.settings_path).unwrap();
+    let saved = rex_rune::settings::Settings::load(&rt.state.settings_path).unwrap();
     assert_eq!(
         saved.downloads.directory.as_deref(),
         Some(other.display().to_string().as_str()),
@@ -1099,7 +1107,7 @@ fn the_downloads_directory_survives_a_relaunch() {
 #[test]
 fn sizes_read_as_the_dialog_and_popover_write_them() {
     use crate::app::downloads::progress_text;
-    use rex_linux::download::size_text;
+    use rex_rune::download::size_text;
     assert_eq!(size_text(0), "0 bytes");
     assert_eq!(size_text(1), "1 byte");
     assert_eq!(size_text(999), "999 bytes");
@@ -1644,7 +1652,7 @@ fn a_deep_folder_is_cut_in_the_middle_in_the_save_in_line_and_in_a_saved_row() {
 
 #[test]
 fn the_launch_cleanup_deletes_a_recorded_partial_of_a_dead_process_and_nothing_else() {
-    use rex_linux::download::store::Records;
+    use rex_rune::download::store::Records;
     let dir = scratch();
     let state = scratch();
     // A process that has ended: its id is no longer a running process's.
@@ -1659,13 +1667,7 @@ fn the_launch_cleanup_deletes_a_recorded_partial_of_a_dead_process_and_nothing_e
     }
     let records = state.join("downloads.json");
     // This process's own start time, as the core reads it, so its record says it is running.
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
-    let started: u64 = stat[stat.rfind(')').unwrap() + 1..]
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let started = rex_rune::platform::process::start_time(std::process::id()).unwrap();
     let record = |name: &str, pid: u32, started: u64| serde_json::json!({"dir": dir, "name": name, "pid": pid, "started": started, "created": 1});
     // `other` belongs to this very process, which is running: it must stay.
     std::fs::write(
@@ -1703,7 +1705,7 @@ fn the_launch_cleanup_deletes_a_recorded_partial_of_a_dead_process_and_nothing_e
 fn change_model(
     rt: &mut Runtime<Workspace>,
     index: usize,
-    f: impl FnOnce(&mut rex_linux::connection::HostModel),
+    f: impl FnOnce(&mut rex_rune::connection::HostModel),
 ) {
     rt.update(|s, tx| {
         let mut model = s.hosts[index].model.clone();
@@ -1939,8 +1941,8 @@ fn xdg_open_gets_one_argument_the_absolute_path() {
         "/home/u/Downloads/\u{fc}n\u{ef} \u{30d5}",
         "/",
     ] {
-        let command = crate::app::downloads::xdg_open_command(Path::new(target)).unwrap();
-        assert_eq!(command.get_program(), "xdg-open");
+        let command = crate::app::platform::open::path_command(Path::new(target)).unwrap();
+        assert_eq!(command.get_program(), crate::app::platform::open::OPENER);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, [std::ffi::OsStr::new(target)], "{target}");
         assert_eq!(
@@ -1952,7 +1954,7 @@ fn xdg_open_gets_one_argument_the_absolute_path() {
     // A relative path could be read as an option or an URL.
     for target in ["notes", "-n", "--help", "./a", "file:///etc/passwd", ""] {
         assert!(
-            crate::app::downloads::xdg_open_command(Path::new(target)).is_none(),
+            crate::app::platform::open::path_command(Path::new(target)).is_none(),
             "{target}"
         );
     }
@@ -2030,7 +2032,7 @@ fn settings_interface_holds_the_download_folder_and_its_form_checks_like_change(
 #[test]
 fn a_binding_for_pane_download_is_the_hint_in_the_pane_menu_and_commands() {
     let (mut ws, _rx, dir) = workspace_13();
-    ws.settings.shortcut_file.overrides = rex_linux::keymap::Overrides::parse(
+    ws.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(
         &serde_json::json!([{"keys":"ctrl+alt+d","action":"pane.download"}]),
     );
     ws.local_keymap = actions::resolve(&ws.settings.shortcut_file.overrides);

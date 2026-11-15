@@ -3,7 +3,7 @@ use super::splits::SplitWay;
 use super::tabs::{TabAction, TabTarget};
 use super::theme::{MONITOR, SERVER};
 use super::workspace::Workspace;
-use rex_linux::{
+use rex_rune::{
     settings::{ChromeTheme, TerminalThemeChoice},
     terminal_theme::{BUILTIN_PREFIX, builtins, paired},
 };
@@ -149,7 +149,8 @@ impl Intent {
                         | "pane.move_to_tab"
                         | "pane.close_others"
                         | super::commands::CLOSE_SESSION
-                        | super::commands::CHOOSE_THEME,
+                        | super::commands::CHOOSE_THEME
+                        | super::server_page::STOP,
                     _
                 )
                 | Intent::MovePaneTo(_)
@@ -392,6 +393,8 @@ pub struct Panel {
     pub selected: usize,
     /// Scroll the keyboard selection into view on the next commit.
     pub reveal: bool,
+    pub server_refresh: Option<std::time::Instant>,
+    pub stop_server: Option<super::server_page::StopTarget>,
     pub error: Option<String>,
     pub target: Option<PaneTarget>,
     pub session: Option<SessionTarget>,
@@ -425,6 +428,8 @@ impl Panel {
                 .collect(),
             selected: 0,
             reveal: false,
+            server_refresh: None,
+            stop_server: None,
             error: None,
             target: None,
             session: None,
@@ -480,6 +485,8 @@ pub struct Entry {
     pub group_icon: Option<&'static rune::Icon>,
     /// A create button at the right of the group header, with its help text.
     pub group_create: Option<(Intent, String)>,
+    /// A session's program, drawn as its tile before the label.
+    pub program: Option<&'static super::program_icons::ProgramIcon>,
 }
 impl Entry {
     pub fn new(
@@ -503,6 +510,7 @@ impl Entry {
             group_name: None,
             group_icon: None,
             group_create: None,
+            program: None,
         }
     }
 
@@ -929,6 +937,7 @@ impl Workspace {
                     }
                     e.current = self.active == index
                         && host.model.selected.as_ref() == Some(&session.session_id);
+                    e.program = Some(self.session_icon(index, &session.session_id));
                     if format!("{} {label}", e.label)
                         .to_lowercase()
                         .contains(&lower)

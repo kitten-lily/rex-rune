@@ -275,6 +275,7 @@ impl<S: 'static> Host<S> {
             WindowEvent::Resized(size) => {
                 sync_chrome(rt, l, chrome, titlebar);
                 rt.set_window_maximized(l.window.is_maximized());
+                rt.set_window_full_screen(l.window.fullscreen().is_some());
                 let was_live = rt.live_visible();
                 rt.set_live_visible(self.life.uncovered() && size.width > 0 && size.height > 0 && !l.minimized());
                 // Restored where no occlusion event says so (Windows): as uncovering does, the
@@ -347,6 +348,7 @@ impl<S: 'static> Host<S> {
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.mods = m.state();
+                self.alt_keys = alt_keys(&m);
                 if rt.physical_observation(crate::PhysicalInput::Modifiers(map_mods(self.mods))) {
                     l.request_redraw();
                 }
@@ -394,9 +396,9 @@ impl<S: 'static> Host<S> {
                         .map(|_| crate::runtime::Unhandled::WindowMenu)
                 });
                 if let winit::keyboard::PhysicalKey::Code(key) = event.physical_key {
-                    redraw = rt.physical_then(crate::PhysicalInput::Key {
+                    redraw = rt.physical_then_alt(crate::PhysicalInput::Key {
                         key, mods: map_mods(self.mods), pressed, repeat: event.repeat,
-                    }, logical, key_base(&event), unhandled);
+                    }, logical, key_base(&event), self.alt_keys, unhandled);
                 } else if let Some(ev) = logical {
                     if !pressed { redraw = rt.key_up(ev); }
                     else if ev.edit_command() == Some('v') && rt.accepts_paste() { self.clipboard.read(rt); }
@@ -588,6 +590,7 @@ impl<S: 'static> Host<S> {
         #[cfg(target_os = "macos")]
         if let Some(l) = self.win.as_ref().filter(|l| l.native.full_screen.take()) {
             sync_chrome(&mut self.rt, l, self.chrome, self.titlebar);
+            self.rt.set_window_full_screen(l.window.fullscreen().is_some());
         }
         // The window procedure asks for this paint when a caption button's hover or
         // press changes.

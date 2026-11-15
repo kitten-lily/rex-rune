@@ -31,7 +31,9 @@ mod pane_moves;
 mod pane_verbs;
 mod panel;
 mod panes;
+pub(crate) mod platform;
 mod popups;
+mod program_icons;
 mod recorder;
 mod remote;
 mod select_copy;
@@ -51,6 +53,7 @@ mod tailscale;
 mod term;
 mod terminal_page;
 mod theme;
+mod title_row;
 mod titles;
 mod toolbar;
 mod toolbar_reveal;
@@ -59,13 +62,13 @@ mod upload;
 mod widgets;
 mod workspace;
 
-use rex_linux::{connection::Options, settings::Settings};
+use rex_rune::{connection::Options, settings::Settings};
 use rune::{AppSpec, Cursor, Cx, El, Tx, WindowEdge, col, el, row};
 use std::time::Duration;
 use theme::*;
 use workspace::Workspace;
 
-const APP_ICON: &[u8] = include_bytes!("../../resources/icons/256x256/apps/dev.shuv.rex-linux.png");
+const APP_ICON: &[u8] = include_bytes!("../../resources/icons/256x256/apps/dev.shuv.rex-rune.png");
 
 fn resize_band(e: WindowEdge) -> El {
     let b = 6.;
@@ -91,6 +94,12 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
     let scale = s.ui_scale();
     let viewport = s.viewport.map(|v| v / scale);
     let maximized = cx.window_maximized();
+    let full_screen = cx.window_full_screen();
+    let insets = cx.chrome_insets();
+    if s.unified_title {
+        // The title row grows with the interface zoom, and the traffic lights stay centred in it.
+        cx.titlebar_height(platform::chrome::TITLE_ROW * scale);
+    }
     let mut body = row().key("body").grow(1.).w_full().min_h(0.);
     if s.sidebar.is_open() {
         body = body
@@ -109,7 +118,7 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .fill(rgb(ground()));
     // Hover tracks position even behind content. Keep the band below both panes and
     // toolbar so secondary presses reach their context menus rather than this sibling.
-    if s.settings.interface.toolbar == rex_linux::settings::interface::ToolbarBehavior::OnHover {
+    if s.settings.interface.toolbar == rex_rune::settings::interface::ToolbarBehavior::OnHover {
         root = root.child(toolbar_reveal::band(s));
     }
     root = root.child(
@@ -119,11 +128,21 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
             .pt(toolbar_reveal::row_height(s))
             .child(body),
     );
-    root = match toolbar_reveal::placement(s) {
-        toolbar_reveal::Placement::Row => root.child(toolbar::toolbar(s).absolute(0., 0.)),
-        toolbar_reveal::Placement::Floating => {
-            root.child(toolbar_reveal::floating(toolbar::toolbar(s)))
+    let bar = |s: &Workspace| {
+        if s.unified_title {
+            title_row::title_row(s)
+        } else {
+            toolbar::toolbar(s)
         }
+    };
+    if toolbar_reveal::shows_title_strip(s) {
+        root = root.child(title_row::title_strip(s).absolute(0., 0.));
+    }
+    root = match toolbar_reveal::placement(s) {
+        toolbar_reveal::Placement::Row => root.child(bar(s).absolute(0., 0.)),
+        toolbar_reveal::Placement::Floating => root.child(toolbar_reveal::floating(s, bar(s))),
+        // The title strip draws them.
+        toolbar_reveal::Placement::None if toolbar_reveal::shows_title_strip(s) => root,
         toolbar_reveal::Placement::None => {
             root.children(toolbar::floating_status(s).map(toolbar_reveal::sequence_float))
         }
@@ -164,11 +183,25 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
         .w_full()
         .h_full()
         .fill(rgb(ground()))
-        .on_layout(move |s: &mut Workspace, r| s.window_resized([r[2], r[3]], maximized))
+        .on_layout(move |s: &mut Workspace, r| {
+            s.window_resized([r[2], r[3]], maximized, full_screen)
+        })
+        .children(s.unified_title.then(|| {
+            // The insets also change with no resize (full screen), and a rect that moves is
+            // what reports them.
+            el().key("traffic-lights")
+                .absolute(0., 0.)
+                .size(insets.leading, insets.height)
+                .inert()
+                .on_layout(move |s: &mut Workspace, r| {
+                    s.window_full_screen = full_screen;
+                    s.traffic_lights(r[2], r[3])
+                })
+        }))
         .child(root);
     // Native resize targets stay in window points at every content zoom. The corner above
     // Close belongs to Close rather than the resize band.
-    if !cx.window_maximized() {
+    if s.own_frame && !maximized && !full_screen {
         for edge in [
             WindowEdge::South,
             WindowEdge::West,
@@ -186,11 +219,19 @@ pub(crate) fn view(s: &Workspace, cx: &mut Cx<Workspace>) -> El {
 
 fn poll(s: &mut Workspace, _: f64, tx: &mut Tx) -> bool {
     let now = std::time::Instant::now();
+    s.sync_option_key(tx, false);
+    let (server_changed, next_server) = s.refresh_server_at(now);
+    if let Some(delay) = next_server {
+        tx.wake_after(delay);
+    }
     let remote_changed = s.poll_remote_navigation(now);
     let updates_changed = s.poll_updates(now, tx);
     let settings_changed = s.poll_settings(now, tx);
-    let mut changed =
-        s.poll_navigation(now, tx) || remote_changed || updates_changed || settings_changed;
+    let mut changed = s.poll_navigation(now, tx)
+        || remote_changed
+        || updates_changed
+        || settings_changed
+        || server_changed;
     if let Some(panel) = &mut s.panel
         && std::mem::take(&mut panel.reveal)
     {
@@ -269,6 +310,8 @@ pub fn run(
     mut options: Options,
     recovery_notice: Option<StartupNotice>,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
+    // Before settings are read: they are resolved against this platform's defaults.
+    platform::keys::init();
     let (settings, path) = match &options.config {
         Some(path) => (Settings::load(path)?, path.clone()),
         None => Settings::load_default()?,
@@ -278,7 +321,7 @@ pub fn run(
     let fonts = fonts::load(family, fallbacks);
     rune::text::set_app_font_paths(fonts.paths)
         .map_err(|_| anyhow::anyhow!("terminal fonts were already initialized"))?;
-    rune::set_app_id("dev.shuv.rex-linux");
+    rune::set_app_id("dev.shuv.rex-rune");
     if let Err(error) = rune::set_app_icon(APP_ICON) {
         eprintln!("Could not load the Rex window icon: {error}");
     }
@@ -299,11 +342,13 @@ pub fn run(
     });
     let handle = app.handle();
     let terminal = fonts.terminal;
+    let stand_in = fonts.stand_in;
     let restart = std::sync::Arc::new(std::sync::Mutex::new(None));
     let restart_request = restart.clone();
     let mut app = app
         .init(move || {
             let mut workspace = Workspace::new(options, settings, path, handle, terminal);
+            workspace.stand_in_family = stand_in;
             workspace.restart = restart_request;
             match recovery_notice {
                 Some(StartupNotice::Error(notice)) => workspace.notify(notice),
@@ -313,13 +358,17 @@ pub fn run(
             workspace
         })
         .args(rune_args)
+        .chrome(platform::chrome::FRAME)
         .window_options(rune::WindowOptions {
-            borderless: true,
+            borderless: platform::chrome::OWN_FRAME,
             min_size: Some((640., 480.)),
             ..Default::default()
         })
         .on_ime(input::on_ime)
         .srgb_blend(true);
+    if let Some(titlebar) = platform::chrome::TITLEBAR {
+        app = app.titlebar(titlebar);
+    }
     if stats::FrameStats::enabled() {
         let mut frames = stats::FrameStats::default();
         app = app.on_frame_encoded(move |f| frames.record(f));
@@ -337,5 +386,5 @@ pub fn run(
 const EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 fn wait_for_hosts_at_exit() {
-    rex_linux::connection::wait_for_hosts(EXIT_WAIT);
+    rex_rune::connection::wait_for_hosts(EXIT_WAIT);
 }

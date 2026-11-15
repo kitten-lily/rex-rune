@@ -3,6 +3,8 @@ use super::*;
 mod cwd_tests;
 #[path = "directory_tests.rs"]
 mod directory_tests;
+// These fixtures use the POSIX download store and Unix symbolic links.
+#[cfg(unix)]
 #[path = "download_tests.rs"]
 mod download_tests;
 #[path = "keymap_tests.rs"]
@@ -11,6 +13,8 @@ mod keymap_tests;
 mod navigation_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
+#[path = "server_controls_tests.rs"]
+mod server_controls_tests;
 #[path = "server_info_tests.rs"]
 mod server_info_tests;
 #[path = "tailscale_tests.rs"]
@@ -24,7 +28,7 @@ use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 #[test]
 fn startup_size_prefers_cli_then_saved_size_then_default_and_keeps_the_minimum() {
     use clap::Parser;
-    let options = Options::parse_from(["rex-linux"]);
+    let options = Options::parse_from(["rex-rune"]);
     let legacy: crate::settings::Settings = serde_json::from_str("{}").unwrap();
     assert_eq!(options.window_size, None);
     assert_eq!(options.startup_size(&legacy), (1440., 900.));
@@ -46,7 +50,7 @@ fn startup_size_prefers_cli_then_saved_size_then_default_and_keeps_the_minimum()
         ("infx900", (1100., 750.)),
         ("NaNx900", (1100., 750.)),
     ] {
-        let options = Options::parse_from(["rex-linux", "--window-size", arg]);
+        let options = Options::parse_from(["rex-rune", "--window-size", arg]);
         assert_eq!(options.startup_size(&settings), expected, "{arg}");
     }
     settings.window_size = Some([320., 200.]);
@@ -610,6 +614,8 @@ fn unknown_states_kinds_and_events_stay_quiet() {
             "b".into(),
             BlockEvent::Process {
                 name: None,
+                executable: None,
+                script: None,
                 pids: Vec::new(),
                 place: Default::default()
             }
@@ -673,6 +679,8 @@ fn progress_reports_set_and_clear_a_blocks_progress() {
     // the shell comes back, the report goes with it; the same program keeps it.
     let process = |name: Option<&str>| activity::BlockEvent::Process {
         name: name.map(str::to_owned),
+        executable: name.map(str::to_owned),
+        script: None,
         pids: name.map(|_| vec![7]).unwrap_or_default(),
         place: Default::default(),
     };
@@ -711,6 +719,8 @@ fn progress_goes_when_another_process_of_the_same_name_takes_the_foreground() {
     let mut model = HostModel::default();
     let python = |pids: Vec<u64>| activity::BlockEvent::Process {
         name: Some("python".into()),
+        executable: Some("python".into()),
+        script: None,
         pids,
         place: Default::default(),
     };
@@ -736,6 +746,8 @@ fn progress_goes_with_the_process_not_just_its_name() {
     let mut model = HostModel::default();
     let python = |pids: &[u64]| BlockEvent::Process {
         name: Some("python".into()),
+        executable: Some("python".into()),
+        script: None,
         pids: pids.to_vec(),
         place: Default::default(),
     };
@@ -805,6 +817,48 @@ fn program_names_prefer_the_script_and_drop_login_dashes() {
     );
     assert_eq!(name(json!({"name":"nvim"})).as_deref(), Some("nvim"));
     assert_eq!(name(Value::Null), None);
+}
+
+#[test]
+fn a_scripts_executable_is_its_interpreter() {
+    let executable = |v: Value| activity::executable_name(&v);
+    assert_eq!(
+        executable(json!({"name":"node","script":"/home/u/.bun/bin/sq","argv0":"node"})).as_deref(),
+        Some("node")
+    );
+    assert_eq!(
+        executable(json!({"argv0":"/usr/bin/python3.12","script":"/u/tool"})).as_deref(),
+        Some("python3.12")
+    );
+    assert_eq!(
+        executable(json!({"name":"zsh","argv0":"-zsh"})).as_deref(),
+        Some("zsh")
+    );
+    assert_eq!(executable(Value::Null), None);
+
+    let mut model = HostModel::default();
+    let event = activity::parse_process(&json!({
+        "foreground": {"pid": 9, "name": "node", "argv0": "node", "script": "/u/bin/sq"}
+    }));
+    model.apply_block_event("s", "b".into(), event);
+    assert_eq!(model.programs["b"], "sq");
+    assert_eq!(model.executables["b"], "node");
+    assert_eq!(model.scripts["b"], "/u/bin/sq");
+    model.apply_block_event(
+        "s",
+        "b".into(),
+        activity::parse_process(&json!({"foreground": {}})),
+    );
+    assert!(
+        !model.executables.contains_key("b") && !model.scripts.contains_key("b"),
+        "the shell has no foreground"
+    );
+    let script = |v: Value| activity::script_path(&v);
+    assert_eq!(
+        script(json!({"script":"C:\\npm\\copilot\\npm-loader.js"})).as_deref(),
+        Some("C:/npm/copilot/npm-loader.js")
+    );
+    assert_eq!(script(json!({"script":"", "name":"zsh"})), None);
 }
 
 const OTHER: &str = "session:00000000-0000-0000-0000-000000000002";
@@ -1153,14 +1207,14 @@ fn font_preferences_use_saved_values_unless_explicitly_overridden() {
         ..Default::default()
     };
     let before = serde_json::to_value(&settings).unwrap();
-    let defaults = Options::parse_from(["rex-linux"]);
+    let defaults = Options::parse_from(["rex-rune"]);
     assert_eq!(
         defaults.fonts(&settings),
         ("IBM Plex Mono", settings.font_fallbacks.as_slice())
     );
     assert_eq!(defaults.font_size, None);
     let explicit = Options::parse_from([
-        "rex-linux",
+        "rex-rune",
         "--font",
         "TX02 Nerd Font Mono",
         "--font-size",
@@ -1183,18 +1237,18 @@ fn font_preferences_use_saved_values_unless_explicitly_overridden() {
         before,
         "CLI family choices do not overwrite preferences"
     );
-    let primary_only = Options::parse_from(["rex-linux", "--font", "Inter"]);
+    let primary_only = Options::parse_from(["rex-rune", "--font", "Inter"]);
     assert_eq!(
         primary_only.fonts(&settings),
         ("Inter", settings.font_fallbacks.as_slice())
     );
-    let fallback_only = Options::parse_from(["rex-linux", "--font-fallback", "Noto Sans CJK JP"]);
+    let fallback_only = Options::parse_from(["rex-rune", "--font-fallback", "Noto Sans CJK JP"]);
     assert_eq!(fallback_only.fonts(&settings).0, "IBM Plex Mono");
     for args in [
-        ["rex-linux", "--font", " "],
-        ["rex-linux", "--font-fallback", "a,b"],
-        ["rex-linux", "--font-size", "NaN"],
-        ["rex-linux", "--font-size", "inf"],
+        ["rex-rune", "--font", " "],
+        ["rex-rune", "--font-fallback", "a,b"],
+        ["rex-rune", "--font-size", "NaN"],
+        ["rex-rune", "--font-size", "inf"],
     ] {
         assert!(Options::try_parse_from(args).is_err());
     }
@@ -2100,23 +2154,40 @@ async fn searching_needs_no_server_while_the_host_reconnects() {
             .unwrap();
     };
     let notice = || host.model.lock().unwrap().notice.clone();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A refused TCP connection takes longer on Windows. Observe the retry state rather
+    // than assuming the first connection attempt has finished after 200 ms.
+    until(&host, |m| m.status.starts_with("Disconnected")).await;
     send(Command::Search("needle".into()));
     send(Command::SearchStep(true));
     send(Command::PromptStep(true));
     send(Command::PromptStep(false));
     send(Command::Search(String::new()));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A reply to the next command proves the preceding searches were consumed.
+    let (reply, ticket) = tokio::sync::oneshot::channel();
+    host.commands
+        .send(HostCommand::Ticket {
+            session: "s".into(),
+            block: "b".into(),
+            reply,
+        })
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(8), ticket)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err()
+    );
     assert_eq!(notice(), None, "a search is this client's own");
 
     // Input still isn't taken for later.
     send(Command::Reconnect);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        notice().is_some_and(|n| n.contains("not sent while disconnected")),
-        "{:?}",
-        notice()
-    );
+    until(&host, |m| {
+        m.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("not sent while disconnected"))
+    })
+    .await;
     drop(host);
 }
 
@@ -2280,4 +2351,20 @@ async fn an_unanswered_directory_lookup_opens_the_terminal_once_without_one() {
     assert!(host.model.lock().unwrap().connected);
     drop(host);
     server.await.unwrap();
+}
+
+#[test]
+fn the_old_name_answers_version_as_the_old_updater_checks_it() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        Options::version_line(false),
+        format!("rex-rune {version}\n")
+    );
+    // The 0.7.x updater runs `bin/rex-linux --version` and installs only on this exact line.
+    assert_eq!(
+        Options::version_line(true),
+        format!("rex-linux {version}\n")
+    );
+    let options = Options::from_arguments(["rex-linux", "--session", "work"].map(Into::into), true);
+    assert_eq!(options.session.as_deref(), Some("work"));
 }

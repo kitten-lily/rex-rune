@@ -205,18 +205,18 @@ mod generate_tests {
         );
         assert_eq!(
             source_dir(env(&[("XDG_DATA_HOME", "/data"), ("HOME", "/home/u")])),
-            Some(PathBuf::from("/data/rex-linux/dracula-pro-ghostty"))
+            Some(PathBuf::from("/data/rex-rune/dracula-pro-ghostty"))
         );
         assert_eq!(
             source_dir(env(&[("XDG_DATA_HOME", "relative"), ("HOME", "/home/u")])),
             Some(PathBuf::from(
-                "/home/u/.local/share/rex-linux/dracula-pro-ghostty"
+                "/home/u/.local/share/rex-rune/dracula-pro-ghostty"
             ))
         );
         assert_eq!(
             source_dir(env(&[("REX_DRACULA_PRO_DIR", ""), ("HOME", "/home/u")])),
             Some(PathBuf::from(
-                "/home/u/.local/share/rex-linux/dracula-pro-ghostty"
+                "/home/u/.local/share/rex-rune/dracula-pro-ghostty"
             ))
         );
         assert_eq!(source_dir(env(&[])), None);

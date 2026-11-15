@@ -2,7 +2,7 @@
 //! Clear terminal and Reset terminal, on the pane the menu names, and their `pane.*` actions.
 use super::*;
 use crate::app::actions;
-use rex_linux::{
+use rex_rune::{
     connection::{Command, Connection, TerminalSender},
     terminal::{Renderer, selection},
 };
@@ -563,7 +563,7 @@ fn the_verbs_are_actions_on_the_focused_pane_and_never_remote() {
         assert!(!spec.repeats() && !spec.global());
     }
     assert!(
-        rex_linux::keymap::defaults()
+        rex_rune::keymap::defaults()
             .bindings
             .iter()
             .all(|b| !matches!(
@@ -614,7 +614,7 @@ fn the_verbs_are_actions_on_the_focused_pane_and_never_remote() {
 fn a_rebound_verb_shows_its_keys_in_the_menu() {
     let (mut rt, _host, sent, _clipboard) = split();
     rt.update(|s, _| {
-        s.settings.shortcut_file.overrides = rex_linux::keymap::Overrides::parse(
+        s.settings.shortcut_file.overrides = rex_rune::keymap::Overrides::parse(
             &serde_json::json!([{"keys":"ctrl+shift+a","action":"pane.select_all"}]),
         );
         s.local_keymap = actions::resolve(&s.settings.shortcut_file.overrides);
@@ -663,7 +663,8 @@ impl Camera {
         Some(Self { dir, gpu, painter })
     }
 
-    pub(super) fn snap(&mut self, rt: &mut Runtime<Workspace>, name: &str) {
+    /// Writes the picture, and returns its RGBA rows for a test to measure.
+    pub(super) fn snap(&mut self, rt: &mut Runtime<Workspace>, name: &str) -> Vec<u8> {
         let (w, h) = (
             (rt.viewport.0 * rt.env.scale).round() as u32,
             (rt.viewport.1 * rt.env.scale).round() as u32,
@@ -679,7 +680,9 @@ impl Camera {
         target.copy(&mut encoder);
         queue.submit([encoder.finish()]);
         let path = self.dir.join(format!("{name}.png"));
-        rune::render::write_png(&path, w, h, &target.read(device)).unwrap();
+        let pixels = target.read(device);
+        rune::render::write_png(&path, w, h, &pixels).unwrap();
+        pixels
     }
 }
 

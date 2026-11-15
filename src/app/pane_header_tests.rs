@@ -3,7 +3,7 @@
 use super::pane_verb_tests::{Camera, framed_terminal, rect, sent_verbs};
 use super::*;
 use crate::app::{actions, pane_header};
-use rex_linux::settings::{PaneDensity, PaneHeader};
+use rex_rune::settings::{PaneDensity, PaneHeader};
 use serde_json::Value;
 
 fn settle(rt: &mut Runtime<Workspace>) {
@@ -207,19 +207,106 @@ fn a_zoomed_pane_says_so_and_its_button_restores() {
 }
 
 #[test]
-fn auto_keeps_a_single_pane_edge_to_edge_and_compact_without_headers() {
-    let (rt, _host) = drawn("single", PaneHeader::Auto, PaneDensity::Comfortable);
-    assert!(!has(&rt, "pane-header:block:a") && !has(&rt, "pane-close:block:a"));
+fn auto_gives_a_single_pane_a_header_row_edge_to_edge_and_compact_none() {
+    let (mut ws, host) = tabbed_workspace("single");
+    let (sender, _sent) = flume::unbounded();
+    framed_terminal(&mut ws, "block:a", &sender, b"$ ");
+    assert_eq!(ws.settings.pane_header, PaneHeader::Auto);
+    assert_eq!(ws.settings.pane_density, PaneDensity::Comfortable);
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    // Still no card or margin: the pane fills the area, with the header across its top.
+    assert_eq!(rect(&rt, "pane:block:a"), rt.state.area);
+    let header = rect(&rt, "pane-header:block:a");
+    assert_eq!(
+        header,
+        [0., rt.state.area[1], rt.state.area[2], 30.],
+        "a row across the top"
+    );
+    let grid = rect(&rt, "grid:block:a");
+    assert_eq!(
+        grid[1],
+        header[1] + header[3] + rt.state.settings.padding().1,
+        "the terminal starts under it"
+    );
     assert!(
         !has(&rt, "pane-header-band:block:a"),
-        "and nothing to hover"
+        "a row, so nothing to hover"
     );
-    assert_eq!(rect(&rt, "pane:block:a"), rt.state.area);
+    // Edge to edge, its program's glyph lines up with the terminal's text under it and the
+    // name follows it.
+    assert_eq!(rect(&rt, "pane-icon:block:a")[0], grid[0]);
+    assert_eq!(rect(&rt, "pane-name:block:a")[0], grid[0] + 23.);
+    // The same four buttons a split pane has, in the same order, at the trailing end.
+    let at: Vec<f32> = BUTTONS
+        .iter()
+        .map(|name| rect(&rt, &format!("{name}:block:a"))[0])
+        .collect();
+    assert!(
+        at.windows(2).all(|w| w[1] - w[0] == pane_header::BUTTON),
+        "{at:?}"
+    );
+    let glyph_opacity = |rt: &Runtime<Workspace>, key: &str| {
+        let button = element(rt, key);
+        rt.elements()
+            .into_iter()
+            .filter(|e| !e.exiting && e.path.starts_with(&button.path) && e.path != button.path)
+            .map(|e| e.opacity)
+            .fold(1., f32::min)
+    };
+    // Split right and Split down are what the header is there for; Zoom has nothing to
+    // hide. This session has a second tab, so the pane can be closed.
+    for name in ["pane-split-right", "pane-split-down", "pane-close"] {
+        assert_eq!(glyph_opacity(&rt, &format!("{name}:block:a")), 1., "{name}");
+    }
+    assert!((glyph_opacity(&rt, "pane-zoom:block:a") - pane_header::UNAVAILABLE).abs() < 0.01);
+    let _ = requests(&host);
+    click(&mut rt, "pane-split-down:block:a");
+    assert!(
+        requests(&host).iter().any(|r| r.0 == "session.new_split"),
+        "Split down splits the lone pane"
+    );
+
+    // The session's last pane: Close keeps its place, dim, says why, and does nothing.
+    rt.update(|s, _| {
+        s.hosts[0]
+            .model
+            .views
+            .get_mut("s")
+            .unwrap()
+            .windows
+            .retain(|w| w.window_id.as_deref() == Some("single"));
+    });
+    settle(&mut rt);
+    assert!((glyph_opacity(&rt, "pane-close:block:a") - pane_header::UNAVAILABLE).abs() < 0.01);
+    assert_eq!(
+        element(&rt, "pane-close:block:a").help.as_deref(),
+        Some("Close pane · the session's only pane")
+    );
+    assert_eq!(glyph_opacity(&rt, "pane-split-right:block:a"), 1.);
+    let _ = requests(&host);
+    click(&mut rt, "pane-close:block:a");
+    settle(&mut rt);
+    assert!(rt.state.panel.is_none(), "no confirmation opens");
+    assert!(requests(&host).is_empty());
+    // The pane menu still offers it: only the header follows Rex for macOS here.
+    let target = rt.state.target("block:a").unwrap();
+    assert!(
+        rt.state
+            .pane_verb_available(&target, crate::app::panel::PaneAction::Close)
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 
-    let (rt, _host) = drawn("split", PaneHeader::Auto, PaneDensity::Compact);
-    assert!(!has(&rt, "pane-header:block:b") && !has(&rt, "pane-header:block:c"));
-    std::fs::remove_file(&rt.state.settings_path).ok();
+    for active in ["single", "split"] {
+        let (rt, _host) = drawn(active, PaneHeader::Auto, PaneDensity::Compact);
+        for block in ["block:a", "block:b", "block:c"] {
+            assert!(
+                !has(&rt, &format!("pane-header:{block}")),
+                "{active} {block}"
+            );
+        }
+        std::fs::remove_file(&rt.state.settings_path).ok();
+    }
 }
 
 #[test]
@@ -446,7 +533,7 @@ fn reveal_pane_headers_is_a_local_toggle_that_never_resizes_a_terminal() {
     assert!(spec.accepts(&Value::Null) && !spec.accepts(&serde_json::json!({"x": 1})));
     assert!(!spec.repeats() && !spec.global());
     assert!(
-        rex_linux::keymap::defaults()
+        rex_rune::keymap::defaults()
             .bindings
             .iter()
             .all(|b| b.action != "client.pane_headers.toggle"),
@@ -464,6 +551,10 @@ fn reveal_pane_headers_is_a_local_toggle_that_never_resizes_a_terminal() {
     for header in [PaneHeader::Auto, PaneHeader::OnHover, PaneHeader::Hidden] {
         let (mut ws, host) = tabbed_workspace("single");
         ws.settings.pane_header = header;
+        // Auto has rows on every pane in Comfortable, and so nothing to reveal there.
+        if header == PaneHeader::Auto {
+            ws.settings.pane_density = PaneDensity::Compact;
+        }
         let (sender, sent) = flume::unbounded();
         framed_terminal(&mut ws, "block:a", &sender, b"$ ");
         let mut rt = runtime(ws);
@@ -577,7 +668,9 @@ fn the_pane_headers_setting_saves_each_choice_and_a_relaunch_keeps_it() {
             "the control shows the choice"
         );
     }
-    // A choice puts away headers that were revealed by hand.
+    // A choice puts away headers that were revealed by hand. (Auto has a row on every pane
+    // in Comfortable, and so nothing to reveal: start from a choice that has.)
+    choose_pane_headers(&mut rt, "On hover");
     rt.update(|s, _| s.toggle_pane_headers());
     assert!(rt.state.header_reveal.pinned);
     choose_pane_headers(&mut rt, "Hidden");
@@ -614,7 +707,7 @@ fn a_narrow_pane_keeps_zoom_and_close() {
 /// The header under each choice as drawn, for a look (see `Camera`).
 #[test]
 fn pane_headers_draw_under_each_choice() {
-    use rex_linux::connection::activity::{BlockedKind, ProgramState::*};
+    use rex_rune::connection::activity::{BlockedKind, ProgramState::*};
     let Some(mut camera) = Camera::new() else {
         return;
     };
@@ -669,6 +762,28 @@ fn pane_headers_draw_under_each_choice() {
     camera.snap(&mut rt, "header-zoomed");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
+    // A lone pane in Auto: its header across the top, edge to edge.
+    let mut rt = scene("single", PaneHeader::Auto, PaneDensity::Comfortable);
+    camera.snap(&mut rt, "header-auto-single");
+    let split = rect(&rt, "pane-split-right:block:a");
+    rt.pointer_move(split[0] + 12., split[1] + 12.);
+    settle(&mut rt);
+    camera.snap(&mut rt, "header-auto-single-split-hover");
+    // The session's last pane: Zoom and Close keep their places, dim.
+    rt.update(|s, _| {
+        s.hosts[0]
+            .model
+            .views
+            .get_mut("s")
+            .unwrap()
+            .windows
+            .retain(|w| w.window_id.as_deref() == Some("single"));
+    });
+    rt.pointer_move(500., 400.);
+    settle(&mut rt);
+    camera.snap(&mut rt, "header-auto-last-pane");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
     let mut rt = scene("single", PaneHeader::Always, PaneDensity::Comfortable);
     camera.snap(&mut rt, "header-always-single");
     std::fs::remove_file(&rt.state.settings_path).ok();
@@ -683,6 +798,17 @@ fn pane_headers_draw_under_each_choice() {
     rt.pointer_move(pane[0] + 300., pane[1] + 14.);
     settle(&mut rt);
     camera.snap(&mut rt, "header-hover-single");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+
+    // The same with no toolbar row: the floating header keeps clear of the window's top edge.
+    let mut rt = scene("single", PaneHeader::OnHover, PaneDensity::Comfortable);
+    rt.update(|s, _| {
+        s.settings.interface.toolbar = rex_rune::settings::interface::ToolbarBehavior::OnHover
+    });
+    settle(&mut rt);
+    rt.pointer_move(300., 20.);
+    settle(&mut rt);
+    camera.snap(&mut rt, "header-hover-single-no-toolbar");
     std::fs::remove_file(&rt.state.settings_path).ok();
 
     let mut rt = scene("split", PaneHeader::OnHover, PaneDensity::Comfortable);

@@ -12,7 +12,7 @@ use super::{
     widgets::{Pill, glyph},
     workspace::Workspace,
 };
-use rex_linux::settings::{
+use rex_rune::settings::{
     Channels, NoticePosition, NotificationsConfig, PaneDensity, PaneHeader, SessionList,
     interface::{InterfaceConfig, ToolbarBehavior},
 };
@@ -125,7 +125,12 @@ fn interface(s: &Workspace) -> El {
                 card([select_row(
                     "toolbar-behavior",
                     "Toolbar visibility",
-                    "Show on hover and Hidden give its row to the terminals.",
+                    if s.unified_title {
+                        "Show on hover and Hidden keep only a title strip beside the window's \
+                         buttons, and in full screen give its row to the terminals."
+                    } else {
+                        "Show on hover and Hidden give its row to the terminals."
+                    },
                     &["Always show", "Show on hover", "Hidden"],
                     TOOLBARS
                         .iter()
@@ -176,7 +181,7 @@ fn interface(s: &Workspace) -> El {
                     select_row(
                         "pane-header",
                         "Pane headers",
-                        "Auto shows them on split panes in Comfortable density.",
+                        "Auto shows them on every pane in Comfortable density.",
                         &["Auto", "Always", "On hover", "Hidden"],
                         PANE_HEADERS
                             .iter()
@@ -302,13 +307,13 @@ fn interface(s: &Workspace) -> El {
                     },
                     &["Always", "Active pane", "Active tab", "Never"],
                     match s.settings.interface.tab_icon_color {
-                        rex_linux::settings::interface::TabIconColor::Always => 0,
-                        rex_linux::settings::interface::TabIconColor::ActivePane => 1,
-                        rex_linux::settings::interface::TabIconColor::ActiveTab => 2,
-                        rex_linux::settings::interface::TabIconColor::Never => 3,
+                        rex_rune::settings::interface::TabIconColor::Always => 0,
+                        rex_rune::settings::interface::TabIconColor::ActivePane => 1,
+                        rex_rune::settings::interface::TabIconColor::ActiveTab => 2,
+                        rex_rune::settings::interface::TabIconColor::Never => 3,
                     },
                     |s, i, _| {
-                        use rex_linux::settings::interface::TabIconColor;
+                        use rex_rune::settings::interface::TabIconColor;
                         s.settings.interface.tab_icon_color = [
                             TabIconColor::Always,
                             TabIconColor::ActivePane,
@@ -428,6 +433,7 @@ fn channel_row(state: &str, label: &str, detail: &str, cells: Cells) -> El {
 
 fn notifications(s: &Workspace) -> El {
     use super::notify::{Command, Service, TestResult};
+    use super::platform::notify::{SERVICE_DETAIL, SERVICE_SECTION, TEST_FOOTNOTE};
     use super::settings_kit::{ChipTone, state_chip};
     let health = &s.notification_health;
     let (status, tone) = match &health.service {
@@ -436,6 +442,13 @@ fn notifications(s: &Workspace) -> El {
         Service::NotFound => ("Not found", ChipTone::Attention),
         Service::Unreachable(_) => ("Unreachable", ChipTone::Attention),
         Service::Rejected => ("Rejected", ChipTone::Attention),
+        Service::Unavailable(_) => ("Unavailable", ChipTone::Attention),
+    };
+    // A platform that cannot post says why in the row itself: a bare macOS executable and
+    // a withheld permission are things the person acts on, not tooltips.
+    let service_detail = match &health.service {
+        Service::Unavailable(reason) => reason.clone(),
+        _ => SERVICE_DETAIL.to_owned(),
     };
     let test = match &health.test {
         TestResult::None => "No test sent yet.".to_owned(),
@@ -545,12 +558,12 @@ fn notifications(s: &Workspace) -> El {
             )])],
         ),
         section(
-            "Desktop service",
+            SERVICE_SECTION,
             [
                 card([
                     setting(
                         "Notification service",
-                        "Last check, not a delivery receipt.",
+                        &service_detail,
                         state_chip("notification-health", status, tone, health.service.reason()),
                     ),
                     setting(
@@ -577,7 +590,7 @@ fn notifications(s: &Workspace) -> El {
                             )),
                     ),
                 ]),
-                footnote("Tests work even when desktop notifications are off."),
+                footnote(TEST_FOOTNOTE),
             ],
         ),
     ])

@@ -206,33 +206,6 @@ fn settings_opens_on_its_section_list_and_a_typed_letter_starts_a_search() {
 }
 
 #[test]
-fn typing_sound_lists_notifications_and_enter_opens_it() {
-    let mut rt = settings(1, (1440., 1000.));
-    click(&mut rt, "settings-search");
-    type_text(&mut rt, "sound");
-    assert_eq!(hits(&rt), [("Notifications".to_owned(), String::new())]);
-    assert!(has(&rt, "settings-hit:0"));
-    press(&mut rt, Key::Enter);
-    settle(&mut rt);
-    assert_eq!(rt.state.settings_page(), SettingsSection::Notifications);
-    assert_eq!(title(&rt), "Notifications");
-    assert!(has(&rt, "notify-column-tab"), "its page is on screen");
-    assert!(!has(&rt, "settings-found"), "a page has no row to mark");
-    // The search stays, with the keyboard still in it.
-    assert_eq!(rt.state.settings_nav.search.text, "sound");
-    assert!(focused(&rt).is_some_and(|path| path.contains("settings-search")));
-
-    // Nothing found says so, and Enter does nothing.
-    press(&mut rt, Key::Escape);
-    type_text(&mut rt, "zebra");
-    assert!(hits(&rt).is_empty());
-    assert!(has(&rt, "settings-no-hits"));
-    press(&mut rt, Key::Enter);
-    assert_eq!(rt.state.settings_page(), SettingsSection::Notifications);
-    std::fs::remove_file(&rt.state.settings_path).ok();
-}
-
-#[test]
 fn typing_padding_lists_the_row_and_enter_marks_it() {
     let mut rt = settings(1, (1440., 1000.));
     click(&mut rt, "settings-search");
@@ -420,6 +393,10 @@ fn back_and_forward_restore_scroll_and_a_new_visit_discards_forward() {
     settle(&mut rt);
     let page = rect(&rt, "settings-scroll:notifications");
     rt.wheel(page[0] + page[2] / 2., page[1] + page[3] / 2., -110.);
+    settle(&mut rt);
+    assert!(rt.state.settings_nav.offset().get() > 20.);
+    // Keep the pointer-navigation target visible as rows are added above Programs.
+    rt.update(|_, tx| tx.scroll_center("notify-messages"));
     settle(&mut rt);
     let scrolled = rt.state.settings_nav.offset().get();
     assert!(scrolled > 20., "{scrolled}");

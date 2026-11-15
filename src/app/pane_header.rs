@@ -2,9 +2,9 @@
 //! and Close, each on the pane the header belongs to, focused or not.
 //!
 //! Settings → Interface → Pane headers decides where the header is. Auto follows the density
-//! (the cards of a split or zoomed tab in Comfortable, never in Compact; a single pane stays
-//! edge to edge), Always puts one on every pane, On hover floats it over the top of the pane
-//! the pointer rests on, and Hidden draws none. A header that floats never moves the terminal
+//! (every pane in Comfortable, a lone one included, which stays edge to edge under its
+//! header; never in Compact), Always puts one on every pane, On hover floats it over the top
+//! of the pane the pointer rests on, and Hidden draws none. A header that floats never moves the terminal
 //! under it: the grid keeps its rows, so nothing is resized on the server.
 use super::{
     panel::{Intent, PaneAction},
@@ -13,7 +13,7 @@ use super::{
     widgets::glyph,
     workspace::Workspace,
 };
-use rex_linux::{
+use rex_rune::{
     layout,
     settings::{PaneDensity, PaneHeader},
 };
@@ -36,8 +36,71 @@ const REVEAL_AFTER: Duration = Duration::from_millis(90);
 const HIDE_AFTER: Duration = Duration::from_millis(220);
 /// An action that cannot run now keeps its place at this opacity.
 pub const UNAVAILABLE: f32 = 0.35;
-/// Below this width a header keeps Zoom and Close only; the pane menu has the splits.
+/// A header row's leading and trailing pads and the gap between its children, which `panes`
+/// lays it out with: [`glyph_fits`] counts the same numbers.
+pub const HEADER_LEAD: f32 = 14.;
+pub const HEADER_TAIL: f32 = 8.;
+pub const HEADER_GAP: f32 = 8.;
+/// A program glyph's slot in a header.
+const GLYPH: f32 = 15.;
+/// The first letters of the name, which a header keeps beside the glyph: a glyph with no room
+/// for them beside it is not worth pushing the name out for.
+const NAME_ROOM: f32 = 11.;
+/// The Zoomed chip: its 10.5 pt label and 7 pt pads. The progress bar is pinned across the row,
+/// out of its flow, so it takes no room from anything beside it.
+const CHIP_ROOM: f32 = 56.;
+/// What the reconnecting strip keeps when it shrinks: its 10 and 3 pt pads, and its Retry pill
+/// with that pill's 10 pt pads either side of the label.
+const STRIP_PADS: f32 = 10. + 3. + 2. * 10.;
+/// Below [`ROOMY`] a header keeps Zoom and Close only; the pane menu has the splits.
 const ROOMY: f32 = 200.;
+
+/// The room a header needs beside its name to keep its glyph: its leading pad, the glyph, the
+/// buttons it draws, its trailing pad and a gap between each of its children. `extras` is what
+/// else in the row cannot shrink.
+const fn glyph_room(lead: f32, buttons: usize, extras: f32) -> f32 {
+    lead + GLYPH + NAME_ROOM + BUTTON * buttons as f32 + HEADER_TAIL + HEADER_GAP * 3. + extras
+}
+
+/// How many trailing buttons a header `width` wide draws: Split right and Split down join Zoom
+/// and Close from [`ROOMY`] up.
+pub fn buttons(width: f32) -> usize {
+    if width >= ROOMY { 4 } else { 2 }
+}
+
+/// The room a header's activity `word`, Zoomed chip and reconnecting strip take, each with the
+/// gap before it. The word and the Retry label are measured with Rune's own text measurement,
+/// which rounds widths up, at the size they are drawn. `strip` is the pane's name when the
+/// strip is drawn: beside a strip the name and the strip share what the row has left, and Retry
+/// cannot shrink, so the glyph also gives up the name's room (`NAME_ROOM` is already counted
+/// below) rather than push Retry over the buttons.
+pub fn extras(word: Option<&str>, chip: bool, strip: Option<&str>) -> f32 {
+    let width = |text: &str, size: f32| rune::text::measure(text, &[], medium(size), None).0;
+    let word_room = word.map_or(0., |word| width(word, 11.));
+    let chip_room = if chip { CHIP_ROOM } else { 0. };
+    let strip_room = strip.map_or(0., |name| {
+        STRIP_PADS + width("Retry", 11.5) + (width(name, 11.5) - NAME_ROOM).max(0.)
+    });
+    let children = u8::from(word.is_some()) + u8::from(chip) + u8::from(strip.is_some());
+    word_room + chip_room + strip_room + HEADER_GAP * f32::from(children)
+}
+
+/// Whether a header `width` wide can keep its glyph: `lead` is its leading pad, `buttons` how
+/// many it draws and `extras` what else is in the row. False where the glyph would push the
+/// buttons or anything beside them past the room the row has without it.
+pub fn glyph_fits(width: f32, lead: f32, buttons: usize, extras: f32) -> bool {
+    width >= glyph_room(lead, buttons, extras)
+}
+
+/// A header's leading pad: clear of a card's 12 pt corner, or lined up with the terminal's text
+/// under a header drawn edge to edge.
+pub fn lead(s: &Workspace, window: &Window) -> f32 {
+    if full_bleed(s, window) {
+        s.settings.padding().0.max(8.)
+    } else {
+        HEADER_LEAD
+    }
+}
 
 /// Gentle extra fading, not the disabled-button cue. Hover restores enabled icons.
 pub const FADE: f32 = 0.85;
@@ -71,6 +134,8 @@ pub enum Placement {
     Row,
     /// Over the terminal's top edge.
     Floating,
+    /// In the window's title row ([`in_title`]): the pane draws none of its own.
+    Title,
 }
 
 /// One pane and nothing zoomed.
@@ -85,23 +150,61 @@ pub fn can_zoom(window: &Window) -> bool {
     !single(window)
 }
 
-/// Whether this tab's panes carry a header row above their terminal.
-pub fn rows(s: &Workspace, window: &Window) -> bool {
+/// Whether `window` holds the last pane of the session on screen: one tab, with one pane.
+/// Its header's Close is not offered, as in Rex for macOS; the pane menu, Commands and the
+/// tab's own menu still close it.
+fn last_pane(s: &Workspace, window: &Window) -> bool {
+    single(window) && s.model().view().is_some_and(|v| v.windows.len() == 1)
+}
+
+/// Whether this tab's panes carry a header row above their terminal. The tab no longer
+/// matters (a lone pane has one too); it stays in the signature for the callers that have it.
+pub fn rows(s: &Workspace, _window: &Window) -> bool {
     match s.settings.pane_header {
         PaneHeader::Always => true,
-        PaneHeader::Auto => s.settings.pane_density == PaneDensity::Comfortable && !single(window),
+        // A lone pane has one too, as in Rex for macOS: Split right and Split down are
+        // where the pointer expects them before there is anything to split from.
+        PaneHeader::Auto => s.settings.pane_density == PaneDensity::Comfortable,
         PaneHeader::OnHover | PaneHeader::Hidden => false,
     }
 }
 
-/// A tab with one pane, not zoomed, draws it edge to edge: no card or margin, and no header
-/// unless headers are always shown.
+/// Whether the lone pane of `window` has its header in the window's title row, as in Rex for
+/// macOS: where the toolbar is the title bar and has its row, or the title strip stands in
+/// for it, and the pane would have a header row of its own. Its name is the window's title
+/// and its buttons end the row.
+pub fn in_title(s: &Workspace, window: &Window) -> bool {
+    use super::toolbar_reveal::{Placement, placement, shows_title_strip};
+    s.unified_title
+        && single(window)
+        && (placement(s) == Placement::Row || shows_title_strip(s))
+        && rows(s, window)
+}
+
+/// A tab with one pane, not zoomed, draws it edge to edge: no card or margin. Its header, if
+/// it has one, is a row across the top of it, or the window's title row. With headers always
+/// shown it is otherwise a card like any other.
 pub fn full_bleed(s: &Workspace, window: &Window) -> bool {
-    single(window) && s.settings.pane_header != PaneHeader::Always
+    single(window) && (s.settings.pane_header != PaneHeader::Always || in_title(s, window))
+}
+
+/// Room kept above the header, a row or a floating one, of a pane whose top is the top of
+/// the window: `rect` is the pane's, within the pane area. That happens only while the
+/// toolbar has no row of its own, for a lone pane and for the top panes of a Compact tab.
+/// The toolbar's reveal edge (and the window's resize edge within it) must stay clear of the
+/// header's buttons: a pointer resting on Close would otherwise bring the toolbar out over
+/// it, with Close app where Close pane was. A card keeps its own margin and needs none.
+pub fn clearance(s: &Workspace, rect: [f32; 4]) -> f32 {
+    // The area alone decides, with no look at the Toolbar setting: the pane's rectangle
+    // comes from the same area, so both change in the same commit when the setting does,
+    // and the terminal is resized once, not twice.
+    (super::toolbar_reveal::EDGE - (s.area[1] + rect[1])).max(0.)
 }
 
 pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
-    if rows(s, window) {
+    if in_title(s, window) {
+        Placement::Title
+    } else if rows(s, window) {
         Placement::Row
     } else if s.header_reveal.pinned
         || s.settings.pane_header == PaneHeader::OnHover
@@ -116,7 +219,12 @@ pub fn placement(s: &Workspace, window: &Window, block: &str) -> Placement {
 /// Whether Reveal pane headers has anything to bring out: some pane, here or in another
 /// tab, can be without a header row.
 pub fn can_reveal(s: &Workspace) -> bool {
-    s.settings.pane_header != PaneHeader::Always
+    match s.settings.pane_header {
+        PaneHeader::Always => false,
+        // In Comfortable every pane already has its row.
+        PaneHeader::Auto => s.settings.pane_density != PaneDensity::Comfortable,
+        PaneHeader::OnHover | PaneHeader::Hidden => true,
+    }
 }
 
 impl Workspace {
@@ -202,7 +310,7 @@ pub fn actions(s: &Workspace, window: &Window, block: &str, width: f32, lit: boo
     };
     let on = |action: PaneAction| Some((block.to_owned(), action));
     let mut cluster = row().key(format!("pane-actions:{block}")).center_y();
-    if width >= ROOMY {
+    if buttons(width) == 4 {
         cluster = cluster
             .child(button(
                 format!("pane-split-right:{block}"),
@@ -255,20 +363,34 @@ pub fn actions(s: &Workspace, window: &Window, block: &str, width: f32, lit: boo
             on(PaneAction::Zoom),
         )
     };
-    cluster.child(zoom).child(button(
-        format!("pane-close:{block}"),
-        &CLOSE,
-        "Close pane",
-        hint("Close pane…", "pane.close", Value::Null),
-        (rest, fade),
-        true,
-        on(PaneAction::Close),
-    ))
+    let close = if last_pane(s, window) {
+        button(
+            format!("pane-close:{block}"),
+            &CLOSE,
+            "Close pane",
+            "Close pane · the session's only pane".into(),
+            (rest, fade),
+            true,
+            None,
+        )
+    } else {
+        button(
+            format!("pane-close:{block}"),
+            &CLOSE,
+            "Close pane",
+            hint("Close pane…", "pane.close", Value::Null),
+            (rest, fade),
+            true,
+            on(PaneAction::Close),
+        )
+    };
+    cluster.child(zoom).child(close)
 }
 
 /// A floating header's surface: the popover colour over the terminal, with a hairline below
-/// it. Inside a card it sits within the border and follows the card's top corners.
-pub fn floating(header: El, carded: bool) -> El {
+/// it. Inside a card it sits within the border and follows the card's top corners. On a
+/// pane with no card its row sits `top` down inside the surface (see [`clearance`]).
+pub fn floating(header: El, carded: bool, top: f32) -> El {
     let (edge, radius) = if carded {
         (1., CARD_RADIUS - 1.)
     } else {
@@ -276,6 +398,8 @@ pub fn floating(header: El, carded: bool) -> El {
     };
     el().key("pane-header-float")
         .pin(Some(edge), Some(edge), Some(edge), None)
+        // The surface still starts at the pane's edge; only what is in it moves down.
+        .pt(top)
         .corners([radius, radius, 0., 0.])
         .continuous_corners()
         .fill(rgb(popover()))
@@ -291,12 +415,13 @@ pub fn floating(header: El, carded: bool) -> El {
 
 /// The band along a pane's top edge that brings its On hover header out and keeps it while
 /// the pointer is on it. It takes no presses: until the header shows, the terminal under the
-/// band works as everywhere else.
-pub fn reveal_band(block: &str) -> El {
+/// band works as everywhere else. `top` is how far down the header floats, so the band
+/// still reaches under all of it.
+pub fn reveal_band(block: &str, top: f32) -> El {
     let id = block.to_owned();
     el().key(format!("pane-header-band:{block}"))
         .pin(Some(0.), Some(0.), Some(0.), None)
-        .h(REVEAL)
+        .h(REVEAL + top)
         .on_hover_change(move |s: &mut Workspace, inside: bool, _: &mut Tx| {
             if inside {
                 s.header_reveal.hover = Some(id.clone());

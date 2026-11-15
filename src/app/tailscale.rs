@@ -8,7 +8,7 @@ use super::{
     widgets::{Pill, pill},
     workspace::Workspace,
 };
-use rex_linux::connection::{
+use rex_rune::connection::{
     HostCommand,
     tailscale::{Call, Status},
 };

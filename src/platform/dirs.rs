@@ -1,0 +1,319 @@
+//! The per-user folders this client reads and writes.
+//!
+//! | Folder | Linux and other Unix | macOS | Windows |
+//! | --- | --- | --- | --- |
+//! | settings | `$XDG_CONFIG_HOME/rex-rune` (`~/.config/rex-rune`) | `~/Library/Application Support/rex-rune` | `%APPDATA%\rex-rune` (`<home>\AppData\Roaming\rex-rune`) |
+//! | state | `$XDG_STATE_HOME/rex-rune` (`~/.local/state/rex-rune`) | `~/Library/Application Support/rex-rune` | `%LOCALAPPDATA%\rex-rune` (`<home>\AppData\Local\rex-rune`) |
+//! | runtime | `$XDG_RUNTIME_DIR/rex-rune`, else `<tmp>/rex-rune-<uid>` | `<tmp>/rex-rune-<uid>` | Never created (no SSH tunnels) |
+//! | home | `$HOME` | `$HOME` | `%USERPROFILE%` |
+//!
+//! Settings are `workspace.json` and `shortcuts.json`; state is `update.json` and
+//! `downloads.json`; runtime holds the sockets of SSH tunnels. `<tmp>` on macOS is the
+//! user's own temporary folder, whatever `TMPDIR` says. A relative `XDG_CONFIG_HOME` is
+//! used as it is given and a relative `XDG_STATE_HOME` is ignored, as before these moved
+//! here.
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
+
+/// The folder name this client uses under each base folder.
+pub const APP: &str = "rex-rune";
+
+/// The user's home folder, or an empty path when the environment names none. On Windows
+/// that is `USERPROFILE`, else `HOMEDRIVE` and `HOMEPATH` together, as Rune resolves it.
+pub fn home() -> PathBuf {
+    if cfg!(windows) {
+        return windows_home(|name| std::env::var_os(name));
+    }
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+fn windows_home(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    let set = |name: &str| var(name).filter(|value| !value.is_empty());
+    if let Some(profile) = set("USERPROFILE") {
+        return PathBuf::from(profile);
+    }
+    match (set("HOMEDRIVE"), set("HOMEPATH")) {
+        (Some(drive), Some(path)) => {
+            let mut home = drive;
+            home.push(path);
+            PathBuf::from(home)
+        }
+        _ => PathBuf::new(),
+    }
+}
+
+/// Where the settings files live.
+pub fn config() -> PathBuf {
+    config_base().join(APP)
+}
+
+/// Where update and download records live.
+pub fn state() -> PathBuf {
+    state_base().join(APP)
+}
+
+/// Where this user's SSH tunnel sockets live, one folder per process.
+#[cfg(unix)]
+pub fn runtime() -> PathBuf {
+    match xdg_runtime() {
+        Some(runtime) => runtime.join(APP),
+        None => user_temp().join(format!("{APP}-{}", super::process::user_id())),
+    }
+}
+
+/// A temporary folder for this user. macOS gives each user one of their own; the system
+/// is asked for it, because `TMPDIR` can be missing (under `env -i`, `sudo -u`, some
+/// launchd jobs), and then `std::env::temp_dir` is the `/tmp` everyone shares.
+#[cfg(unix)]
+fn user_temp() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+        let written = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+            )
+        };
+        if written > 1 && written <= buffer.len() {
+            use std::os::unix::ffi::OsStringExt;
+            buffer.truncate(written - 1);
+            return PathBuf::from(std::ffi::OsString::from_vec(buffer));
+        }
+    }
+    std::env::temp_dir()
+}
+
+/// Make `path` a folder only this user can enter, creating it if need be, and refuse one
+/// that is someone else's or that others can get into. A socket in a folder another user
+/// made or can write to could be swapped for theirs.
+#[cfg(unix)]
+pub fn private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)?;
+    let refuse = |why: &str| {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} {why}", path.display()),
+        ))
+    };
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return refuse("is not a folder");
+    }
+    if meta.uid() != unsafe { libc::getuid() } {
+        return refuse("belongs to another user");
+    }
+    if meta.mode() & 0o077 != 0 {
+        // Ours, but open: close it. Whatever is inside is checked the same way in turn.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// A per-user runtime path for callers that describe tunnels. No tunnel is made on Windows.
+#[cfg(windows)]
+pub fn runtime() -> PathBuf {
+    state().join("runtime")
+}
+
+/// The folders that held `rex-linux` folders through 0.7.x, for the one-time move in
+/// [`crate::legacy`]. Empty where that client never ran.
+pub fn legacy_bases() -> Vec<PathBuf> {
+    if cfg!(target_os = "linux") {
+        vec![config_base(), state_base()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Ghostty's own themes where they are not under a data folder: on macOS, inside the app.
+/// Empty elsewhere, and when Ghostty is not installed there.
+pub fn ghostty_app_themes() -> Option<PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    Some(PathBuf::from(
+        "/Applications/Ghostty.app/Contents/Resources/ghostty/themes",
+    ))
+    .filter(|themes| themes.is_dir())
+}
+
+fn application_support() -> PathBuf {
+    home().join("Library/Application Support")
+}
+
+fn config_base() -> PathBuf {
+    if cfg!(windows) {
+        return windows_base(std::env::var_os("APPDATA"), "Roaming");
+    }
+    if cfg!(target_os = "macos") {
+        return application_support();
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".config"))
+}
+
+fn state_base() -> PathBuf {
+    if cfg!(windows) {
+        return windows_base(std::env::var_os("LOCALAPPDATA"), "Local");
+    }
+    if cfg!(target_os = "macos") {
+        return application_support();
+    }
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home().join(".local/state"))
+}
+
+fn windows_base(value: Option<std::ffi::OsString>, kind: &str) -> PathBuf {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join("AppData").join(kind))
+}
+
+/// `$XDG_RUNTIME_DIR` where sessions have one: not on macOS or Windows.
+#[cfg(unix)]
+pub(super) fn xdg_runtime() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|runtime| !runtime.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_windows_home_is_the_profile_or_the_home_drive_and_path() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
+        let profile = windows_home(env(&[
+            ("USERPROFILE", r"C:\Users\me"),
+            ("HOMEDRIVE", "D:"),
+            ("HOMEPATH", r"\other"),
+        ]));
+        assert_eq!(profile, PathBuf::from(r"C:\Users\me"));
+        let drive = windows_home(env(&[
+            ("USERPROFILE", ""),
+            ("HOMEDRIVE", "D:"),
+            ("HOMEPATH", r"\Users\me"),
+        ]));
+        assert_eq!(drive, PathBuf::from(r"D:\Users\me"));
+        // Half of the pair is no home.
+        assert_eq!(windows_home(env(&[("HOMEDRIVE", "D:")])), PathBuf::new());
+        // On Windows itself the folders this client writes are absolute.
+        if cfg!(windows) {
+            assert!(config().is_absolute() && state().is_absolute());
+        }
+    }
+
+    #[test]
+    fn settings_and_state_are_named_for_the_client_under_the_platforms_folder() {
+        assert!(config().ends_with(APP) && state().ends_with(APP));
+        if cfg!(target_os = "macos") {
+            let support = home().join("Library/Application Support").join(APP);
+            assert_eq!(config(), support);
+            assert_eq!(state(), support);
+            assert!(legacy_bases().is_empty(), "rex-linux never ran on macOS");
+        }
+        if cfg!(target_os = "linux") {
+            assert_eq!(legacy_bases().len(), 2);
+        }
+        #[cfg(unix)]
+        {
+            // The runtime folder is this user's alone: named for them unless the session gives one.
+            let runtime = runtime();
+            let name = runtime.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name == APP || name == format!("{APP}-{}", crate::platform::process::user_id())
+            );
+            if cfg!(target_os = "macos") {
+                assert!(
+                    runtime.starts_with("/var/folders")
+                        || runtime.starts_with("/private/var/folders"),
+                    "the user's own temporary folder, not the shared /tmp: {}",
+                    runtime.display()
+                );
+            }
+        }
+        if cfg!(windows) {
+            assert_eq!(
+                home(),
+                PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default())
+            );
+            assert_eq!(
+                config(),
+                windows_base(std::env::var_os("APPDATA"), "Roaming").join(APP)
+            );
+            assert_eq!(
+                state(),
+                windows_base(std::env::var_os("LOCALAPPDATA"), "Local").join(APP)
+            );
+            assert!(legacy_bases().is_empty());
+        }
+    }
+
+    #[test]
+    fn windows_folder_fallbacks_match_the_users_appdata_folders() {
+        assert_eq!(
+            windows_base(None, "Roaming"),
+            home().join("AppData/Roaming")
+        );
+        assert_eq!(windows_base(None, "Local"), home().join("AppData/Local"));
+        assert_eq!(
+            windows_base(Some("".into()), "Local"),
+            home().join("AppData/Local")
+        );
+        assert_eq!(
+            windows_base(Some("custom".into()), "Local"),
+            PathBuf::from("custom")
+        );
+    }
+
+    // These fixtures inspect Unix permissions and symbolic links.
+    #[cfg(unix)]
+    mod unix {
+        use super::*;
+        #[test]
+        fn a_private_folder_is_made_closed_and_an_open_or_foreign_one_is_not_trusted() {
+            use std::os::unix::fs::PermissionsExt;
+            let temp = tempfile::tempdir().unwrap();
+            let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            let made = temp.path().join("a/b");
+            private(&made).unwrap();
+            assert_eq!(mode(&made), 0o700);
+            // One of ours that was left open is closed.
+            std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o777)).unwrap();
+            private(&made).unwrap();
+            assert_eq!(mode(&made), 0o700);
+            // A file, or a link to a folder, in its place is refused.
+            let file = temp.path().join("file");
+            std::fs::write(&file, b"").unwrap();
+            assert!(private(&file).is_err());
+            let link = temp.path().join("link");
+            std::os::unix::fs::symlink(&made, &link).unwrap();
+            assert!(private(&link).is_err());
+            // So is a folder that belongs to someone else (root's, here).
+            if unsafe { libc::getuid() } != 0 {
+                assert!(private(Path::new("/")).is_err());
+            }
+        }
+    }
+}

@@ -10,7 +10,7 @@
 //! `server-pid` the probe also checks that the server closes a cancelled file. Exit 0 when every
 //! check passed.
 use anyhow::{Context, Result, bail, ensure};
-use rex_linux::{
+use rex_rune::{
     connection::{HostCommand, HostConnection, HostModel, downloads::Request},
     download::{Config, Failure, Limits, Reason, Records, State, next_id},
 };
@@ -28,6 +28,8 @@ use std::{
 const MIB: u64 = 1024 * 1024;
 
 fn main() -> Result<()> {
+    rex_rune::platform::downloads::available()?;
+    rex_rune::platform::init();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
@@ -155,9 +157,7 @@ impl Probe {
             bytes == std::fs::metadata(source)?.len(),
             "reported {bytes} bytes"
         );
-        let mode =
-            std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path)?.permissions());
-        ensure!(mode & 0o111 == 0, "saved with an executable bit: {mode:o}");
+        rex_rune::platform::fs::verify_download_mode(&path)?;
         let left: Vec<_> = std::fs::read_dir(&dest)?
             .map(|e| e.unwrap().file_name())
             .collect();
@@ -201,9 +201,19 @@ async fn run() -> Result<()> {
         .context("usage: rex-download-probe <endpoint> <work-dir> [server-pid]")?;
     let work = PathBuf::from(args.next().context("work directory")?);
     let server_pid = args.next().map(|p| p.parse()).transpose()?;
+    // Never this user's own server, however its socket is spelled.
+    let resolved = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or(path.into());
+    let own = resolved(&rex_rune::platform::local::default_socket());
+    let disposable = endpoint
+        .strip_prefix("unix://")
+        .is_some_and(|path| resolved(std::path::Path::new(path)) != own);
     ensure!(
-        endpoint.starts_with("unix://") && !endpoint.contains("/run/user/"),
+        disposable && !endpoint.contains("/run/user/"),
         "refusing {endpoint}: pass the socket of a disposable server you started"
+    );
+    ensure!(
+        server_pid.is_none_or(|pid: u32| std::path::Path::new(&format!("/proc/{pid}/fd")).is_dir()),
+        "a server pid can only be checked where /proc lists its open files; leave it out here"
     );
     let work = std::fs::canonicalize({
         std::fs::create_dir_all(&work)?;
@@ -349,7 +359,7 @@ async fn run() -> Result<()> {
         std::fs::create_dir_all(&real)?;
         let link = probe.work.join("dest-link");
         let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&real, &link)?;
+        rex_rune::platform::fs::download_probe_symlink(&real, &link)?;
         let id = probe.start(&source.join("small.txt"), &link);
         let State::Failed(Failure::Destination(message)) = probe.finish(id).await? else {
             bail!("not refused: {:?}", probe.state(id));
