@@ -124,7 +124,8 @@ fn with_shortcuts_file(contents: &str) -> (Workspace, std::path::PathBuf) {
     ws.settings_path = directory.join("workspace.json");
     ws.settings.save(&ws.settings_path).unwrap();
     std::fs::write(Shortcuts::path(&ws.settings_path), contents).unwrap();
-    (relaunch(&ws), directory)
+    // The relaunch lives on in the test, so it takes the folder holding both files with it.
+    (super::relaunch_owning(&mut ws), directory)
 }
 
 #[test]

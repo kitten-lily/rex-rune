@@ -650,7 +650,8 @@ fn config_reload_is_in_commands_and_refused_remotely() {
 
 #[test]
 fn shortcut_import_notice_uses_custom_config_filenames() {
-    let ws = workspace();
+    let mut ws = workspace();
+    ws.settings_path.set_file_name("custom-settings.json");
     std::fs::write(
         &ws.settings_path,
         r#"{"keybindings":[{"key":"ctrl+j","action":"client.tab.new"}]}"#,

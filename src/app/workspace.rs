@@ -65,6 +65,10 @@ pub struct Workspace {
     pub options: Options,
     pub settings: Settings,
     pub settings_path: PathBuf,
+    /// Tests: the private folder this window's settings file lives in, removed with the
+    /// window. A relaunch on the same path borrows the first window's folder and owns none.
+    #[cfg(test)]
+    pub test_folder: Option<super::scratch::Folder>,
     pub hosts: Vec<HostState>,
     pub active: usize,
     pub terminals: HashMap<(HostId, String), Term>,
@@ -271,6 +275,8 @@ impl Workspace {
             options,
             settings,
             settings_path: path,
+            #[cfg(test)]
+            test_folder: None,
             hosts: Vec::new(),
             active,
             terminals: HashMap::new(),

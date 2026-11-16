@@ -119,13 +119,21 @@ fn workspace_hosts(count: usize) -> Workspace {
         ..Settings::default()
     };
     let handle = rune::App::new(AppSpec::new("Rex", (1024., 700.), placeholder, view)).handle();
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "rex-rune-test-{}-{}.json",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    Workspace::new(options, settings, path, handle, None)
+    // Each window gets a private folder of its own, removed when the window drops, so no two
+    // tests share a settings file and none is left behind when one unwinds.
+    let scratch = super::scratch::Folder::new("workspace");
+    let path = scratch.join("workspace.json");
+    let mut ws = Workspace::new(options, settings, path, handle, None);
+    ws.test_folder = Some(scratch);
+    ws
+}
+
+/// A second launch that takes over the first window's folder, for a test that keeps the new
+/// window: the folder lives as long as the window that owns it.
+fn relaunch_owning(ws: &mut Workspace) -> Workspace {
+    let mut again = relaunch(ws);
+    again.test_folder = ws.test_folder.take();
+    again
 }
 
 /// A second launch on the settings `ws` saved.
@@ -138,6 +146,29 @@ fn relaunch(ws: &Workspace) -> Workspace {
     let settings = Settings::load(&ws.settings_path).unwrap();
     let handle = rune::App::new(AppSpec::new("Rex", (1024., 700.), placeholder, view)).handle();
     Workspace::new(options, settings, ws.settings_path.clone(), handle, None)
+}
+
+#[test]
+fn a_relaunched_window_borrows_the_first_windows_settings_folder() {
+    let ws = workspace();
+    ws.settings.save(&ws.settings_path).unwrap();
+    let folder = ws.settings_path.parent().unwrap().to_path_buf();
+    let again = relaunch(&ws);
+    assert!(
+        again.test_folder.is_none(),
+        "a relaunch owns no folder of its own"
+    );
+    drop(again);
+    assert!(
+        ws.settings_path.is_file(),
+        "the second window left the first one's file alone"
+    );
+    assert_eq!(relaunch(&ws).settings.window_size, ws.settings.window_size);
+    drop(ws);
+    assert!(
+        !folder.exists(),
+        "the window that made the folder removed it, and only then"
+    );
 }
 
 #[test]
@@ -1837,7 +1868,7 @@ fn invalid_shortcuts_start_with_one_notice_and_a_persistent_settings_problem() {
     ws.settings.save(&ws.settings_path).unwrap();
     let shortcuts = rex_rune::settings::shortcuts::Shortcuts::path(&ws.settings_path);
     std::fs::write(&shortcuts, "[broken").unwrap();
-    let mut ws = relaunch(&ws);
+    let mut ws = relaunch_owning(&mut ws);
     assert_eq!(
         ws.notices
             .iter()

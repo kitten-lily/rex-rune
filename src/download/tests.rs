@@ -12,13 +12,21 @@ pub(crate) struct Temp(pub PathBuf);
 impl Temp {
     pub fn new(label: &str) -> Self {
         static COUNT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "rex-download-test-{}-{}-{label}",
-            std::process::id(),
-            COUNT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path.canonicalize().unwrap())
+        let root = std::env::temp_dir();
+        for _ in 0..64 {
+            let name = format!(
+                "rex-download-test-{}-{}-{label}",
+                std::process::id(),
+                COUNT.fetch_add(1, Ordering::Relaxed)
+            );
+            if let Some(path) = make(&root, &name) {
+                return Self(path.canonicalize().unwrap());
+            }
+        }
+        panic!(
+            "no unused name for a private test folder under {}",
+            root.display()
+        );
     }
     pub fn dir(&self, name: &str) -> PathBuf {
         let path = self.0.join(name);
@@ -34,6 +42,53 @@ impl Drop for Temp {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// `name` under `root`, made new by this call, or `None` when that name is already taken.
+fn make(root: &Path, name: &str) -> Option<PathBuf> {
+    let path = root.join(name);
+    match std::fs::create_dir(&path) {
+        Ok(()) => Some(path),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
+        Err(error) => panic!("a private test folder {path:?}: {error}"),
+    }
+}
+
+#[test]
+fn a_private_folder_is_made_by_its_owner_and_removed_with_it() {
+    let first = Temp::new("owner");
+    let second = Temp::new("sibling");
+    let (one, two) = (first.0.clone(), second.0.clone());
+    // `Temp` canonicalizes, so on macOS this is `/private/var/...` rather than `/var/...`.
+    let root = std::env::temp_dir();
+    let root = root.canonicalize().unwrap_or(root);
+    assert!(one.starts_with(&root), "under the run's TMPDIR: {one:?}");
+    assert_ne!(one, two, "each test gets a folder of its own");
+    std::fs::write(one.join("a.rex-part"), b"x").unwrap();
+    drop(first);
+    assert!(
+        !one.exists(),
+        "the owner removed its folder and the file in it"
+    );
+    assert!(two.is_dir(), "another test's folder is untouched");
+}
+
+#[test]
+fn a_folder_name_already_on_disk_is_refused_and_never_adopted() {
+    let owner = Temp::new("claim");
+    let taken = owner.dir("taken");
+    std::fs::write(taken.join("theirs.txt"), b"mine").unwrap();
+    assert_eq!(
+        make(&owner.0, "taken"),
+        None,
+        "a folder this call did not make is not ours"
+    );
+    assert_eq!(
+        std::fs::read_to_string(taken.join("theirs.txt")).unwrap(),
+        "mine",
+        "and what it holds stays"
+    );
+    assert!(make(&owner.0, "free").unwrap().is_dir());
 }
 
 /// The names in a folder, sorted.
