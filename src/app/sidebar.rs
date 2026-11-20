@@ -31,6 +31,13 @@ const GROUP_GAP: f32 = 12.;
 const GROUP_LABEL_ROW: f32 = 26.;
 const ACTIVITY_ROW: f32 = 44.;
 const TASK_ROW: f32 = 24.;
+/// Room under a row's subtasks, inside the row.
+const TASKS_PAD: f32 = 6.;
+/// An Activity row's side padding, program icon and the gap after it; subtasks indent by
+/// all three.
+const ACTIVITY_PAD: f32 = 10.;
+const ACTIVITY_ICON: f32 = 15.;
+const ACTIVITY_GAP: f32 = 10.;
 const SEGMENT: f32 = 26.;
 
 fn host_header(s: &Workspace, index: usize) -> El {
@@ -543,18 +550,20 @@ fn task_word(task: &TaskLine) -> (std::borrow::Cow<'static, str>, u32) {
     })
 }
 
+/// A subtask inside its pane's row: its title starts under the pane's name, past the icon.
+/// It has no press of its own; the row around it is the button.
 fn task_line(index: usize, block: &str, task: &TaskLine) -> El {
     let (word, tone) = task_word(task);
     row()
         .key(format!("activity-task:{index}:{block}:{}", task.id))
         .h(TASK_ROW)
-        .ml(12. + 12. * task.depth as f32)
-        .pl(10.)
-        .pr(8.)
+        .pl(ACTIVITY_PAD + ACTIVITY_ICON + ACTIVITY_GAP + 12. * task.depth as f32)
+        .pr(ACTIVITY_PAD)
         .gap(8.)
         .center_y()
         .child(
             text(task.title.clone())
+                .key(format!("activity-task-title:{index}:{block}:{}", task.id))
                 .font(ui(11.5))
                 .color(rgb(muted()))
                 .truncate()
@@ -565,6 +574,16 @@ fn task_line(index: usize, block: &str, task: &TaskLine) -> El {
         .child(text(word).font(medium(10.5)).color(rgb(tone)))
 }
 
+/// What a pane's row is tall: its two lines, then its subtasks and a little room under them.
+fn activity_row_height(row_: &ActivityRow) -> f32 {
+    match row_.tasks.len() {
+        0 => ACTIVITY_ROW,
+        n => ACTIVITY_ROW + n as f32 * TASK_ROW + TASKS_PAD,
+    }
+}
+
+/// One pane's entry: icon, name, word and detail, with its subtasks inside the same
+/// button, which grows by a line for each.
 fn activity_row(index: usize, row_: &ActivityRow) -> El {
     let (word, tone) = activity_word(&row_.activity);
     let target = row_.target.clone();
@@ -573,6 +592,7 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
         .center_y()
         .child(
             text(row_.name.clone())
+                .key(format!("activity-name:{index}:{}", row_.target.block))
                 .font(medium(12.5))
                 .color(rgb(ink()))
                 .truncate()
@@ -594,14 +614,11 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
                 .help_when_truncated(row_.detail.clone()),
         );
     }
-    row()
+    let mut entry = col()
         .key(format!("activity-row:{index}:{}", row_.target.block))
         .role("button")
         .label(format!("{} · {word}", row_.name))
-        .h(ACTIVITY_ROW)
-        .px(10.)
-        .gap(10.)
-        .center_y()
+        .h(activity_row_height(row_))
         .radius(9.)
         .continuous_corners()
         .hover(white(0.05))
@@ -612,8 +629,19 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
             s.open_pane(&target, tx);
             tx.blur();
         })
-        .child(program_glyph(row_.icon(), 15., rgb(muted())))
-        .child(body)
+        .child(
+            row()
+                .h(ACTIVITY_ROW)
+                .px(ACTIVITY_PAD)
+                .gap(ACTIVITY_GAP)
+                .center_y()
+                .child(program_glyph(row_.icon(), ACTIVITY_ICON, rgb(muted())))
+                .child(body),
+        );
+    for task in &row_.tasks {
+        entry = entry.child(task_line(index, &row_.target.block, task));
+    }
+    entry
 }
 
 fn activity_group(s: &Workspace, n: usize, group: &ActivityGroup) -> (El, f32) {
@@ -636,11 +664,7 @@ fn activity_group(s: &Workspace, n: usize, group: &ActivityGroup) -> (El, f32) {
             continue;
         };
         e = e.child(activity_row(index, row_));
-        height += ACTIVITY_ROW + 2.;
-        for task in &row_.tasks {
-            e = e.child(task_line(index, &row_.target.block, task));
-            height += TASK_ROW + 2.;
-        }
+        height += activity_row_height(row_) + 2.;
     }
     (e.pb(GROUP_GAP), height + GROUP_GAP)
 }

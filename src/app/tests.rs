@@ -4904,6 +4904,55 @@ fn activity_mode_lists_reporting_panes() {
 }
 
 #[test]
+fn subtasks_are_part_of_their_panes_row() {
+    use rex_rune::connection::activity::ProgramState::Working;
+    let (mut ws, rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    let mut task = record(Working, true);
+    task.title = Some("Build the image".into());
+    ws.hosts[0].model.activity.insert(
+        "block:c".into(),
+        [
+            ("".into(), record(Working, true)),
+            ("build".into(), task.clone()),
+            ("build/test".into(), task),
+        ]
+        .into(),
+    );
+    ws.toggle_sidebar();
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    let name = rect(&rt, "activity-name:0:block:c")[0];
+    let title = rect(&rt, "activity-task-title:0:block:c:build")[0];
+    let nested = rect(&rt, "activity-task-title:0:block:c:build/test")[0];
+    assert_eq!(title, name, "a subtask starts under its pane's name");
+    assert_eq!(nested, name + 12., "and a nested one 12 pt further in");
+    let entry = rect(&rt, "activity-row:0:block:c");
+    let last = rect(&rt, "activity-task:0:block:c:build/test");
+    assert_eq!(
+        entry[3],
+        44. + 2. * 24. + 6.,
+        "the row grows by its subtasks"
+    );
+    assert!(
+        last[1] + last[3] <= entry[1] + entry[3] && last[0] == entry[0] && last[2] == entry[2],
+        "which sit inside it: {last:?} in {entry:?}"
+    );
+    rx.try_iter().count();
+    click(&mut rt, "activity-task:0:block:c:build");
+    assert!(
+        requests(&rx)
+            .iter()
+            .any(|(method, session, payload)| method == "session.focus_block"
+                && session == "s"
+                && payload["block_id"] == "block:c"),
+        "pressing a subtask presses its row"
+    );
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn activity_mode_shows_an_empty_state() {
     let (mut ws, _rx) = tabbed_workspace("single");
     terminal_blocks(&mut ws);

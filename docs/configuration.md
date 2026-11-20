@@ -469,8 +469,10 @@ priority view, its session and host), and the last folders of its working
 directory as the server reports it. Rows are grouped by priority (Needs you, Done,
 Working, Finished, then Idle) or by session; the bar at the bottom of the list
 switches grouping and shows or hides idle agents, which are off by default.
-Subtasks that a program reports as extra OSC 7501 records appear under its row.
-Pressing a row selects its session and focuses that exact pane by its block ID; if
+Subtasks that a program reports as extra OSC 7501 records appear inside its row,
+which grows by a line for each (Claude Code reports its background shells and
+agents this way).
+Pressing a row, anywhere on it, selects its session and focuses that exact pane by its block ID; if
 the pane has closed, or its host has gone offline, it says so and focuses nothing.
 A session row, and the switcher's session rows, show the session's activity word
 (when its programs have something to report and its state shows in tabs) and, when

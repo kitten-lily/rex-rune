@@ -26,6 +26,7 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 
 ### Fixed
 
+- Activity view: a pane's reported subtasks are now part of its row, which grows by a line for each, with their titles under the pane's name. They were separate lines indented less than the name that could not be pressed, so they read as rows of their own without an icon or a pane.
 - **SSH setup explains when a personal server stops (#147).** Closing the client leaves the server running. The preview and host docs explain Linux systemd logout and lingering, and point to `rex server install` for boot-time startup. The explanation scrolls in small windows while setup status and actions remain visible.
 
 ## 0.10.1 - 2026-11-14
