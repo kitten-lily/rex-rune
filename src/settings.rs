@@ -26,6 +26,9 @@ pub struct Host {
     pub tailscale_name: Option<String>,
     #[serde(default)]
     pub collapsed: bool,
+    /// Left out of the sidebar's host list until it next connects; set only while offline.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden_offline: bool,
     /// The shell new terminals on this host start (`zsh`, `/bin/zsh`); none uses the server
     /// user's login shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -582,6 +585,7 @@ impl Default for Settings {
                 keep_tailscale: false,
                 tailscale_name: None,
                 collapsed: false,
+                hidden_offline: false,
                 shell: None,
             }],
             client_label: None,
@@ -767,6 +771,26 @@ pub fn endpoint_label(endpoint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hidden_offline_defaults_off_and_is_written_only_when_set() {
+        let host: Host = serde_json::from_str(r#"{"label":"a","endpoint":"unix:///a"}"#).unwrap();
+        assert!(!host.hidden_offline);
+        assert!(
+            !serde_json::to_string(&host)
+                .unwrap()
+                .contains("hidden_offline")
+        );
+        let hidden = Host {
+            hidden_offline: true,
+            ..host
+        };
+        assert!(
+            serde_json::to_string(&hidden)
+                .unwrap()
+                .contains(r#""hidden_offline":true"#)
+        );
+    }
 
     #[test]
     fn pane_padding_defaults_clamps_and_round_trips_zero() {

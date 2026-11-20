@@ -239,6 +239,7 @@ impl Workspace {
                 keep_tailscale: false,
                 tailscale_name: None,
                 collapsed: false,
+                hidden_offline: false,
                 shell: None,
             });
         }
@@ -496,6 +497,17 @@ impl Workspace {
         ));
     }
 
+    /// Leave an offline host out of the sidebar's host list until it next connects (`sync`
+    /// shows it again). Nothing for a connected host, and nothing is sent to its server.
+    pub fn hide_offline_host(&mut self, host: usize) {
+        if self.hosts[host].model.connected {
+            return;
+        }
+        self.settings.hosts[host].hidden_offline = true;
+        self.save();
+        self.sync_prefetch();
+    }
+
     /// Rename a host or change its default shell in place. A new endpoint is another server:
     /// the old connection is dropped and the host reconnects under a new id.
     pub fn edit_host(
@@ -515,6 +527,8 @@ impl Workspace {
             host.remote_control = false;
             host.keep_tailscale = false;
             host.tailscale_name = None;
+            // Another server has not been hidden by anyone.
+            host.hidden_offline = false;
             let old = std::mem::replace(&mut host.endpoint, endpoint);
             self.settings.sessions.remove(&old);
             // An endpoint edit means another machine, not a history migration.
@@ -623,6 +637,11 @@ impl Workspace {
             super::actions::diagnose_compatibility(
                 &mut std::sync::Arc::make_mut(snapshot).resolved,
             );
+        }
+        if model.connected && self.settings.hosts[index].hidden_offline {
+            // Hidden only until it reconnects: this is that moment.
+            self.settings.hosts[index].hidden_offline = false;
+            self.save();
         }
         self.hosts[index].model = model;
         if index == self.active {
@@ -1178,7 +1197,7 @@ impl Workspace {
             || (self.sidebar.is_open() && self.settings.sidebar_mode == SidebarMode::Activity);
         for index in 0..self.hosts.len() {
             let eligible = (every && self.hosts[index].model.connected)
-                || (listing && (flat || !self.settings.hosts[index].collapsed));
+                || (listing && (flat || self.lists_host(index)));
             let wanted: HashSet<String> = if eligible {
                 let sessions = &self.hosts[index].model.sessions;
                 sessions.iter().map(|s| s.session_id.clone()).collect()
@@ -1448,6 +1467,16 @@ impl Workspace {
         );
     }
 
+    /// Whether the user hid this host while it was offline and it has not connected since.
+    pub fn host_hidden(&self, host: usize) -> bool {
+        self.settings.hosts[host].hidden_offline && !self.hosts[host].model.connected
+    }
+
+    /// Whether the grouped host list shows this host's sessions: expanded and not hidden.
+    fn lists_host(&self, host: usize) -> bool {
+        !self.settings.hosts[host].collapsed && !self.host_hidden(host)
+    }
+
     /// The sidebar lists tabs, so the toolbar doesn't: Sidebar tab position, open, and
     /// showing sessions.
     pub fn sidebar_tabs(&self) -> bool {
@@ -1556,6 +1585,7 @@ impl Workspace {
                 self.open_panel(PanelKind::Hosts(query), &title, &[])
             }
             Intent::RetryHost(host) => self.send(host, HostCommand::Reconnect),
+            Intent::HideHost(host) => self.hide_offline_host(host),
             Intent::ChooseTheme => {
                 self.themes = self.theme_dirs.list();
                 self.open_panel(
@@ -2469,6 +2499,7 @@ impl Workspace {
                             keep_tailscale: false,
                             tailscale_name: None,
                             collapsed: false,
+                            hidden_offline: false,
                             shell: None,
                         },
                         tx,
@@ -2484,6 +2515,7 @@ impl Workspace {
                                 keep_tailscale: false,
                                 tailscale_name: None,
                                 collapsed: false,
+                                hidden_offline: false,
                                 shell: None,
                             },
                             tx,

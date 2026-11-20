@@ -115,6 +115,7 @@ fn workspace_hosts(count: usize) -> Workspace {
                 keep_tailscale: false,
                 tailscale_name: None,
                 collapsed: false,
+                hidden_offline: false,
                 shell: None,
             })
             .collect(),
@@ -5108,6 +5109,130 @@ fn sidebar_tabs_still_prefetch_an_expanded_host_while_it_reconnects() {
     ws.sync_prefetch();
     assert_eq!(latest(&rx), Some(vec![]), "a collapsed host lists none");
     std::fs::remove_file(&ws.settings_path).ok();
+}
+
+/// Two hosts with captured workers: 0 connected, 1 offline with a cached session.
+fn offline_pair() -> (
+    Workspace,
+    flume::Receiver<HostCommand>,
+    flume::Receiver<HostCommand>,
+) {
+    let mut ws = workspace_hosts(2);
+    let rx0 = capture_host(&mut ws, 0);
+    let rx1 = capture_host(&mut ws, 1);
+    ws.hosts[0].model.connected = true;
+    ws.hosts[0].model.sessions = vec![session("cur")];
+    ws.hosts[0].model.selected = Some("cur".into());
+    ws.hosts[1].model.sessions = vec![session("away")];
+    (ws, rx0, rx1)
+}
+
+/// What host `index`'s worker reports next, as a wake would deliver it.
+fn report_connected(ws: &mut Workspace, index: usize, connected: bool) {
+    {
+        let mut shared = ws.hosts[index].connection.model.lock().unwrap();
+        shared.connected = connected;
+        shared.sessions = vec![session("away")];
+    }
+    ws.sync(index, &mut rune::Tx::default());
+}
+
+#[test]
+fn hiding_marks_only_an_offline_host_and_sends_nothing_to_a_server() {
+    let (mut ws, rx0, rx1) = offline_pair();
+    watch_no_activity(&mut ws);
+    ws.sidebar.toggle();
+    ws.set_vertical_tabs(true);
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx1), Some(vec!["away".to_owned()]), "listed first");
+    rx0.try_iter().count();
+    ws.hide_offline_host(0);
+    assert!(
+        !ws.settings.hosts[0].hidden_offline,
+        "a connected host is never hidden"
+    );
+    ws.hide_offline_host(1);
+    assert!(ws.settings.hosts[1].hidden_offline);
+    assert!(
+        Settings::load(&ws.settings_path).unwrap().hosts[1].hidden_offline,
+        "saved"
+    );
+    assert_eq!(rx0.try_iter().count(), 0);
+    let sent: Vec<_> = rx1.try_iter().collect();
+    assert!(
+        matches!(sent.as_slice(), [HostCommand::PrefetchViews(ids)] if ids.is_empty()),
+        "only its views stop being prefetched: {} sent",
+        sent.len()
+    );
+}
+
+#[test]
+fn a_hidden_host_returns_when_it_connects_and_stays_after_it_drops() {
+    let (mut ws, _rx0, _rx1) = offline_pair();
+    ws.hide_offline_host(1);
+    report_connected(&mut ws, 1, false);
+    assert!(
+        ws.settings.hosts[1].hidden_offline,
+        "an offline wake keeps it hidden"
+    );
+    report_connected(&mut ws, 1, true);
+    assert!(!ws.settings.hosts[1].hidden_offline);
+    assert!(
+        !Settings::load(&ws.settings_path).unwrap().hosts[1].hidden_offline,
+        "saved"
+    );
+    report_connected(&mut ws, 1, false);
+    assert!(
+        !ws.settings.hosts[1].hidden_offline,
+        "a later drop does not hide it again"
+    );
+}
+
+#[test]
+fn a_host_saved_as_hidden_is_shown_once_it_is_connected() {
+    let (mut ws, _rx0, _rx1) = offline_pair();
+    ws.settings.hosts[0].hidden_offline = true;
+    report_connected(&mut ws, 0, true);
+    assert!(!ws.settings.hosts[0].hidden_offline);
+}
+
+#[test]
+fn hide_chosen_after_the_host_connected_hides_nothing() {
+    let (mut ws, _rx0, _rx1) = offline_pair();
+    ws.hosts[1].model.connected = true;
+    ws.perform(Intent::HideHost(1), &mut rune::Tx::default());
+    assert!(!ws.settings.hosts[1].hidden_offline);
+}
+
+#[test]
+fn editing_a_hidden_hosts_endpoint_shows_it_again() {
+    let (mut ws, _rx0, _rx1) = offline_pair();
+    ws.hide_offline_host(1);
+    let endpoint = ws.settings.hosts[1].endpoint.clone();
+    ws.edit_host(1, "renamed".into(), endpoint, Some("zsh".into()));
+    assert!(
+        ws.settings.hosts[1].hidden_offline,
+        "the same server stays hidden"
+    );
+    ws.edit_host(
+        1,
+        "renamed".into(),
+        "unix:///nonexistent/rex-test-elsewhere.sock".into(),
+        None,
+    );
+    assert!(!ws.settings.hosts[1].hidden_offline);
+}
+
+#[test]
+fn a_hidden_host_is_not_prefetched_for_sidebar_tabs() {
+    let (mut ws, rx) = tabbed_workspace("single");
+    watch_no_activity(&mut ws);
+    ws.set_vertical_tabs(true);
+    ws.hosts[0].model.connected = false;
+    ws.sync_prefetch();
+    assert_eq!(latest(&rx), Some(vec!["s".to_owned()]));
+    ws.hide_offline_host(0);
+    assert_eq!(latest(&rx), Some(vec![]));
 }
 
 #[test]

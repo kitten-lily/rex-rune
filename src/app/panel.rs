@@ -24,6 +24,8 @@ pub enum Intent {
     SwitchHost(usize),
     MovePaneTo(String),
     RetryHost(usize),
+    /// Leave an offline host out of the sidebar until it connects.
+    HideHost(usize),
     /// Review an opt-in, one-time personal server start.
     StartSsh(usize),
     InstallSsh(usize),

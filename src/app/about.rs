@@ -509,6 +509,7 @@ mod tests {
             endpoint: endpoint.into(),
             remote_control: false,
             collapsed: false,
+            hidden_offline: false,
             shell: None,
             keep_tailscale: false,
             tailscale_name: None,

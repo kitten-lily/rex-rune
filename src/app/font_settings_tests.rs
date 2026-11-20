@@ -813,6 +813,7 @@ fn font_fallback_on_the_command_line_still_overrides_the_saved_list() {
             keep_tailscale: false,
             tailscale_name: None,
             collapsed: false,
+            hidden_offline: false,
             shell: None,
         }],
         font_fallbacks: vec!["Noto Color Emoji".into()],

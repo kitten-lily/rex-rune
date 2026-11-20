@@ -100,6 +100,7 @@ fn every_menu_separates_its_groups_and_ends_with_its_destructive_row() {
         endpoint: "unix:///nonexistent/rex-test-other.sock".into(),
         remote_control: false,
         collapsed: false,
+        hidden_offline: false,
         shell: None,
         keep_tailscale: false,
         tailscale_name: None,

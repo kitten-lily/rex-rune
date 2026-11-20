@@ -480,6 +480,7 @@ impl Workspace {
             keep_tailscale: false,
             tailscale_name: None,
             collapsed: false,
+            hidden_offline: false,
             shell: None,
         };
         let back = self.settings_back();
