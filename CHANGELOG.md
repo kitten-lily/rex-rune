@@ -18,6 +18,7 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 
 ### Added
 
+- Activity view: panes of the same tab are drawn as one entry named after the tab, with a thin line between them, when they sit together in the list (always when grouped by session; within one priority section when grouped by priority). Each pane is still pressed on its own.
 - Hide an offline host: the × on an offline host's sidebar header (or **Hide until it reconnects** in its menu) takes it out of the host list until it connects again, when it returns by itself. It stays in Find a session, the identity menu and Settings, and connection attempts carry on unchanged. New per-host setting `hidden_offline`.
 - **Review Rex installation and SSH host keys (#148).** Check an unfamiliar SSH fingerprint before trusting it; changed keys are refused. For a non-root Linux login without Rex, review Rex's installer and answer one question at a time, defaulting to No. Ordinary reconnects do not install anything, and no setup creates a session.
 

@@ -31,6 +31,8 @@ const GROUP_GAP: f32 = 12.;
 const GROUP_LABEL_ROW: f32 = 26.;
 const ACTIVITY_ROW: f32 = 44.;
 const TASK_ROW: f32 = 24.;
+/// The line naming a tab above its panes, where two or more share an entry.
+const TAB_LINE: f32 = 22.;
 /// Room under a row's subtasks, inside the row.
 const TASKS_PAD: f32 = 6.;
 /// An Activity row's side padding, program icon and the gap after it; subtasks indent by
@@ -607,7 +609,11 @@ fn activity_row_height(row_: &ActivityRow) -> f32 {
 
 /// One pane's entry: icon, name, word and detail, with its subtasks inside the same
 /// button, which grows by a line for each.
-fn activity_row(index: usize, row_: &ActivityRow) -> El {
+///
+/// `joined` is a pane inside its tab's entry ([`activity_tab`]), which has already named the
+/// tab and where it is, so the detail leaves them out.
+fn activity_row(index: usize, row_: &ActivityRow, joined: bool) -> El {
+    let detail = if joined { &row_.brief } else { &row_.detail };
     let (word, tone) = activity_word(&row_.activity);
     let target = row_.target.clone();
     let mut line = row()
@@ -628,13 +634,13 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
         line = line.help(msg.clone());
     }
     let mut body = col().grow(1.).min_w(0.).gap(2.).child(line);
-    if !row_.detail.is_empty() {
+    if !detail.is_empty() {
         body = body.child(
-            text(row_.detail.clone())
+            text(detail.clone())
                 .font(ui(11.))
                 .color(rgb(muted()))
                 .truncate()
-                .help_when_truncated(row_.detail.clone()),
+                .help_when_truncated(detail.clone()),
         );
     }
     let mut entry = col()
@@ -667,6 +673,69 @@ fn activity_row(index: usize, row_: &ActivityRow) -> El {
     entry
 }
 
+/// Whether two rows are panes of the same tab.
+fn same_tab(a: &ActivityRow, b: &ActivityRow) -> bool {
+    let (a, b) = (&a.target, &b.target);
+    (a.host, &a.session, &a.window) == (b.host, &b.session, &b.window)
+}
+
+/// What [`activity_tab`] is tall: the tab's line, its panes and a hairline between each two.
+fn activity_tab_height(rows: &[ActivityRow]) -> f32 {
+    TAB_LINE + rows.iter().map(activity_row_height).sum::<f32>() + (rows.len() - 1) as f32
+}
+
+/// Two or more panes of one tab as one entry: the tab's name and place on a line of their
+/// own, then each pane as its own button, with a hairline between one pane and the next.
+fn activity_tab(index: usize, rows: &[ActivityRow]) -> El {
+    let first = &rows[0];
+    let mut head = row()
+        .h(TAB_LINE)
+        .px(ACTIVITY_PAD)
+        .pt(6.)
+        .gap(6.)
+        .center_y()
+        .child(
+            text(first.tab.clone())
+                .font(medium(10.5))
+                .color(rgb(ink()))
+                .opacity(0.8)
+                .truncate()
+                .help_when_truncated(first.tab.clone())
+                .shrink()
+                .min_w(0.),
+        );
+    if !first.place.is_empty() {
+        head = head.child(
+            text(first.place.clone())
+                .font(ui(10.5))
+                .color(rgb(muted()))
+                .truncate()
+                .grow(1.)
+                .min_w(0.),
+        );
+    }
+    let mut entry = col()
+        .key(format!("activity-tab:{index}:{}", first.target.window))
+        .h(activity_tab_height(rows))
+        .radius(9.)
+        .continuous_corners()
+        .fill(white(0.035))
+        .child(head);
+    for (n, row_) in rows.iter().enumerate() {
+        if n > 0 {
+            entry = entry.child(
+                el().key(format!("activity-pane-line:{index}:{}", row_.target.block))
+                    .role("separator")
+                    .h(1.)
+                    .mx(ACTIVITY_PAD)
+                    .fill(white(0.09)),
+            );
+        }
+        entry = entry.child(activity_row(index, row_, true));
+    }
+    entry
+}
+
 fn activity_group(s: &Workspace, n: usize, group: &ActivityGroup) -> (El, f32) {
     let mut height = GROUP_LABEL_ROW;
     let mut e = col().gap(2.).child(
@@ -682,12 +751,19 @@ fn activity_group(s: &Workspace, n: usize, group: &ActivityGroup) -> (El, f32) {
                 .min_w(0.),
         ),
     );
-    for row_ in &group.rows {
-        let Some(index) = s.host_index(row_.target.host) else {
+    // Neighbouring panes of one tab are one entry; a pane alone in its tab, or apart from
+    // its tab's others in another priority section, is a row as before.
+    for rows in group.rows.chunk_by(same_tab) {
+        let Some(index) = s.host_index(rows[0].target.host) else {
             continue;
         };
-        e = e.child(activity_row(index, row_));
-        height += activity_row_height(row_) + 2.;
+        if let [row_] = rows {
+            e = e.child(activity_row(index, row_, false));
+            height += activity_row_height(row_) + 2.;
+        } else {
+            e = e.child(activity_tab(index, rows));
+            height += activity_tab_height(rows) + 2.;
+        }
     }
     (e.pb(GROUP_GAP), height + GROUP_GAP)
 }

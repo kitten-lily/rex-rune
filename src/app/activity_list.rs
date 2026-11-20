@@ -40,6 +40,14 @@ pub struct ActivityRow {
     pub rank: u8,
     /// "[program · ]message · location · directory", empty parts dropped.
     pub detail: String,
+    /// The tab the pane is in, by the name its pill shows.
+    pub tab: String,
+    /// Where that tab is, when the list does not already say: "session · host" by priority,
+    /// nothing by session.
+    pub place: String,
+    /// `detail` without the location, for a pane drawn inside its tab's entry, which names
+    /// the tab and place once.
+    pub brief: String,
     pub tasks: Vec<TaskLine>,
 }
 
@@ -177,15 +185,15 @@ pub fn activity_groups(
                                 .or_else(|| model.title(block_id).map(str::to_owned))
                         })
                         .flatten();
-                    let location = match grouping {
-                        ActivityGrouping::Priority => join([
-                            Some(tab.as_str()),
-                            Some(info.label.as_str()),
-                            Some(host_label),
-                        ]),
-                        ActivityGrouping::Session => tab.clone(),
+                    let place = match grouping {
+                        ActivityGrouping::Priority => {
+                            join([Some(info.label.as_str()), Some(host_label)])
+                        }
+                        ActivityGrouping::Session => String::new(),
                     };
-                    let detail = join([program.as_deref(), a.msg.as_deref(), Some(&location)]);
+                    let location = join([Some(tab.as_str()), Some(place.as_str())]);
+                    let brief = join([program.as_deref(), a.msg.as_deref()]);
+                    let detail = join([Some(brief.as_str()), Some(&location)]);
                     let mut tasks: Vec<_> = records
                         .into_iter()
                         .flatten()
@@ -216,6 +224,9 @@ pub fn activity_groups(
                             activity: a,
                             rank,
                             detail,
+                            tab: tab.clone(),
+                            place,
+                            brief,
                             tasks,
                         },
                         cwd: model.cwds.get(block_id).filter(|c| !c.is_empty()).cloned(),
@@ -233,6 +244,7 @@ pub fn activity_groups(
         if draft.cwd.is_some() {
             let dir = short.next().unwrap_or_default();
             draft.row.detail = join([Some(draft.row.detail.as_str()), Some(dir.as_str())]);
+            draft.row.brief = join([Some(draft.row.brief.as_str()), Some(dir.as_str())]);
         }
     }
     let mut groups: Vec<(u8, usize, usize, ActivityGroup)> = Vec::new();
@@ -666,6 +678,25 @@ mod tests {
             row.detail
         );
         assert_eq!(row.icon_program(), Some("claude"));
+    }
+
+    #[test]
+    fn rows_carry_their_tab_and_a_detail_without_it() {
+        let mut m = host("dev", vec![tab("t1", &["a", "b"])]);
+        report(&mut m, "a", ProgramState::Working);
+        report(&mut m, "b", ProgramState::Working);
+        m.activity.get_mut("a").unwrap().get_mut("").unwrap().msg = Some("Run tests?".into());
+        m.cwds.insert("a".into(), "/x/app".into());
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        let a = &g[0].rows[0];
+        assert_eq!((a.tab.as_str(), a.place.as_str()), ("t1", "dev · h"));
+        assert_eq!(a.detail, "Run tests? · t1 · dev · h · app");
+        assert_eq!(a.brief, "Run tests? · app", "what a joined entry shows");
+        assert_eq!(g[0].rows[1].brief, "");
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Session, false);
+        let a = &g[0].rows[0];
+        assert_eq!((a.tab.as_str(), a.place.as_str()), ("t1", ""));
+        assert_eq!(a.detail, "Run tests? · t1 · app");
     }
 
     #[test]

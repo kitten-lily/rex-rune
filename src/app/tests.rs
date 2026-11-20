@@ -4955,6 +4955,132 @@ fn subtasks_are_part_of_their_panes_row() {
 }
 
 #[test]
+fn panes_of_one_tab_share_an_entry_with_a_line_between_them() {
+    use rex_rune::connection::activity::ProgramState::{Blocked, Working};
+    use rex_rune::settings::ActivityGrouping;
+    let (mut ws, rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    for block in ["block:a", "block:b", "block:c"] {
+        ws.hosts[0]
+            .model
+            .activity
+            .insert(block.into(), [("".into(), record(Working, true))].into());
+    }
+    ws.toggle_sidebar();
+    ws.show_activity();
+    let mut rt = runtime(ws);
+    settle(&mut rt);
+    // The two panes of "split" are one entry; the lone pane of "single" is as it was.
+    let entry = rect(&rt, "activity-tab:0:split");
+    let (b, c) = (
+        rect(&rt, "activity-row:0:block:b"),
+        rect(&rt, "activity-row:0:block:c"),
+    );
+    assert!(!has(&rt, "activity-tab:0:single"));
+    assert_eq!(
+        entry[3],
+        22. + 44. + 1. + 44.,
+        "tab line, pane, hairline, pane"
+    );
+    assert_eq!(
+        b[1],
+        entry[1] + 22.,
+        "the first pane follows the tab's line"
+    );
+    assert_eq!(c[1] + c[3], entry[1] + entry[3], "the last pane ends it");
+    let line = rect(&rt, "activity-pane-line:0:block:c");
+    assert_eq!(
+        (line[1], line[3]),
+        (b[1] + b[3], 1.),
+        "a hairline between them"
+    );
+    assert!(
+        !has(&rt, "activity-pane-line:0:block:b"),
+        "none above the first"
+    );
+    let drawn = |rt: &Runtime<Workspace>, words: &str| {
+        rt.elements()
+            .into_iter()
+            .any(|e| e.text.as_deref() == Some(words))
+    };
+    assert!(drawn(&rt, "dev"), "the entry names its tab once");
+
+    // Each pane is still its own button.
+    rx.try_iter().count();
+    click(&mut rt, "activity-row:0:block:c");
+    assert!(
+        requests(&rx)
+            .iter()
+            .any(|(method, _, payload)| method == "session.focus_block"
+                && payload["block_id"] == "block:c")
+    );
+
+    // By priority, panes in different sections stay apart.
+    rt.update(|s, _| {
+        s.hosts[0].model.activity.insert(
+            "block:c".into(),
+            [("".into(), record(Blocked, true))].into(),
+        );
+    });
+    settle(&mut rt);
+    assert!(!has(&rt, "activity-tab:0:split"));
+    assert!(has(&rt, "activity-row:0:block:b") && has(&rt, "activity-row:0:block:c"));
+
+    // By session nothing is re-sorted, so the tab is whole whatever its panes report.
+    rt.update(|s, _| s.settings.activity_grouping = ActivityGrouping::Session);
+    settle(&mut rt);
+    assert!(has(&rt, "activity-tab:0:split"));
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+/// The Activity list with a tab's panes joined, as drawn. Real fonts are process-global: run
+/// it on its own with `REX_TEST_SNAP_DIR`; without that nothing is drawn.
+#[test]
+fn activity_tabs_draw() {
+    use rex_rune::connection::activity::ProgramState::{Blocked, Working};
+    let Some(mut camera) = pane_verb_tests::Camera::new() else {
+        return;
+    };
+    let (mut ws, _rx) = tabbed_workspace("single");
+    terminal_blocks(&mut ws);
+    let model = &mut ws.hosts[0].model;
+    let mut asking = record(Blocked, true);
+    asking.msg = Some("Run cargo test?".into());
+    let mut building = record(Working, true);
+    building.msg = Some("2 shells still running".into());
+    let mut task = record(Working, true);
+    task.title = Some("Build the image for #1570".into());
+    let mut other = task.clone();
+    other.title = Some("Build the live container".into());
+    other.progress = Some(62);
+    model
+        .activity
+        .insert("block:a".into(), [("".into(), asking)].into());
+    model.activity.insert(
+        "block:b".into(),
+        [
+            ("".into(), building),
+            ("image".into(), task),
+            ("live".into(), other),
+        ]
+        .into(),
+    );
+    model.activity.insert(
+        "block:c".into(),
+        [("".into(), record(Working, true))].into(),
+    );
+    for (block, cwd) in [("block:b", "/src/krytis"), ("block:c", "/src/rex-rune")] {
+        model.cwds.insert(block.into(), cwd.into());
+    }
+    ws.toggle_sidebar();
+    ws.show_activity();
+    let mut rt = Runtime::new(ws, view, (640., 480.), Env::new(true, 2.));
+    settle(&mut rt);
+    camera.snap(&mut rt, "activity_tabs");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn activity_mode_shows_an_empty_state() {
     let (mut ws, _rx) = tabbed_workspace("single");
     terminal_blocks(&mut ws);

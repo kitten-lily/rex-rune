@@ -481,6 +481,10 @@ switches grouping and shows or hides idle agents, which are off by default.
 Subtasks that a program reports as extra OSC 7501 records appear inside its row,
 which grows by a line for each (Claude Code reports its background shells and
 agents this way).
+Panes of the same tab that sit next to each other in the list share one entry,
+named after the tab, with a thin line between them; each pane is still pressed on
+its own. By priority that joins a tab's panes within one section (a blocked pane
+and a working one stay in their own sections); by session a tab is always whole.
 Pressing a row, anywhere on it, selects its session and focuses that exact pane by its block ID; if
 the pane has closed, or its host has gone offline, it says so and focuses nothing.
 A session row, and the switcher's session rows, show the session's activity word
