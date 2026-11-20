@@ -853,7 +853,7 @@ fn flat_session_list(s: &Workspace) -> (El, f32) {
 }
 
 /// What the host list says in place of hosts when every one is hidden.
-pub(super) fn hidden_hosts_note(hidden: usize) -> String {
+fn hidden_hosts_note(hidden: usize) -> String {
     match hidden {
         1 => "1 offline host hidden".into(),
         n => format!("{n} offline hosts hidden"),

@@ -5192,13 +5192,29 @@ fn a_hidden_host_returns_when_it_connects_and_stays_after_it_drops() {
 #[test]
 fn a_host_saved_as_hidden_is_shown_once_it_is_connected() {
     let (mut ws, _rx0, _rx1) = offline_pair();
+    // A file saved with the mark on a host that is connected by the time it is read.
     ws.settings.hosts[0].hidden_offline = true;
-    report_connected(&mut ws, 0, true);
-    assert!(!ws.settings.hosts[0].hidden_offline);
+    ws.save();
+    let path = ws.settings_path.clone();
+    let saved = || Settings::load(&path).unwrap().hosts[0].hidden_offline;
+    assert!(saved(), "the file carries the mark");
+    assert!(
+        !ws.host_hidden(0),
+        "a connected host is shown whatever the file says"
+    );
+    ws.sidebar.toggle();
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "host:0") && has(&rt, "host-new-session:0"));
+    rt.update(|s, _| report_connected(s, 0, true));
+    assert!(!rt.state.settings.hosts[0].hidden_offline);
+    assert!(
+        !saved(),
+        "and the first connected wake takes the mark out of the file"
+    );
 }
 
 #[test]
-fn hide_chosen_after_the_host_connected_hides_nothing() {
+fn the_hide_intent_does_nothing_for_a_connected_host() {
     let (mut ws, _rx0, _rx1) = offline_pair();
     ws.hosts[1].model.connected = true;
     ws.perform(Intent::HideHost(1), &mut rune::Tx::default());
@@ -5209,19 +5225,24 @@ fn hide_chosen_after_the_host_connected_hides_nothing() {
 fn editing_a_hidden_hosts_endpoint_shows_it_again() {
     let (mut ws, _rx0, _rx1) = offline_pair();
     ws.hide_offline_host(1);
-    let endpoint = ws.settings.hosts[1].endpoint.clone();
-    ws.edit_host(1, "renamed".into(), endpoint, Some("zsh".into()));
+    let mut rt = runtime(ws);
+    // Through the Edit host form, as Settings → Hosts opens it for a hidden host.
+    let edit = |rt: &mut Runtime<Workspace>, field: usize, value: &str| {
+        rt.update(|s, tx| s.perform(Intent::EditHost(1), tx));
+        rt.frame(1. / 60.);
+        rt.state.panel.as_mut().expect("the edit form").inputs[field] = rune::TextEdit::new(value);
+        click(rt, "save-form");
+    };
+    edit(&mut rt, 0, "renamed");
+    edit(&mut rt, 2, "zsh");
+    assert_eq!(rt.state.settings.hosts[1].label, "renamed");
+    assert_eq!(rt.state.settings.hosts[1].shell.as_deref(), Some("zsh"));
     assert!(
-        ws.settings.hosts[1].hidden_offline,
+        rt.state.settings.hosts[1].hidden_offline,
         "the same server stays hidden"
     );
-    ws.edit_host(
-        1,
-        "renamed".into(),
-        "unix:///nonexistent/rex-test-elsewhere.sock".into(),
-        None,
-    );
-    assert!(!ws.settings.hosts[1].hidden_offline);
+    edit(&mut rt, 1, "unix:///nonexistent/rex-test-elsewhere.sock");
+    assert!(!rt.state.settings.hosts[1].hidden_offline);
 }
 
 #[test]
@@ -5330,14 +5351,15 @@ fn with_every_host_hidden_the_list_says_how_many() {
     rt.update(|s, _| s.hide_offline_host(1));
     settle(&mut rt);
     assert!(has(&rt, "hosts-hidden") && !has(&rt, "host:0") && !has(&rt, "host:1"));
-    assert_eq!(
-        super::sidebar::hidden_hosts_note(1),
-        "1 offline host hidden"
-    );
-    assert_eq!(
-        super::sidebar::hidden_hosts_note(2),
-        "2 offline hosts hidden"
-    );
+    let drawn = |rt: &Runtime<Workspace>, words: &str| {
+        rt.elements()
+            .into_iter()
+            .any(|e| e.text.as_deref() == Some(words))
+    };
+    assert!(drawn(&rt, "2 offline hosts hidden"));
+    rt.update(|s, tx| s.remove_host(1, tx));
+    settle(&mut rt);
+    assert!(drawn(&rt, "1 offline host hidden"));
 }
 
 #[test]
