@@ -40,6 +40,9 @@ pub struct ActivityRow {
     pub rank: u8,
     /// "[program · ]message · location · directory", empty parts dropped.
     pub detail: String,
+    /// The pane's own message, shown in `detail` and as the row's help: a subtask's words
+    /// stay on the subtask's line.
+    pub message: Option<String>,
     /// The tab the pane is in, by the name its pill shows.
     pub tab: String,
     /// Where that tab is, when the list does not already say: "session · host" by priority,
@@ -192,7 +195,16 @@ pub fn activity_groups(
                         ActivityGrouping::Session => String::new(),
                     };
                     let location = join([Some(tab.as_str()), Some(place.as_str())]);
-                    let brief = join([program.as_deref(), a.msg.as_deref()]);
+                    // The pane's own words. `a` folds every record, so with subtasks its
+                    // message may be a subtask's, which already has a line of its own below.
+                    let own = records.and_then(|r| r.get(""));
+                    let has_tasks = records.is_some_and(|r| r.keys().any(|id| !id.is_empty()));
+                    let msg = if has_tasks {
+                        own.and_then(|r| r.msg.clone())
+                    } else {
+                        a.msg.clone()
+                    };
+                    let brief = join([program.as_deref(), msg.as_deref()]);
                     let detail = join([Some(brief.as_str()), Some(&location)]);
                     let mut tasks: Vec<_> = records
                         .into_iter()
@@ -224,6 +236,7 @@ pub fn activity_groups(
                             activity: a,
                             rank,
                             detail,
+                            message: msg,
                             tab: tab.clone(),
                             place,
                             brief,
@@ -697,6 +710,43 @@ mod tests {
         let a = &g[0].rows[0];
         assert_eq!((a.tab.as_str(), a.place.as_str()), ("t1", ""));
         assert_eq!(a.detail, "Run tests? · t1 · app");
+    }
+
+    #[test]
+    fn a_panes_detail_is_its_own_message_never_a_subtasks() {
+        let mut m = host("dev", vec![tab("t", &["b"])]);
+        let mut own = record(ProgramState::Working);
+        own.msg = Some("Planning the change".into());
+        // The subtask reports progress, so it is the record that decides the pane's word.
+        let mut sub = record(ProgramState::Working);
+        sub.title = Some("ssh -F conf host".into());
+        sub.progress = Some(10);
+        m.activity.insert(
+            "b".into(),
+            BTreeMap::from([(String::new(), own), ("shell1".into(), sub.clone())]),
+        );
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        let row = &g[0].rows[0];
+        assert_eq!(row.detail, "Planning the change · t · dev · h");
+        assert_eq!(row.message.as_deref(), Some("Planning the change"));
+        assert_eq!(row.tasks[0].title, "ssh -F conf host", "listed once, below");
+        assert_eq!(
+            activity_word(&row.activity).0,
+            "10%",
+            "the word still folds"
+        );
+
+        // A pane that says nothing itself does not borrow its subtask's words.
+        m.activity.insert(
+            "b".into(),
+            BTreeMap::from([
+                (String::new(), record(ProgramState::Working)),
+                ("shell1".into(), sub),
+            ]),
+        );
+        let g = groups(&[("h", &m)], &[], ActivityGrouping::Priority, false);
+        assert_eq!(g[0].rows[0].detail, "t · dev · h");
+        assert_eq!(g[0].rows[0].message, None);
     }
 
     #[test]

@@ -630,7 +630,7 @@ fn activity_row(index: usize, row_: &ActivityRow, joined: bool) -> El {
                 .min_w(0.),
         )
         .child(text(word.clone()).font(medium(10.5)).color(rgb(tone)));
-    if let Some(msg) = &row_.activity.msg {
+    if let Some(msg) = &row_.message {
         line = line.help(msg.clone());
     }
     let mut body = col().grow(1.).min_w(0.).gap(2.).child(line);

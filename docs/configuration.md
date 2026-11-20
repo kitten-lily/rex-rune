@@ -478,6 +478,8 @@ priority view, its session and host), and the last folders of its working
 directory as the server reports it. Rows are grouped by priority (Needs you, Done,
 Working, Finished, then Idle) or by session; the bar at the bottom of the list
 switches grouping and shows or hides idle agents, which are off by default.
+A pane's detail shows the pane's own message; a subtask's words stay on the
+subtask's line, so nothing is listed twice.
 Subtasks that a program reports as extra OSC 7501 records appear inside its row,
 which grows by a line for each (Claude Code reports its background shells and
 agents this way).
