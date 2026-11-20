@@ -142,25 +142,51 @@ def wait_text(sid, block, needle, timeout=6):
     return terminal_text(sid, block)
 
 
+def stop_owned(process, timeout=10):
+    """End one process this run started: terminate, wait a bounded time, then kill and wait.
+
+    Every process a fixture owns is reaped through here before its files are removed, so no
+    child outlives the workspace it logs into.
+    """
+    if process is None:
+        return
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=timeout)
+
+
 class Desktop:
     def __init__(self, size="1920x1200"):
-        read_fd, write_fd = os.pipe()
-        self.server = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", f"{size}x24", "-nolisten", "tcp"],
-                                       pass_fds=(write_fd,), stderr=subprocess.DEVNULL)
-        os.close(write_fd)
-        with os.fdopen(read_fd) as pipe:
-            self.display = ":" + pipe.readline().strip()
-        self.env = dict(os.environ, DISPLAY=self.display, REX_RUNE_NO_UPDATE_CHECK="1")
-        self.env.pop("WAYLAND_DISPLAY", None)
-        # The Add host list runs `tailscale status`: give the client one that finds no tailnet.
-        self.stub = tempfile.mkdtemp(prefix="rex-no-tailscale-")
-        stub = Path(self.stub) / "tailscale"
-        stub.write_text("#!/bin/sh\nexit 1\n")
-        stub.chmod(0o755)
-        self.env["PATH"] = f"{self.stub}{os.pathsep}{self.env.get('PATH', '')}"
-        self.wm = subprocess.Popen(["openbox"], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(0.8)
+        # Registered before the first allocation, so a failure partway through this constructor
+        # releases whatever it already started instead of leaking it.
         self.apps = []
+        self.server = None
+        self.wm = None
+        self.stub = None
+        try:
+            read_fd, write_fd = os.pipe()
+            self.server = subprocess.Popen(["Xvfb", "-displayfd", str(write_fd), "-screen", "0", f"{size}x24", "-nolisten", "tcp"],
+                                           pass_fds=(write_fd,), stderr=subprocess.DEVNULL)
+            os.close(write_fd)
+            with os.fdopen(read_fd) as pipe:
+                self.display = ":" + pipe.readline().strip()
+            self.env = dict(os.environ, DISPLAY=self.display, REX_RUNE_NO_UPDATE_CHECK="1")
+            self.env.pop("WAYLAND_DISPLAY", None)
+            # The Add host list runs `tailscale status`: give the client one that finds no tailnet.
+            self.stub = tempfile.mkdtemp(prefix="rex-no-tailscale-")
+            stub = Path(self.stub) / "tailscale"
+            stub.write_text("#!/bin/sh\nexit 1\n")
+            stub.chmod(0o755)
+            self.env["PATH"] = f"{self.stub}{os.pathsep}{self.env.get('PATH', '')}"
+            self.wm = subprocess.Popen(["openbox"], env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.8)
+        except BaseException:
+            self.close()
+            raise
 
     def x(self, *args):
         return subprocess.check_output(["xdotool", *map(str, args)], env=self.env, text=True, timeout=15).strip()
@@ -193,11 +219,15 @@ class Desktop:
         subprocess.run(["import", "-window", window, str(OUT / f"{name}.png")], env=self.env, check=True)
 
     def close(self):
-        for p in self.apps:
-            p.terminate()
-        for p in (self.wm, self.server):
-            p.terminate()
-        shutil.rmtree(self.stub, ignore_errors=True)
+        # Terminate every child this run owns, then wait for each (bounded, then a kill) before
+        # the caller removes the files they were writing to. The handles stay here afterwards,
+        # already reaped: the scripts that import this helper wait on them again in their own
+        # finally, and a second close is harmless.
+        for p in [*self.apps, self.wm, self.server]:
+            stop_owned(p)
+        if self.stub is not None:
+            shutil.rmtree(self.stub, ignore_errors=True)
+            self.stub = None
 
 
 def session(label):

@@ -11,9 +11,8 @@ use rexrs::api::client::{Binding, InspectResponseAction};
 use serde_json::{Value, json};
 
 /// Every row Commands lists for `fixture()`, in order. A row leaving this list is a command
-/// someone can no longer reach: remove its id here only on purpose. `host.start_server` and
-/// `app.update` are listed only while they apply (a host waiting for a server, a verified
-/// update).
+/// someone can no longer reach: remove its id here only on purpose. `host.start_server`,
+/// `host.check_key`, `host.install_rex` and `app.update` are listed only while they apply.
 const IDS: &[&str] = &[
     "session.switch",
     "session.new",
@@ -47,6 +46,12 @@ const IDS: &[&str] = &[
     "pane.split.up",
     "pane.split.best_fit",
     "pane.zoom",
+    "pane.float",
+    "pane.new_floating",
+    "pane.minimize_layer",
+    "pane.restore_layer",
+    "pane.raise_layer",
+    "pane.return_to_tiles",
     "pane.focus.next",
     "pane.focus.previous",
     "pane.focus.left",
@@ -78,6 +83,7 @@ const IDS: &[&str] = &[
     "pane.close_focused",
     "pane.close_others",
     "pane.close",
+    "pane.close_layer",
     "host.switch",
     "host.add",
     "host.edit",
@@ -346,6 +352,7 @@ fn a_search_is_one_list_with_the_best_match_first() {
             "Close pane or tab…",
             "Close other panes…",
             "Close pane…",
+            "Close floating layer…",
             "Close app"
         ]
     );
@@ -361,7 +368,12 @@ fn a_search_is_one_list_with_the_best_match_first() {
     search(&mut ws, "close pane");
     assert_eq!(
         labels(&ws),
-        ["Close pane…", "Close pane or tab…", "Close other panes…"]
+        [
+            "Close pane…",
+            "Close pane or tab…",
+            "Close other panes…",
+            "Close floating layer…"
+        ]
     );
     // Words in any order; each must be found.
     search(&mut ws, "size font");
@@ -985,6 +997,9 @@ fn the_list_shows_about_twenty_rows_and_scrolls_to_the_rest() {
     assert!(words.iter().any(|w| w == "Commands"));
     assert!(!headings(&rt).iter().any(|w| w == "Session · s-label"));
     let short = rect(&rt, "results-scroll");
-    assert!(short[3] < 250., "six rows need no scrolling: {short:?}");
+    assert!(
+        short[3] < 300.,
+        "the seven close rows need no scrolling: {short:?}"
+    );
     std::fs::remove_file(&rt.state.settings_path).ok();
 }

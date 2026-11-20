@@ -272,7 +272,11 @@ pub fn list_row(
             .cursor(Cursor::Pointer)
             .on_hover(move |s: &mut Workspace| {
                 if let Some(p) = &mut s.panel {
+                    // The pointer owns the selection from here, even when it lands on the row
+                    // the keyboard already had: its remembered row must not outlive it and
+                    // claim a later row at the same index.
                     p.selected = index;
+                    p.row = None;
                 }
             })
             .on_press_tx(on_press);

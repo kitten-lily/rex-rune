@@ -243,8 +243,8 @@ const STOP_ACCEPTED: &str = "Server stop accepted. Rex Rune will not start it ag
 
 #[derive(Clone, Default)]
 pub struct HostModel {
-    /// A successful SSH lookup found no default server; setup may be offered, never run.
-    pub ssh_server_missing: bool,
+    /// Setup problems from the last read-only SSH lookup.
+    pub ssh_problem: Option<crate::ssh::Problem>,
     pub visible: bool,
     pub connected: bool,
     pub status: String,
@@ -1659,7 +1659,7 @@ async fn run_host(
                 _ => None,
             };
             state.prune(&shared.model.lock().expect("host model"));
-            shared.update(|m| m.ssh_server_missing = false);
+            shared.update(|m| m.ssh_problem = None);
             shared.status("Connected", true);
             reconcile(&endpoint, shared, &sender, &mut workers);
             for (block, worker) in &workers {
@@ -1872,10 +1872,10 @@ async fn run_host(
         }
         shared.update(|m| {
             m.performs.clear();
-            m.ssh_server_missing = result
+            m.ssh_problem = result
                 .as_ref()
                 .err()
-                .is_some_and(|e| e.downcast_ref::<crate::ssh::MissingServer>().is_some())
+                .and_then(crate::ssh::Problem::from_error);
         });
         shared.status(
             match result {

@@ -15,6 +15,7 @@ pub mod connection;
 pub mod download;
 pub mod dracula_pro;
 pub mod keymap;
+pub mod layers;
 pub mod layout;
 pub mod legacy;
 pub mod links;

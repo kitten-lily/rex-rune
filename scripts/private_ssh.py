@@ -27,7 +27,7 @@ def stop(process):
             process.wait(timeout=5)
 
 
-def start(work):
+def start(work, force=None, *, isolated=False):
     work = Path(work)
     sshd, ssh, keygen = (shutil.which(tool) for tool in ("sshd", "ssh", "ssh-keygen"))
     if not all((sshd, ssh, keygen)):
@@ -51,6 +51,9 @@ KbdInteractiveAuthentication no
 AllowUsers {user}
 AllowTcpForwarding yes
 AllowStreamLocalForwarding yes
+PermitUserRC no
+ExposeAuthInfo no
+{f"ForceCommand {force}" if force else ""}
 """)
     client_config = work / "ssh_config"
     client_config.write_text(f"""Host *
@@ -58,15 +61,28 @@ AllowStreamLocalForwarding yes
   IdentitiesOnly yes
   UserKnownHostsFile {work}/known_hosts
   GlobalKnownHostsFile /dev/null
-  StrictHostKeyChecking accept-new
+  StrictHostKeyChecking yes
   BatchMode yes
   ConnectTimeout 2
+  IdentityAgent none
+  UpdateHostKeys no
+  HostName 127.0.0.1
+  Port {port}
+  User {user}
 """)
-    server = subprocess.Popen([sshd, "-D", "-e", "-f", str(server_config)],
-                              stdout=(work / "sshd.log").open("w"), stderr=subprocess.STDOUT)
-    time.sleep(.4)
-    test = subprocess.run([ssh, "-F", str(client_config), "-p", str(port), f"{user}@127.0.0.1", "true"],
-                          capture_output=True, text=True, timeout=5)
+    key = (work / "host-key.pub").read_text().split()
+    (work / "known_hosts").write_text(f"[127.0.0.1]:{port} {key[0]} {key[1]}\n")
+    environ = {"HOME": str(work / "local"), "PATH": "/usr/bin:/bin"} if isolated else None
+    with (work / "sshd.log").open("w") as log:
+        server = subprocess.Popen([sshd, "-D", "-e", "-f", str(server_config)], env=environ,
+                                  stdout=log, stderr=subprocess.STDOUT)
+    try:
+        time.sleep(.4)
+        test = subprocess.run([ssh, "-F", str(client_config), "-p", str(port), f"{user}@127.0.0.1", "true"],
+                              env=environ, capture_output=True, text=True, timeout=5)
+    except BaseException:
+        stop(server)
+        raise
     if test.returncode:
         (work / "ssh-check.log").write_text(test.stderr)
         stop(server)

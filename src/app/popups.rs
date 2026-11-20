@@ -130,6 +130,7 @@ pub fn target_outline(s: &Workspace) -> Option<El> {
     if !matches!(
         panel.kind,
         PanelKind::Pane
+            | PanelKind::Layer
             | PanelKind::Form(super::panel::Form::RenamePane(_))
             | PanelKind::Download(_)
             | PanelKind::Directory(_)
@@ -172,7 +173,11 @@ pub fn list_popup(s: &Workspace, viewport: [f32; 2]) -> El {
     // Context menus (a pane's, a tab's, a sidebar session's) share one shape.
     let pane = matches!(
         panel.kind,
-        PanelKind::Pane | PanelKind::Session | PanelKind::Host(_) | PanelKind::Window
+        PanelKind::Pane
+            | PanelKind::Layer
+            | PanelKind::Session
+            | PanelKind::Host(_)
+            | PanelKind::Window
     );
     let commands = matches!(panel.kind, PanelKind::Picker(false));
     // The values of one setting: a short list with the current one checked.

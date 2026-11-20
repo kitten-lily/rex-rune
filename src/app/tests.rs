@@ -16,6 +16,8 @@ mod directory_tests;
 mod downloads_tests;
 #[path = "find_tests.rs"]
 mod find_tests;
+#[path = "floating_tests.rs"]
+mod floating_tests;
 #[path = "font_settings_tests.rs"]
 mod font_settings_tests;
 #[path = "header_fading_tests.rs"]
@@ -5410,10 +5412,302 @@ fn open_add_host(rt: &mut Runtime<Workspace>) {
 }
 
 #[test]
+fn ssh_key_dialog_defaults_to_not_now_and_only_reconnects_after_self_check() {
+    use rex_rune::ssh::Problem;
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    let mut ws = workspace();
+    let endpoint = "ssh://work-alias";
+    ws.settings.hosts[0].endpoint = endpoint.into();
+    ws.hosts[0].model.ssh_problem = Some(Problem::UnknownKey);
+    let commands = capture_host(&mut ws, 0);
+    let mut rt = runtime(ws);
+    click(&mut rt, "offer-ssh-key");
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.panel.is_none());
+    assert!(commands.try_recv().is_err());
+    click(&mut rt, "offer-ssh-key");
+    rt.update(|s, _| {
+        s.finish_key_check_for_test(
+            endpoint,
+            Err(anyhow::anyhow!(
+                "Appended to known_hosts, but OpenSSH still does not trust this host."
+            )),
+        )
+    });
+    for _ in 0..4 {
+        rt.frame(1. / 60.);
+    }
+    assert!(
+        element_text(&rt, "dialog")
+            .join(" ")
+            .contains("still does not trust")
+    );
+    assert!(commands.try_recv().is_err());
+    press(&mut rt, Key::Escape);
+    click(&mut rt, "offer-ssh-key");
+    rt.state.finish_key_check_for_test(endpoint, Ok(()));
+    assert!(matches!(commands.try_recv(), Ok(HostCommand::Reconnect)));
+    assert!(commands.try_recv().is_err());
+    press(&mut rt, Key::Escape);
+    rt.update(|s, _| s.hosts[0].model.ssh_problem = Some(Problem::ChangedKey));
+    click(&mut rt, "offer-ssh-key");
+    assert!(!has(&rt, "trust-host-key"));
+    assert!(
+        element_text(&rt, "dialog")
+            .join(" ")
+            .contains("Rex Rune will not connect")
+    );
+    assert!(commands.try_recv().is_err());
+}
+
+pub(super) fn ssh_facts(os: &str, uid: u32, rex: bool) -> rex_rune::ssh::Problem {
+    rex_rune::ssh::Problem::NoServer(rex_rune::ssh::Facts {
+        user: "tester".into(),
+        os: os.into(),
+        uid: Some(uid),
+        rex,
+    })
+}
+
+#[test]
+fn ssh_install_offer_table_and_local_only_command_ids() {
+    use rex_rune::ssh::Problem;
+    let allowed_here = rex_rune::platform::local::require_ssh().is_ok();
+    for (problem, endpoint, key) in [
+        (
+            Some(ssh_facts("Linux", 1000, false)),
+            "ssh://box",
+            "install",
+        ),
+        (Some(ssh_facts("Linux", 0, false)), "ssh://box", ""),
+        (Some(ssh_facts("Darwin", 1000, false)), "ssh://box", ""),
+        (Some(ssh_facts("FreeBSD", 1000, false)), "ssh://box", ""),
+        (Some(ssh_facts("Linux", 1000, true)), "ssh://box", "start"),
+        (
+            Some(ssh_facts("Linux", 1000, false)),
+            "ssh://box/manual.sock",
+            "",
+        ),
+        (Some(Problem::UnknownKey), "ssh://box", "key"),
+        (Some(Problem::ChangedKey), "ssh://box", "key"),
+        (None, "ssh://box", ""),
+    ] {
+        for (offer, label, id) in [
+            ("install", "Install Rex on this host…", "host.install_rex"),
+            ("start", "Start personal server…", "host.start_server"),
+            ("key", "Check host key…", "host.check_key"),
+        ] {
+            let expected = key == offer && allowed_here;
+            let mut rt = runtime(ws_for_ssh_offer(endpoint, problem.clone()));
+            assert_eq!(has(&rt, &format!("offer-ssh-{offer}")), expected);
+            rt.update(|s, _| s.open_panel(PanelKind::Host(0), "Host menu", &[]));
+            assert_eq!(
+                rt.state.entries().iter().any(|e| e.label == label),
+                expected
+            );
+            rt.update(|s, _| s.picker(false));
+            assert_eq!(
+                rt.state
+                    .entries()
+                    .iter()
+                    .any(|e| e.id.as_deref() == Some(id)),
+                expected
+            );
+        }
+    }
+    assert!(
+        !super::actions::declarations()
+            .iter()
+            .any(|a| matches!(a.name.as_str(), "host.install_rex" | "host.check_key"))
+    );
+}
+
+fn ws_for_ssh_offer(endpoint: &str, problem: Option<rex_rune::ssh::Problem>) -> Workspace {
+    let mut ws = workspace();
+    ws.settings.hosts[0].endpoint = endpoint.into();
+    ws.hosts[0].model.ssh_problem = problem;
+    ws
+}
+
+#[test]
+fn ssh_install_dialog_histories_gate_answers_and_reconnect() {
+    use super::ssh_install::Phase;
+    use rex_rune::ssh::{
+        Problem,
+        install::{Answer, Event},
+    };
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    for approve in [false, true] {
+        let mut ws = workspace();
+        ws.settings.hosts[0].endpoint = "ssh://box".into();
+        let Problem::NoServer(facts) = ssh_facts("Linux", 1000, false) else {
+            unreachable!()
+        };
+        ws.hosts[0].model.ssh_problem = Some(Problem::NoServer(facts.clone()));
+        let commands = capture_host(&mut ws, 0);
+        let mut rt = runtime(ws);
+        for dismiss in [Key::Enter, Key::Escape] {
+            click(&mut rt, "offer-ssh-install");
+            assert_eq!(rt.state.ssh_install.as_ref().unwrap().phase, Phase::Review);
+            press(&mut rt, dismiss);
+            assert!(rt.state.panel.is_none());
+        }
+        click(&mut rt, "offer-ssh-install");
+        let old = rt.state.ssh_install.as_ref().unwrap().run;
+        click(&mut rt, "begin-install");
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Checking
+        );
+        rt.update(|s, _| s.install_checked(old, Err(anyhow::anyhow!("already installed"))));
+        assert!(matches!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Refused(_)
+        ));
+        press(&mut rt, Key::Escape);
+        click(&mut rt, "offer-ssh-install");
+        click(&mut rt, "begin-install");
+        let serial = rt.state.ssh_install.as_ref().unwrap().run;
+        rt.update(|s, _| s.install_checked(serial, Ok(facts)));
+        rt.update(|s, _| s.install_event(old, Event::Exited { code: Some(0) }));
+        rt.update(|s, _| s.install_event(serial, Event::Asking { serial: 1 }));
+        for _ in 0..60 {
+            rt.frame(1. / 60.);
+        }
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Asking {
+                serial: 1,
+                ready: false
+            }
+        );
+        rt.update(|s, _| s.answer_install(serial, 1, Answer::Yes));
+        press(&mut rt, Key::Enter);
+        assert!(rt.state.ssh_install.as_ref().unwrap().answers.is_empty());
+        assert!(
+            rt.state.panel.is_some(),
+            "Enter while buttons are inert does not dismiss the dialog"
+        );
+        rt.update(|s, _| s.install_event(serial, Event::Ready { serial: 1 }));
+        for _ in 0..60 {
+            rt.frame(1. / 60.);
+        }
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Asking {
+                serial: 1,
+                ready: true
+            }
+        );
+        if approve {
+            click(&mut rt, "yes-install-step");
+        } else {
+            press(&mut rt, Key::Enter);
+        }
+        let answer = if approve { Answer::Yes } else { Answer::No };
+        rt.update(|s, _| s.answer_install(serial, 1, Answer::Yes));
+        assert_eq!(
+            rt.state.ssh_install.as_ref().unwrap().answers,
+            [(1, answer)]
+        );
+        for _ in 0..2 {
+            rt.update(|s, _| s.install_event(serial, Event::Exited { code: Some(0) }));
+        }
+        assert!(matches!(
+            rt.state.ssh_install.as_ref().unwrap().phase,
+            Phase::Finished { .. }
+        ));
+        assert!(rt.state.panel.is_some());
+        let sent: Vec<_> = commands.try_iter().collect();
+        if approve {
+            assert!(matches!(sent.as_slice(), [HostCommand::Reconnect]));
+        } else {
+            assert!(sent.is_empty());
+        }
+    }
+}
+
+#[test]
+fn ssh_install_closing_editing_or_removing_host_stops_the_run() {
+    use super::ssh_install::Phase;
+    use rex_rune::ssh::{
+        Problem,
+        install::{Answer, Event},
+    };
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    for action in ["close", "remove", "edit", "settings", "updates"] {
+        let mut ws = workspace_hosts(if action == "remove" { 2 } else { 1 });
+        ws.settings.hosts[0].endpoint = "ssh://box".into();
+        let Problem::NoServer(facts) = ssh_facts("Linux", 1000, false) else {
+            unreachable!()
+        };
+        ws.hosts[0].model.ssh_problem = Some(Problem::NoServer(facts.clone()));
+        let _commands = capture_host(&mut ws, 0);
+        ws.preview_ssh_install(0);
+        let serial = ws.ssh_install.as_ref().unwrap().run;
+        ws.begin_install(serial);
+        ws.install_checked(serial, Ok(facts));
+        ws.install_event(serial, Event::Asking { serial: 1 });
+        ws.install_event(serial, Event::Ready { serial: 1 });
+        match action {
+            "remove" => ws.remove_host(0, &mut rune::Tx::default()),
+            "edit" => ws.edit_host(
+                0,
+                "new name".into(),
+                "unix:///nonexistent/rex-test-edit.sock".into(),
+                None,
+            ),
+            "settings" => ws.perform(Intent::Settings, &mut rune::Tx::default()),
+            "updates" => ws.open_updates_settings(),
+            _ => ws.close_panel(&mut rune::Tx::default()),
+        }
+        ws.answer_install(serial, 1, Answer::Yes);
+        assert_eq!(ws.ssh_install.as_ref().unwrap().phase, Phase::Stopping);
+        assert!(ws.ssh_install.as_ref().unwrap().answers.is_empty());
+        if matches!(action, "close" | "remove") {
+            assert!(ws.panel.is_none(), "{action}");
+        }
+    }
+}
+
+#[test]
+fn ssh_install_unrecognized_prompt_has_only_stop_and_copy() {
+    use rex_rune::ssh::{Problem, install::Event};
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+    let problem = ssh_facts("Linux", 1000, false);
+    let Problem::NoServer(facts) = problem.clone() else {
+        unreachable!()
+    };
+    let mut ws = ws_for_ssh_offer("ssh://box", Some(problem));
+    ws.preview_ssh_install(0);
+    let serial = ws.ssh_install.as_ref().unwrap().run;
+    ws.begin_install(serial);
+    ws.install_checked(serial, Ok(facts));
+    ws.install_event(serial, Event::Unrecognized);
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "stop-install"));
+    assert!(has(&rt, "copy-install-command"));
+    assert!(!has(&rt, "yes-install-step") && !has(&rt, "no-install-step"));
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.ssh_install.as_ref().unwrap().answers.is_empty());
+}
+
+#[test]
 fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://work-alias".into();
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     let commands = capture_host(&mut ws, 0);
     let mut rt = runtime(ws);
     assert!(has(&rt, "offer-ssh-start"));
@@ -5423,6 +5717,15 @@ fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
         rt.state.panel.as_ref().unwrap().kind,
         PanelKind::StartSsh { .. }
     ));
+    let copy = element_text(&rt, "dialog").join("\n");
+    assert!(
+        copy.contains("loginctl enable-linger")
+            && copy.contains("rex server install ssh://work-alias")
+            && copy.contains("logging out of work-alias")
+            && !copy.contains("10 seconds")
+            && !copy.contains("temporary"),
+        "the SSH setup preview explains lingering without claiming an idle stop"
+    );
     assert!(
         rt.state.ssh_setup.ran.is_empty(),
         "opening a preview cannot execute"
@@ -5476,11 +5779,116 @@ fn ssh_start_is_explicit_one_shot_and_defaults_to_not_now() {
     );
 }
 
+/// Run alone with REX_TEST_SNAP_DIR to also draw all four states with the bundled fonts.
+#[test]
+fn ssh_start_states_fit_at_minimum_size() {
+    use rex_rune::ssh::setup::Attachment;
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
+
+    let mut camera = pane_verb_tests::Camera::new();
+    let _families = camera
+        .as_ref()
+        .map(|_| rune::text::with_families("Inter", "IBM Plex Mono"));
+    let mut ws = workspace();
+    let endpoint = "ssh://work-alias";
+    ws.settings.hosts[0].endpoint = endpoint.into();
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
+    ws.preview_ssh_start(0);
+    let size = (640., 480.);
+    let mut rt = if camera.is_some() {
+        let fonts = super::fonts::load("IBM Plex Mono", &[]);
+        Runtime::with_text(
+            ws,
+            view,
+            size,
+            Env::new(true, 1.),
+            rune::text::TextSystem::new(fonts.files, fonts.families),
+        )
+    } else {
+        runtime_at(ws, size)
+    };
+    let mut check = |rt: &mut Runtime<Workspace>, state: &str, extra: &[&str]| {
+        for _ in 0..90 {
+            rt.frame(1. / 60.);
+        }
+        let elements = rt.elements();
+        let find = |name: &str| {
+            elements
+                .iter()
+                .find(|e| {
+                    !e.exiting
+                        && (e.key.as_deref() == Some(name)
+                            || e.text.as_ref().is_some_and(|t| t.starts_with(name)))
+                })
+                .unwrap_or_else(|| panic!("{state}: missing {name}"))
+        };
+        let [dx, dy, dw, dh] = find("dialog").visible;
+        for name in ["cancel-ssh-start", "confirm-ssh-start"]
+            .into_iter()
+            .chain(extra.iter().copied())
+        {
+            let e = find(name);
+            let [x, y, w, h] = e.rect;
+            assert_eq!(e.rect, e.visible, "{state}: {name} is clipped");
+            assert!(
+                w > 0. && h > 0. && x >= dx && y >= dy && x + w <= dx + dw && y + h <= dy + dh,
+                "{state}: {name} {:?} is outside the visible dialog",
+                e.rect
+            );
+        }
+        if let Some(camera) = &mut camera {
+            camera.snap(rt, &format!("ssh-start-{state}-small"));
+        }
+    };
+
+    check(&mut rt, "preview", &[]);
+    rt.update(|s, tx| s.submit(tx));
+    check(&mut rt, "busy", &["Starting ssh://work-alias…"]);
+    rt.update(|s, tx| {
+        s.ssh_start_finished(
+            endpoint,
+            Err(anyhow::anyhow!("remote Rex is too old").into()),
+            tx,
+        );
+    });
+    check(&mut rt, "error", &["remote Rex is too old"]);
+    rt.update(|s, tx| {
+        s.submit(tx);
+        s.ssh_start_finished(
+            endpoint,
+            Ok(Attachment::Review {
+                reason: "Automatic SSH socket lookup cannot find this listener. Save its reported Unix socket endpoint to connect without starting it again.".into(),
+                endpoint: Some("ssh://work-alias/custom/rex.sock".into()),
+            }),
+            tx,
+        );
+    });
+    let review = [
+        "Automatic SSH socket lookup cannot find this listener.",
+        "ssh://work-alias/custom/rex.sock",
+        "save-ssh-socket",
+    ];
+    check(&mut rt, "review", &review);
+    rt.wheel(320., 150., -480.);
+    check(&mut rt, "review-scrolled", &review);
+    assert!(rt.elements().iter().any(|e| {
+        e.text
+            .as_ref()
+            .is_some_and(|t| t.starts_with("Uses your SSH configuration"))
+            && e.scrolled[1] > 0.
+    }));
+}
+
 #[test]
 fn ssh_setup_offers_explicit_socket_without_reconnecting_or_starting_again() {
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://box".into();
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     ws.preview_ssh_start(0);
     ws.ssh_setup.running = Some("ssh://box".into());
     let commands = capture_host(&mut ws, 0);
@@ -5558,13 +5966,16 @@ fn ssh_setup_completion_does_not_reconnect_removed_or_connected_hosts() {
 
 #[test]
 fn ssh_setup_does_not_offer_for_auth_errors_custom_sockets_or_stale_hosts() {
+    if rex_rune::platform::local::require_ssh().is_err() {
+        return;
+    }
     let mut ws = workspace();
     ws.settings.hosts[0].endpoint = "ssh://box".into();
     assert!(
         !ws.can_start_ssh(0),
         "a generic disconnected host is not a missing server"
     );
-    ws.hosts[0].model.ssh_server_missing = true;
+    ws.hosts[0].model.ssh_problem = Some(ssh_facts("Linux", 1000, true));
     assert!(ws.can_start_ssh(0));
     ws.preview_ssh_start(0);
     ws.settings.hosts[0].endpoint = "ssh://different".into();

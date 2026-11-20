@@ -2,7 +2,7 @@
 use super::{panel::PanelKind, workspace::Workspace};
 use rex_rune::{
     connection::HostCommand,
-    ssh::{Target, setup},
+    ssh::{Problem, SetupOffer, Target, setup},
 };
 use rune::Tx;
 
@@ -16,19 +16,18 @@ pub struct Setup {
 }
 
 impl Workspace {
+    pub(super) fn ssh_offer(&self, host: usize) -> Option<SetupOffer> {
+        rex_rune::platform::local::require_ssh().ok()?;
+        let state = &self.hosts.get(host)?.model;
+        if state.connected {
+            return None;
+        }
+        let target = Target::parse(&self.settings.hosts.get(host)?.endpoint).ok()??;
+        target.setup_offer(state.ssh_problem.as_ref()?)
+    }
+
     pub fn can_start_ssh(&self, host: usize) -> bool {
-        self.settings
-            .hosts
-            .get(host)
-            .zip(self.hosts.get(host))
-            .is_some_and(|(saved, state)| {
-                !state.model.connected
-                    && state.model.ssh_server_missing
-                    && Target::parse(&saved.endpoint)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|t| t.socket.is_none())
-            })
+        self.ssh_offer(host) == Some(SetupOffer::Start)
     }
 
     pub fn preview_ssh_start(&mut self, host: usize) {
@@ -45,7 +44,8 @@ impl Workspace {
     }
 
     pub fn start_ssh(&mut self, endpoint: String) {
-        if self.ssh_setup.running.is_some()
+        if self.install_is_live()
+            || self.ssh_setup.running.is_some()
             || self.ssh_setup.attachment.contains_key(&endpoint)
             || !self.panel.as_ref().is_some_and(
                 |p| matches!(&p.kind, PanelKind::StartSsh { endpoint: e } if e == &endpoint),
@@ -100,7 +100,7 @@ impl Workspace {
     }
 
     /// One read-only lookup, only while this saved host still needs a connection.
-    fn reconnect_ssh_if_needed(&mut self, endpoint: &str) -> &'static str {
+    pub(super) fn reconnect_ssh_if_needed(&mut self, endpoint: &str) -> &'static str {
         let Some(host) = self
             .settings
             .hosts
@@ -215,10 +215,54 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
         .as_ref()
         .and_then(|t| setup::command_preview(t).ok())
         .unwrap_or_default();
-    let mut body = col().gap(12.)
-        .child(text(panel.title.clone()).font(strong(17.)).color(rgb(ink())).wrap())
-        .child(text(format!("{endpoint}\n\nUses your SSH configuration and the Rex executable already installed on both machines (preview.14 or newer). Starts a personal server as the SSH login user only if none is running. No packages, system services or sessions are created. The server may create its own user config/state files and keeps running when this app closes.\n\nThis is one attempt, not permission to auto-start on reconnect. SSH must already work without a password prompt."))
-            .font(ui(12.)).color(rgb(muted())).wrap())
+    let host = target.as_ref().map_or("the host", |t| t.host.as_str());
+    let linux = s.settings.hosts.iter().position(|h| h.endpoint == endpoint)
+        .and_then(|i| s.hosts.get(i))
+        .is_some_and(|h| matches!(&h.model.ssh_problem, Some(Problem::NoServer(facts)) if facts.os == "Linux"));
+    let install_hint = if linux {
+        format!(
+            "\n\nFor a server that starts on demand and survives logout, run rex server install {} from this computer. The installer needs systemd on the host; accept its prompt to enable lingering.",
+            setup::quote_arg(endpoint)
+        )
+    } else {
+        "\n\nFor other server setups, see docs/hosts.md.".into()
+    };
+    let mut body = col().gap(12.).min_h(0.).shrink().child(
+        text(panel.title.clone())
+            .font(strong(17.))
+            .color(rgb(ink()))
+            .wrap(),
+    );
+    if let Some(error) = &panel.error {
+        body = body.child(
+            col()
+                .max_h(140.)
+                .pb(1.)
+                .scroll(rune::ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    text(error.clone())
+                        .font(ui(12.))
+                        .color(rgb(danger()))
+                        .wrap(),
+                ),
+        );
+    }
+    body = body
+        .child(text(endpoint).font(ui(12.)).color(rgb(muted())).wrap())
+        .child(
+            col()
+                .min_h(0.)
+                .shrink()
+                .scroll(rune::ScrollSpec { stick_bottom: false })
+                .scroll_edge_fade(10.)
+                .child(text(format!(
+                    "Uses your SSH configuration and the Rex executable already installed on both machines (preview.14 or newer). Starts a personal server as the SSH login user only if none is running. No packages, system services or sessions are created. The server may create its own user config/state files.\n\n\
+                     The server keeps running after this app closes, until it is stopped or the host restarts. On Linux with systemd, logging out of {host} also ends it and every session in it unless lingering is on for that login (loginctl enable-linger). This action does not turn lingering on.{install_hint}\n\n\
+                     This is one attempt, not permission to auto-start on reconnect. SSH must already work without a password prompt."
+                )).font(ui(12.)).color(rgb(muted())).wrap()),
+        )
         .child(text(format!("On this machine: {command}")).font(ui(12.).mono()).color(rgb(ink())).wrap())
         .child(text("On host, via your SSH: rex version --json, then rex server start --json (chosen by Rex)")
             .font(ui(12.).mono()).color(rgb(ink())).wrap());
@@ -230,21 +274,6 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
             .font(ui(12.))
             .color(rgb(muted()))
             .wrap(),
-        );
-    }
-    if let Some(error) = &panel.error {
-        body = body.child(
-            col()
-                .max_h(140.)
-                .scroll(rune::ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(
-                    text(error.clone())
-                        .font(ui(12.))
-                        .color(rgb(danger()))
-                        .wrap(),
-                ),
         );
     }
     if let Some(setup::Attachment::Review {
@@ -290,21 +319,20 @@ pub fn dialog(s: &Workspace, endpoint: &str) -> rune::El {
     } else {
         start
     };
-    body.child(
-        row()
-            .gap(8.)
-            .justify_end()
-            .child(
-                pill(
-                    "cancel-ssh-start",
-                    if busy { "Close" } else { "Not now" },
-                    Pill::Neutral,
-                    32.,
-                    |s, tx| s.cancel_panel(tx),
-                )
-                .default_button()
-                .tab_index(1),
+    let actions = row()
+        .gap(8.)
+        .justify_end()
+        .child(
+            pill(
+                "cancel-ssh-start",
+                if busy { "Close" } else { "Not now" },
+                Pill::Neutral,
+                32.,
+                |s, tx| s.cancel_panel(tx),
             )
-            .child(start),
-    )
+            .default_button()
+            .tab_index(1),
+        )
+        .child(start);
+    body.child(actions)
 }

@@ -2,8 +2,9 @@
 use super::splits::SplitWay;
 use super::tabs::{TabAction, TabTarget};
 use super::theme::{MONITOR, SERVER};
-use super::workspace::Workspace;
+use super::workspace::{HostId, Workspace};
 use rex_rune::{
+    layers,
     settings::{ChromeTheme, TerminalThemeChoice},
     terminal_theme::{BUILTIN_PREFIX, builtins, paired},
 };
@@ -25,12 +26,19 @@ pub enum Intent {
     RetryHost(usize),
     /// Review an opt-in, one-time personal server start.
     StartSsh(usize),
+    InstallSsh(usize),
+    HostKey(usize),
     /// The default shell form for a host.
     HostShell(usize),
     /// The download folder form (Settings).
     DownloadFolder,
     InsertPath(usize),
     Pane(PaneTarget, PaneAction),
+    /// A floating-layer verb on the layer its target captured.
+    Layer(LayerTarget, LayerAction),
+    /// The floating-layer verbs for a captured pane: the row marked with a chevron in the
+    /// pane menu.
+    LayerMenu(LayerTarget),
     Session(SessionTarget, SessionAction),
     /// A tab action on a named tab of any host and session.
     Window(TabTarget, TabAction),
@@ -126,6 +134,7 @@ impl Intent {
                 PaneAction::Reset => ("pane.reset", Value::Null),
                 PaneAction::Rename => ("pane.rename", Value::Null),
             },
+            Self::Layer(_, action) => (action.name(), Value::Null),
             _ => return None,
         })
     }
@@ -154,10 +163,13 @@ impl Intent {
                     _
                 )
                 | Intent::MovePaneTo(_)
+                | Intent::LayerMenu(_)
                 | Intent::ChooseHost(_)
                 | Intent::HostShell(_)
                 | Intent::DownloadFolder
                 | Intent::StartSsh(_)
+                | Intent::InstallSsh(_)
+                | Intent::HostKey(_)
                 | Intent::RenameSession
                 | Intent::RenameWindow(_)
                 | Intent::CloseWindow(_)
@@ -216,6 +228,65 @@ pub struct PaneTarget {
     /// What the pane is called on screen (`activity::pane_name`).
     pub name: String,
     pub tab: String,
+}
+
+/// A floating layer captured from the server's view: the host, connection, session, tab and
+/// layer it belonged to, the pane the action names, and every pane in it. A request re-checks
+/// all of them, so a layer that changed is reported rather than retargeted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerTarget {
+    pub host: usize,
+    pub host_id: HostId,
+    pub epoch: u64,
+    pub session: String,
+    pub window: String,
+    pub layer: String,
+    /// The pane an action names: the focused pane, the menu's pane, or the layer's first block.
+    pub block: String,
+    /// Block IDs and screen names in opening order.
+    pub panes: Vec<(String, String)>,
+    pub host_name: String,
+    pub tab: String,
+    pub pane: String,
+    /// What the layer is called on screen: its first pane, and `+N` for the rest.
+    pub name: String,
+    /// Whether the view says this layer floats (an unknown kind floats too).
+    pub floating: bool,
+    pub minimized: bool,
+}
+
+/// What a layer row or verb does to the layer its target names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayerAction {
+    /// `session.float_block`: this pane into a new floating layer of its own window.
+    Float,
+    /// `session.new_layer`: one new pane in a new floating layer of the tab on screen.
+    NewFloating,
+    /// `session.set_layer_state` with `minimized`.
+    Minimize,
+    /// `session.set_layer_state` with `normal` and `focus`: restore and raise in one revision.
+    Focus,
+    /// `session.raise_layer`: bring to front, leaving focus and bounds alone.
+    Raise,
+    /// `session.move_block`: this pane beside the tab's first tiled pane.
+    ReturnToTiles,
+    /// `session.close_layer`: every pane in the layer, after confirmation.
+    Close,
+}
+
+impl LayerAction {
+    /// The registered client action that runs this verb, for the row's shortcut hint.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Float => "pane.float",
+            Self::NewFloating => "pane.new_floating",
+            Self::Minimize => "pane.minimize_layer",
+            Self::Focus => "pane.restore_layer",
+            Self::Raise => "pane.raise_layer",
+            Self::ReturnToTiles => "pane.return_to_tiles",
+            Self::Close => "pane.close_layer",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -337,6 +408,9 @@ pub enum PanelKind {
     SwitchHost,
     MovePane,
     Pane,
+    /// The floating-layer verbs for the layer the panel captured, opened from the
+    /// pane menu's one Floating layer row.
+    Layer,
     Session,
     /// A sidebar host header's right-click menu.
     Host(usize),
@@ -368,6 +442,12 @@ pub enum PanelKind {
     Pairing {
         endpoint: String,
     },
+    InstallSsh {
+        endpoint: String,
+    },
+    HostKey {
+        endpoint: String,
+    },
     /// Configuration menu anchored beside the Shortcuts filter.
     ShortcutMenu,
     /// Confirmation for forgetting the app-owned shortcut layer.
@@ -391,6 +471,10 @@ pub struct Panel {
     /// (label, placeholder) for each input.
     pub fields: Vec<(String, String)>,
     pub selected: usize,
+    /// The row the keyboard points at, while it has an identity of its own (`Entry::id`) and
+    /// `selected` is still where the keyboard left it: a rebuilt list keeps the selection on
+    /// that row, and Enter runs it, whatever position it now has.
+    pub row: Option<(usize, String)>,
     /// Scroll the keyboard selection into view on the next commit.
     pub reveal: bool,
     pub server_refresh: Option<std::time::Instant>,
@@ -398,6 +482,9 @@ pub struct Panel {
     pub error: Option<String>,
     pub target: Option<PaneTarget>,
     pub session: Option<SessionTarget>,
+    /// Opening intent shared by the pane menu, layer submenu and close confirmation.
+    pub layer: Option<LayerTarget>,
+    pub layer_invalid: bool,
     /// The tab a tab menu, its rename form or its close confirmations act on.
     pub tab: Option<TabTarget>,
     pub back: Option<Box<Panel>>,
@@ -427,12 +514,15 @@ impl Panel {
                 .map(|(l, p, _)| ((*l).into(), (*p).into()))
                 .collect(),
             selected: 0,
+            row: None,
             reveal: false,
             server_refresh: None,
             stop_server: None,
             error: None,
             target: None,
             session: None,
+            layer: None,
+            layer_invalid: false,
             tab: None,
             back: None,
             anchor: None,
@@ -448,6 +538,7 @@ impl Panel {
                 | PanelKind::Picker(_)
                 | PanelKind::Hosts(_)
                 | PanelKind::Pane
+                | PanelKind::Layer
                 | PanelKind::Session
                 | PanelKind::Host(_)
                 | PanelKind::Window
@@ -463,6 +554,9 @@ impl Panel {
 }
 
 pub struct Entry {
+    /// The row's own identity across a rebuild, where the list has one (`Command.id`): a
+    /// host wake that reorders the list finds the same row by this, not by its position.
+    pub id: Option<std::borrow::Cow<'static, str>>,
     pub label: String,
     pub detail: String,
     pub action: Intent,
@@ -496,6 +590,7 @@ impl Entry {
         action: Intent,
     ) -> Self {
         Self {
+            id: None,
             label: label.into(),
             detail: detail.into(),
             group: group.into(),
@@ -613,6 +708,23 @@ impl Workspace {
                     "Review first",
                     "",
                     Intent::StartSsh(host),
+                )
+                .in_section(1),
+            );
+        }
+        if self.can_check_key(host).is_some() {
+            entries.push(
+                Entry::new("Check host key…", "Review first", "", Intent::HostKey(host))
+                    .in_section(1),
+            );
+        }
+        if self.can_install_ssh(host) {
+            entries.push(
+                Entry::new(
+                    "Install Rex on this host…",
+                    "Review first",
+                    "",
+                    Intent::InstallSsh(host),
                 )
                 .in_section(1),
             );
@@ -829,6 +941,54 @@ impl Workspace {
             }
             return entries;
         }
+        // The floating-layer menu: one verb per row, for the layer the root menu captured.
+        // Rebuilding the list and Enter both validate that same snapshot, so a pane another
+        // client moved to another tab, or a new connection, is refused rather than retargeted.
+        // A verb that cannot run now says why in its hint column.
+        if matches!(panel.kind, PanelKind::Layer) {
+            let Some(layer) = panel.layer.clone() else {
+                return Vec::new();
+            };
+            let mut entries = Vec::new();
+            let mut rows: Vec<(&str, u8, LayerAction)> = Vec::new();
+            let live = self.current_layer(&layer);
+            let floating = live.map(layers::floating).unwrap_or(layer.floating);
+            let minimized = live.map(layers::minimized).unwrap_or(layer.minimized);
+            if !floating {
+                rows.push(("Float pane", 0, LayerAction::Float));
+            }
+            rows.push(("New floating pane", 0, LayerAction::NewFloating));
+            if floating {
+                rows.extend([
+                    ("Minimize layer", 1, LayerAction::Minimize),
+                    (
+                        if minimized {
+                            "Restore layer"
+                        } else {
+                            "Focus layer"
+                        },
+                        1,
+                        LayerAction::Focus,
+                    ),
+                    ("Bring layer to front", 1, LayerAction::Raise),
+                    ("Return pane to tiles", 2, LayerAction::ReturnToTiles),
+                    ("Close floating layer…", 3, LayerAction::Close),
+                ]);
+            }
+            for (label, section, action) in rows {
+                let blocked = self.layer_blocked(Some(&layer), action);
+                let mut entry = Entry::new(label, "", "", Intent::Layer(layer.clone(), action))
+                    .in_section(section);
+                entry.danger = matches!(action, LayerAction::Close);
+                entry.enabled = blocked.is_none();
+                entry.detail = blocked.map(layers::Blocked::hint).unwrap_or_default();
+                entries.push(entry);
+            }
+            // The same effective-keymap hints Commands shows, through the one formatter: a row
+            // with no binding keeps the words it already has.
+            self.shortcut_details(&mut entries);
+            return entries;
+        }
         let sessions_only = matches!(panel.kind, PanelKind::Picker(true));
         let pane_only = matches!(panel.kind, PanelKind::Pane);
         if !matches!(panel.kind, PanelKind::Picker(_) | PanelKind::Pane) {
@@ -881,6 +1041,26 @@ impl Workspace {
                 entry.danger = matches!(action, PaneAction::Close);
                 entry.enabled = self.pane_verb_available(&target, action);
                 entries.push(entry);
+            }
+            // The opening capture decides whether this row exists. Disabling it in place
+            // keeps Close pane from sliding into its keyboard position on a host wake.
+            if let Some(layer) = &panel.layer {
+                let blocked = self.layer_root_blocked(panel, layer);
+                let mut entry = Entry::new(
+                    "Floating layer…",
+                    blocked.map(layers::Blocked::hint).unwrap_or_default(),
+                    "",
+                    Intent::LayerMenu(layer.clone()),
+                )
+                .in_section(1);
+                entry.enabled = blocked.is_none();
+                entry.followup = true;
+                // Above the menu's destructive rows, which stay last.
+                let at = entries
+                    .iter()
+                    .position(|e| e.danger)
+                    .unwrap_or(entries.len());
+                entries.insert(at, entry);
             }
         }
         // A typed switcher query names a new session wherever it is created.
@@ -1046,8 +1226,9 @@ impl Workspace {
             };
             if let Some((name, args)) = shortcut {
                 let keys = self.shortcut_chords(name, &args);
-                // A pointer hint (Mouse Back) stays until the action is given a key.
-                if keys.is_empty() && entry.detail.starts_with("Mouse ") {
+                // An unbound action leaves the row's own words alone: a pointer hint (Mouse
+                // Back) or the reason the row cannot run now.
+                if keys.is_empty() {
                     continue;
                 }
                 entry.detail = super::keycaps::spell(&keys);

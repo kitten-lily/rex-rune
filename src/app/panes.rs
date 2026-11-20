@@ -797,6 +797,24 @@ fn empty(s: &Workspace) -> El {
             32.,
             move |s, tx| s.perform(Intent::StartSsh(host), tx),
         )
+    } else if s.can_install_ssh(s.active) {
+        let host = s.active;
+        pill(
+            "offer-ssh-install",
+            "Install Rex on this host…",
+            Pill::Neutral,
+            32.,
+            move |s, tx| s.perform(Intent::InstallSsh(host), tx),
+        )
+    } else if s.can_check_key(s.active).is_some() {
+        let host = s.active;
+        pill(
+            "offer-ssh-key",
+            "Check host key…",
+            Pill::Neutral,
+            32.,
+            move |s, tx| s.perform(Intent::HostKey(host), tx),
+        )
     } else {
         el()
     };
@@ -839,7 +857,10 @@ fn target_block(s: &Workspace) -> Option<String> {
     let panel = s.panel.as_ref()?;
     matches!(
         panel.kind,
-        PanelKind::Pane | PanelKind::Form(Form::RenamePane(_)) | PanelKind::Confirm { .. }
+        PanelKind::Pane
+            | PanelKind::Layer
+            | PanelKind::Form(Form::RenamePane(_))
+            | PanelKind::Confirm { .. }
     )
     .then(|| panel.target.as_ref().map(|t| t.block.clone()))
     .flatten()

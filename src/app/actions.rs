@@ -50,6 +50,13 @@ enum Handler {
     ZoomPane,
     FocusPane,
     PaneActions,
+    FloatPane,
+    NewFloatingPane,
+    MinimizeLayer,
+    RestoreLayer,
+    RaiseLayer,
+    ReturnToTiles,
+    CloseLayer,
     Copy,
     Paste,
     Reconnect,
@@ -133,6 +140,13 @@ specs! {
     "pane.zoom" => ZoomPane,
     "pane.focus" => FocusPane,
     "pane.actions" => PaneActions,
+    "pane.float" => FloatPane,
+    "pane.new_floating" => NewFloatingPane,
+    "pane.minimize_layer" => MinimizeLayer,
+    "pane.restore_layer" => RestoreLayer,
+    "pane.raise_layer" => RaiseLayer,
+    "pane.return_to_tiles" => ReturnToTiles,
+    "pane.close_layer" => CloseLayer,
     "pane.copy" => Copy,
     "pane.paste" => Paste,
     "pane.reconnect" => Reconnect,
@@ -251,6 +265,14 @@ impl Spec {
             NewTab => Remote::Never("Use rex window new instead."),
             Split => Remote::Never("Use rex split instead."),
             Close | ClosePane => Remote::Never("Use rex block close instead."),
+            FloatPane => Remote::Never("Use rex api call session.float_block instead."),
+            NewFloatingPane => Remote::Never("Use rex api call session.new_layer instead."),
+            MinimizeLayer | RestoreLayer => {
+                Remote::Never("Use rex api call session.set_layer_state instead.")
+            }
+            RaiseLayer => Remote::Never("Use rex api call session.raise_layer instead."),
+            ReturnToTiles => Remote::Never("Use rex api call session.move_block instead."),
+            CloseLayer => Remote::Never("Use rex api call session.close_layer instead."),
             CloseTab | CloseOtherTabs => Remote::Never("Use rex window close instead."),
             MoveTab => Remote::Never("Use rex window move instead."),
             MuteTab => Remote::Never(
@@ -409,6 +431,13 @@ impl Spec {
             Handler::ZoomPane => "Zoom pane",
             Handler::FocusPane => "Focus pane",
             Handler::PaneActions => "Pane actions",
+            Handler::FloatPane => "Float pane",
+            Handler::NewFloatingPane => "New floating pane",
+            Handler::MinimizeLayer => "Minimize floating layer",
+            Handler::RestoreLayer => "Restore and focus floating layer",
+            Handler::RaiseLayer => "Bring floating layer to front",
+            Handler::ReturnToTiles => "Return pane to tiles",
+            Handler::CloseLayer => "Close floating layer",
             Handler::Copy => "Copy selection",
             Handler::Paste => "Paste",
             Handler::Reconnect => "Reconnect terminal",
@@ -511,7 +540,14 @@ impl Spec {
             | Handler::ClearTerminal
             | Handler::ResetTerminal
             | Handler::FocusNextPane
-            | Handler::FocusPreviousPane => "Panes",
+            | Handler::FocusPreviousPane
+            | Handler::FloatPane
+            | Handler::NewFloatingPane
+            | Handler::MinimizeLayer
+            | Handler::RestoreLayer
+            | Handler::RaiseLayer
+            | Handler::ReturnToTiles
+            | Handler::CloseLayer => "Panes",
             Handler::Copy
             | Handler::Paste
             | Handler::SelectAll
@@ -677,6 +713,25 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             if let Some(block) = s.focused_block() {
                 s.pane_menu(block, None);
             }
+        }
+        Handler::FloatPane
+        | Handler::NewFloatingPane
+        | Handler::MinimizeLayer
+        | Handler::RestoreLayer
+        | Handler::RaiseLayer
+        | Handler::ReturnToTiles
+        | Handler::CloseLayer => {
+            use super::panel::LayerAction;
+            let verb = match spec.handler {
+                Handler::FloatPane => LayerAction::Float,
+                Handler::NewFloatingPane => LayerAction::NewFloating,
+                Handler::MinimizeLayer => LayerAction::Minimize,
+                Handler::RestoreLayer => LayerAction::Focus,
+                Handler::RaiseLayer => LayerAction::Raise,
+                Handler::ReturnToTiles => LayerAction::ReturnToTiles,
+                _ => LayerAction::Close,
+            };
+            s.focused_layer_action(verb);
         }
         Handler::Copy => {
             if let Some(text) = s.active_terminal().and_then(|t| t.copy_text()) {

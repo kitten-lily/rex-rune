@@ -13,15 +13,130 @@ use std::{
 };
 use tokio::io::AsyncReadExt;
 
+pub mod hostkey;
+pub mod install;
 pub mod setup;
 
-/// Socket discovery succeeded over SSH, but found no server. Authentication and
-/// transport failures deliberately do not carry this opt-in setup signal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyProblem {
+    Unknown,
+    Changed,
+}
+
+impl std::fmt::Display for KeyProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unknown => "SSH host key not trusted. Choose Check host key… before connecting.",
+            Self::Changed => {
+                "SSH host key changed. Connection refused. Choose Check host key… for details."
+            }
+        })
+    }
+}
+
+impl std::error::Error for KeyProblem {}
+
+fn key_problem(stderr: &str) -> Option<KeyProblem> {
+    if stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+        || stderr.contains("REVOKED HOST KEY DETECTED")
+        || stderr.contains("POSSIBLE DNS SPOOFING DETECTED")
+        || stderr.lines().any(|line| {
+            line.starts_with("Host key for ")
+                && line.ends_with("has changed and you have requested strict checking.")
+        })
+    {
+        Some(KeyProblem::Changed)
+    } else if stderr
+        .lines()
+        .any(|line| line.starts_with("Certificate invalid:"))
+    {
+        None
+    } else if stderr.lines().any(|line| {
+        line.starts_with("No ")
+            && line.contains(" host key is known for ")
+            && line.ends_with("and you have requested strict checking.")
+    }) {
+        Some(KeyProblem::Unknown)
+    } else {
+        None
+    }
+}
+
+/// Facts from the last line of the read-only remote lookup. Legacy replies carry
+/// only the user; an unknown OS or uid cannot authorize an installation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Facts {
+    pub user: String,
+    pub os: String,
+    pub uid: Option<u32>,
+    pub rex: bool,
+}
+
+impl Facts {
+    fn parse(line: &str) -> Result<Self> {
+        let fields: Vec<_> = line.split_ascii_whitespace().collect();
+        match fields.as_slice() {
+            [user, os, uid, rex @ ("rex" | "norex")] => Ok(Self {
+                user: (*user).into(),
+                os: (*os).into(),
+                uid: Some(uid.parse()?),
+                rex: *rex == "rex",
+            }),
+            [user] => Ok(Self {
+                user: (*user).into(),
+                os: String::new(),
+                uid: None,
+                rex: false,
+            }),
+            _ => bail!("The SSH host did not report usable setup facts."),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Problem {
+    NoServer(Facts),
+    UnknownKey,
+    ChangedKey,
+}
+
+impl Problem {
+    pub fn from_error(error: &anyhow::Error) -> Option<Self> {
+        if let Some(missing) = error.downcast_ref::<MissingServer>() {
+            return Some(Self::NoServer(missing.facts.clone()));
+        }
+        match error.downcast_ref::<KeyProblem>()? {
+            KeyProblem::Unknown => Some(Self::UnknownKey),
+            KeyProblem::Changed => Some(Self::ChangedKey),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupOffer {
+    Start,
+    Install,
+    Key,
+}
+
+impl SetupOffer {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start personal server…",
+            Self::Install => "Install Rex on this host…",
+            Self::Key => "Check host key…",
+        }
+    }
+}
+
 #[derive(Debug)]
-pub struct MissingServer(pub String);
+pub struct MissingServer {
+    pub facts: Facts,
+    message: String,
+}
 impl std::fmt::Display for MissingServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for MissingServer {}
@@ -115,17 +230,36 @@ impl Target {
         out
     }
 
-    fn missing_server_message(&self, user: &str) -> String {
-        let install_target = Target {
-            socket: None,
-            ..self.clone()
+    pub fn setup_offer(&self, problem: &Problem) -> Option<SetupOffer> {
+        match problem {
+            Problem::UnknownKey | Problem::ChangedKey => Some(SetupOffer::Key),
+            Problem::NoServer(facts) if self.socket.is_none() && facts.rex => {
+                Some(SetupOffer::Start)
+            }
+            Problem::NoServer(facts)
+                if self.socket.is_none()
+                    && facts.os == "Linux"
+                    && facts.uid.is_some_and(|uid| uid != 0) =>
+            {
+                Some(SetupOffer::Install)
+            }
+            _ => None,
         }
-        .endpoint()
-        .replace('\'', "'\\''");
-        format!(
-            "No Rex server found on {} for {user}: nothing in {user}'s runtime directory, /run/rex or /var/run/rex. Attachment never starts a server. Choose Start personal server… to review a one-time start, or run rex server install '{install_target}' yourself (Rex preview.14 or newer; asks before changes). If a server already runs elsewhere, name its socket in the SSH endpoint.",
+    }
+
+    fn missing_server(&self, facts: Facts) -> MissingServer {
+        let user = &facts.user;
+        let guide = match self.setup_offer(&Problem::NoServer(facts.clone())) {
+            Some(offer @ (SetupOffer::Start | SetupOffer::Install)) => {
+                format!("Choose {} to review setup.", offer.label())
+            }
+            _ => "Set up Rex on the host by hand; see docs/hosts.md.".into(),
+        };
+        let message = format!(
+            "No Rex server found on {} for {user}: nothing in {user}'s runtime directory, /run/rex or /var/run/rex. Attachment never starts a server. {guide} If a server already runs elsewhere, name its socket in the SSH endpoint.",
             self.host
-        )
+        );
+        MissingServer { facts, message }
     }
 
     /// The host as a URL writes it: an IPv6 address in brackets.
@@ -145,13 +279,24 @@ impl Target {
         }
     }
 
-    /// The options every `ssh` run uses: never prompt, trust a machine's key the first time
-    /// (and refuse a changed one), notice a dead link within a minute, and keep clear of a
+    /// The options every `ssh` run uses: never prompt or update known hosts, refuse unknown
+    /// and changed keys, notice a dead link within a minute, and keep clear of a
     /// `ControlMaster` in the user's configuration, which would take the forward over and keep
     /// it after this `ssh` ends, so the next forward of that path never listens. Logging stays
     /// at its default so a server's banner (how Tailscale SSH explains a refused login) is
     /// seen.
     fn options(&self) -> Vec<String> {
+        let mut args = self.config_options();
+        args.extend([
+            "-o".into(),
+            "StrictHostKeyChecking=yes".into(),
+            "-o".into(),
+            "UpdateHostKeys=no".into(),
+        ]);
+        args
+    }
+
+    fn config_options(&self) -> Vec<String> {
         let mut args = vec![
             "-o".into(),
             "ControlMaster=no".into(),
@@ -161,8 +306,6 @@ impl Target {
             "BatchMode=yes".into(),
             "-o".into(),
             "ConnectTimeout=10".into(),
-            "-o".into(),
-            "StrictHostKeyChecking=accept-new".into(),
             "-o".into(),
             "ServerAliveInterval=15".into(),
             "-o".into(),
@@ -197,8 +340,8 @@ fn tunnels_directory() -> PathBuf {
 /// reports, the login user's own server in the runtime directory (Linux) or under
 /// Application Support (macOS), then a shared server's `/run/rex/server.sock` or FreeBSD's
 /// `/var/run/rex/server.sock`. Prints `sock <path>` for the first that is a socket, else
-/// `none <user>`. It is wrapped in `sh -c '…'`, so it holds no single quote.
-const RESOLVE: &str = "p=\"\"; for c in \"$(rex server status --autostart=false 2>/dev/null | grep -o \"unix:///[^[:space:]]*\\.sock\" | head -n 1 | sed \"s#^unix://##\")\" \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rex/server.sock\" \"$HOME/Library/Application Support/rex/server.sock\" /run/rex/server.sock /var/run/rex/server.sock; do if [ -n \"$c\" ] && [ -S \"$c\" ]; then p=\"$c\"; break; fi; done; if [ -n \"$p\" ]; then printf \"sock %s\\n\" \"$p\"; else printf \"none %s\\n\" \"$(id -un)\"; fi";
+/// `none <user> <os> <uid> <rex|norex>`. Wrapped in `sh -c '…'`, so no single quotes.
+const RESOLVE: &str = r#"p=""; for c in "$(rex server status --autostart=false 2>/dev/null | grep -o "unix:///[^[:space:]]*\.sock" | head -n 1 | sed "s#^unix://##")" "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rex/server.sock" "$HOME/Library/Application Support/rex/server.sock" /run/rex/server.sock /var/run/rex/server.sock; do if [ -n "$c" ] && [ -S "$c" ]; then p="$c"; break; fi; done; if [ -n "$p" ]; then printf "sock %s\n" "$p"; else r=norex; if command -v rex >/dev/null 2>&1 || [ -x "$HOME/.local/bin/rex" ]; then r=rex; fi; printf "none %s %s %s %s\n" "$(id -un)" "$(uname -s)" "$(id -u)" "$r"; fi"#;
 
 /// The check for a socket the user named: `sock <path>` when it is one, else `missing <path>`.
 fn check_script(socket: &str) -> String {
@@ -266,7 +409,7 @@ impl Tunnel {
         let started = std::time::Instant::now();
         loop {
             if let Some(status) = tunnel.child.try_wait()? {
-                bail!("{}", tunnel.exit_message(status));
+                return Err(tunnel.exit_error(status));
             }
             if crate::platform::local::connect(&tunnel.local).await.is_ok() {
                 return Ok(tunnel);
@@ -304,9 +447,17 @@ impl Tunnel {
     /// Resolves once the forward ends, with why.
     pub async fn closed(&mut self) -> anyhow::Error {
         match self.child.wait().await {
-            Ok(status) => anyhow::anyhow!("{}", self.exit_message(status)),
+            Ok(status) => self.exit_error(status),
             Err(error) => anyhow::Error::from(error).context("waiting for ssh"),
         }
+    }
+
+    fn exit_error(&self, status: std::process::ExitStatus) -> anyhow::Error {
+        let problem = key_problem(&self.stderr.lock().expect("ssh stderr"));
+        problem.map_or_else(
+            || anyhow::anyhow!("{}", self.exit_message(status)),
+            Into::into,
+        )
     }
 
     fn exit_message(&self, status: std::process::ExitStatus) -> String {
@@ -387,40 +538,18 @@ fn ssh_error(error: std::io::Error) -> anyhow::Error {
 
 /// Ask the other machine where its Rex server listens, or whether the socket the user named
 /// is there.
-async fn resolve(target: &Target) -> Result<String> {
-    let script = match &target.socket {
-        Some(socket) => check_script(socket),
-        None => RESOLVE.to_owned(),
-    };
-    let output = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new("ssh")
-            .args(target.options())
-            .arg("--")
-            .arg(target.destination())
-            .arg(format!("sh -c '{script}'"))
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .with_context(|| format!("ssh {} did not answer", target.destination()))?
-    .map_err(ssh_error)?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        bail!(
-            "ssh {}: {}",
-            target.destination(),
-            last_line(&stderr).unwrap_or_else(|| format!("exited ({})", output.status))
-        );
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+pub async fn resolve(target: &Target) -> Result<String> {
+    resolve_with(target, std::ffi::OsStr::new("ssh")).await
+}
+
+async fn resolve_with(target: &Target, ssh: &std::ffi::OsStr) -> Result<String> {
+    let (stdout, stderr) = lookup(target, ssh).await?;
     enum Answer {
         Sock(String),
         None(String),
         Missing(String),
     }
-    let answer = stdout.lines().find_map(|l| {
+    let answer = stdout.lines().rev().find_map(|l| {
         l.strip_prefix("sock ")
             .map(|p| Answer::Sock(p.to_owned()))
             .or_else(|| {
@@ -434,7 +563,7 @@ async fn resolve(target: &Target) -> Result<String> {
     });
     match answer {
         Some(Answer::Sock(path)) => Ok(path),
-        Some(Answer::None(user)) => Err(MissingServer(target.missing_server_message(&user)).into()),
+        Some(Answer::None(line)) => Err(target.missing_server(Facts::parse(&line)?).into()),
         Some(Answer::Missing(path)) => bail!(
             "{path} on {} is not a socket. Is Rex running there?",
             target.host
@@ -447,10 +576,96 @@ async fn resolve(target: &Target) -> Result<String> {
     }
 }
 
+async fn lookup(target: &Target, ssh: &std::ffi::OsStr) -> Result<(String, String)> {
+    crate::platform::local::require_ssh()?;
+    let script = match &target.socket {
+        Some(socket) => check_script(socket),
+        None => RESOLVE.to_owned(),
+    };
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new(ssh)
+            .args(target.options())
+            .arg("--")
+            .arg(target.destination())
+            .arg(format!("sh -c '{script}'"))
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("ssh {} did not answer", target.destination()))?
+    .map_err(ssh_error)?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        if let Some(problem) = key_problem(&stderr) {
+            return Err(problem.into());
+        }
+        bail!(
+            "ssh {}: {}",
+            target.destination(),
+            last_line(&stderr).unwrap_or_else(|| format!("exited ({})", output.status))
+        );
+    }
+    Ok((
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr.into_owned(),
+    ))
+}
+
 // Tunnel fixtures execute Unix shells and depend on Unix socket paths.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_key_errors_are_classified_and_change_takes_priority() {
+        assert_eq!(
+            key_problem(
+                "No ED25519 host key is known for box and you have requested strict checking.\nHost key verification failed."
+            ),
+            Some(KeyProblem::Unknown)
+        );
+        assert_eq!(
+            key_problem(
+                "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.\n"
+            ),
+            Some(KeyProblem::Changed)
+        );
+        for (stderr, expected) in [
+            ("Host key verification failed.\r\n", None),
+            (
+                "WARNING: POSSIBLE DNS SPOOFING DETECTED!\nHost key verification failed.\n",
+                Some(KeyProblem::Changed),
+            ),
+            (
+                "Host key for box has changed and you have requested strict checking.\nHost key verification failed.\n",
+                Some(KeyProblem::Changed),
+            ),
+            (
+                "Certificate invalid: name is not a listed principal\nHost key verification failed.\n",
+                None,
+            ),
+            (
+                "Certificate invalid: expired\nNo ED25519 host key is known for box and you have requested strict checking.\nHost key verification failed.\n",
+                None,
+            ),
+        ] {
+            assert_eq!(key_problem(stderr), expected, "{stderr:?}");
+        }
+        assert_eq!(key_problem("box: Permission denied (publickey)."), None);
+        assert_eq!(
+            key_problem("ssh: connect to host box port 22: Connection refused"),
+            None
+        );
+        assert!(
+            Target::parse("ssh://box")
+                .unwrap()
+                .unwrap()
+                .options()
+                .contains(&"StrictHostKeyChecking=yes".into())
+        );
+    }
 
     #[test]
     fn targets_parse_and_print() {
@@ -513,26 +728,36 @@ mod tests {
     }
 
     #[test]
-    fn missing_server_hint_preserves_ssh_config_user_port_and_ipv6() {
-        for endpoint in [
-            "ssh://work-alias",
-            "ssh://ops@box:2222",
-            "ssh://me@[fd7a::1]:22",
+    fn facts_from_current_and_legacy_replies_guide_setup() {
+        let target = Target::parse("ssh://ops@box:2222").unwrap().unwrap();
+        for (last, expected) in [
+            ("ops Linux 1000 norex", Some(SetupOffer::Install)),
+            ("ops Linux 0 norex", None),
+            ("ops Darwin 1000 norex", None),
+            ("ops FreeBSD 1000 rex", Some(SetupOffer::Start)),
+            ("ops", None),
         ] {
-            let target = Target::parse(endpoint).unwrap().unwrap();
-            let message = target.missing_server_message("remote-user");
-            assert!(message.contains(&format!("rex server install '{endpoint}'")));
+            let facts = Facts::parse(last).unwrap();
+            assert_eq!(facts.user, "ops");
+            assert_eq!(
+                target.setup_offer(&Problem::NoServer(facts.clone())),
+                expected
+            );
+            let message = target.missing_server(facts).to_string();
             assert!(message.contains("Attachment never starts a server"));
-            assert!(message.contains("asks before changes"));
+            assert!(message.contains(expected.map_or("docs/hosts.md", SetupOffer::label)));
         }
-        let target = Target::parse("ssh://box/path/to/server.sock")
-            .unwrap()
-            .unwrap();
-        assert!(
-            target
-                .missing_server_message("me")
-                .contains("rex server install 'ssh://box'")
+        assert_eq!(
+            Facts::parse("me Linux 1009 rex").unwrap(),
+            Facts {
+                user: "me".into(),
+                os: "Linux".into(),
+                uid: Some(1009),
+                rex: true
+            }
         );
+        assert!(Facts::parse("ops Linux -1 norex").is_err());
+        assert!(Facts::parse("ops Linux 1000 maybe").is_err());
     }
 
     #[test]
@@ -567,7 +792,8 @@ mod tests {
             .spawn()
             .unwrap();
         let target = Target::parse("ssh://me@box").unwrap().unwrap();
-        let local = std::env::temp_dir().join(format!("rex-tunnel-{}.sock", std::process::id()));
+        let temp = tempfile::tempdir().unwrap();
+        let local = temp.path().join("rex-tunnel.sock");
         let mut tunnel = Tunnel::adopt(child, &target, local);
         assert!(
             tokio::time::timeout(Duration::from_millis(300), tunnel.closed())

@@ -177,6 +177,7 @@ fn commands_keep_destructive_rows_last_and_a_filtered_list_is_flat() {
             "Close pane or tab…",
             "Close other panes…",
             "Close pane…",
+            "Close floating layer…",
             "Stop server…",
             "Remove host test-0…",
         ]

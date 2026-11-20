@@ -16,11 +16,11 @@
 use super::{
     about::{self, REPOSITORY},
     actions, find, help, keycaps, pane_header,
-    panel::{Entry, Intent, PaneAction, SessionAction, SessionTarget},
+    panel::{Entry, Intent, LayerAction, PaneAction, SessionAction, SessionTarget},
     splits::SplitWay,
     workspace::Workspace,
 };
-use rex_rune::{connection::HostCommand, settings::PaneDensity};
+use rex_rune::{connection::HostCommand, layers, settings::PaneDensity};
 use rune::Tx;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -571,6 +571,76 @@ impl Workspace {
             .keywords("maximize unzoom")
             .section(2),
         );
+        // Floating layers: each row changes one thing on the pane's or tab's layer, and its hint
+        // column says why when it can't. A minimized layer is listed by name here, so it can be
+        // restored without its hidden pane's menu. Every verb is unbound by default; the pane
+        // menu offers the same ones for the pane it names.
+        let focused_layer = self.focused_layer();
+        let layer_row = |id: &'static str, label: &'static str, action: LayerAction| {
+            let blocked = self.layer_blocked(focused_layer.as_ref(), action);
+            Command::action(id, G, label, action.name())
+                .detail(blocked.map(layers::Blocked::hint).unwrap_or_default())
+                .enabled(blocked.is_none())
+                .section(2)
+        };
+        rows.extend([
+            layer_row("pane.float", "Float pane", LayerAction::Float)
+                .keywords("detach window front"),
+            layer_row(
+                "pane.new_floating",
+                "New floating pane",
+                LayerAction::NewFloating,
+            )
+            .keywords("create new"),
+            layer_row(
+                "pane.minimize_layer",
+                "Minimize floating layer",
+                LayerAction::Minimize,
+            )
+            .keywords("hide"),
+            layer_row(
+                "pane.restore_layer",
+                "Restore and focus floating layer",
+                LayerAction::Focus,
+            )
+            .keywords("show raise"),
+            layer_row(
+                "pane.raise_layer",
+                "Bring floating layer to front",
+                LayerAction::Raise,
+            )
+            .keywords("stack order"),
+            layer_row(
+                "pane.return_to_tiles",
+                "Return pane to tiles",
+                LayerAction::ReturnToTiles,
+            )
+            .keywords("dock tile tiled anchor"),
+        ]);
+        for target in self.floating_layer_targets() {
+            let blocked = self.layer_blocked(Some(&target), LayerAction::Focus);
+            let label = if target.minimized {
+                format!("Restore {}", target.name)
+            } else {
+                format!("Show {}", target.name)
+            };
+            let detail = match blocked {
+                Some(blocked) => blocked.hint(),
+                None if target.minimized => "Minimized, still running".into(),
+                None if target.panes.len() > 1 => format!("{} panes", target.panes.len()),
+                None => String::new(),
+            };
+            rows.push(
+                Command::row(
+                    format!("pane.layer.{}", target.layer),
+                    G,
+                    Entry::new(label, "", "", Intent::Layer(target, LayerAction::Focus)),
+                )
+                .detail(detail)
+                .enabled(blocked.is_none())
+                .section(2),
+            );
+        }
         rows.extend(
             [
                 "pane.focus.next",
@@ -671,6 +741,19 @@ impl Workspace {
             )
             .destructive(),
             pane("pane.close", "Close pane…", PaneAction::Close).destructive(),
+            {
+                let blocked = self.layer_blocked(focused_layer.as_ref(), LayerAction::Close);
+                Command::action(
+                    "pane.close_layer",
+                    G,
+                    "Close floating layer…",
+                    "pane.close_layer",
+                )
+                .keywords("remove end")
+                .detail(blocked.map(layers::Blocked::hint).unwrap_or_default())
+                .enabled(blocked.is_none())
+                .destructive()
+            },
         ]);
         rows
     }
@@ -717,6 +800,28 @@ impl Workspace {
                     G,
                     "Start personal server…",
                     Intent::StartSsh(host),
+                )
+                .detail(name.clone()),
+            );
+        }
+        if self.can_check_key(host).is_some() {
+            rows.push(
+                Command::new(
+                    "host.check_key",
+                    G,
+                    "Check host key…",
+                    Intent::HostKey(host),
+                )
+                .detail(name.clone()),
+            );
+        }
+        if self.can_install_ssh(host) {
+            rows.push(
+                Command::new(
+                    "host.install_rex",
+                    G,
+                    "Install Rex on this host…",
+                    Intent::InstallSsh(host),
                 )
                 .detail(name.clone()),
             );
@@ -1083,6 +1188,7 @@ impl Workspace {
                 .map(|mut command| {
                     (command.entry.group, command.entry.group_name) =
                         self.group_heading(command.group);
+                    command.entry.id = Some(command.id);
                     command.entry
                 })
                 .collect();
@@ -1092,6 +1198,7 @@ impl Workspace {
             .filter_map(|mut command| {
                 let rank = command.rank(&query)?;
                 command.entry.group = "Commands".into();
+                command.entry.id = Some(command.id);
                 Some((rank, command.entry))
             })
             .collect();

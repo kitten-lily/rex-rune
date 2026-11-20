@@ -240,7 +240,7 @@ pub fn list_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
             && space(ev, tx)
             && s.panel
                 .as_ref()
-                .is_some_and(|p| matches!(p.kind, PanelKind::Pane)) =>
+                .is_some_and(|p| matches!(p.kind, PanelKind::Pane | PanelKind::Layer)) =>
         {
             s.close_panel(tx)
         }
@@ -286,6 +286,13 @@ pub fn on_key(s: &mut Workspace, ev: &KeyEvent, tx: &mut Tx) -> bool {
     use super::platform::keys::{WindowMenuKey, window_menu_key};
     let window_key = window_menu_key(&ev.key, ev.mods);
     if let Some(panel) = &s.panel {
+        if matches!(panel.kind, PanelKind::InstallSsh { .. })
+            && ev.key == Key::Enter
+            && ev.mods == rune::Mods::default()
+        {
+            s.install_enter(tx);
+            return true;
+        }
         // The system's Close would fall through to the window and quit Rex: with a popup
         // or Settings open, Command+W closes that instead.
         if window_key == Some(WindowMenuKey::Close) {
