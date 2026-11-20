@@ -5364,6 +5364,36 @@ fn a_hidden_host_is_still_retried_from_find_a_session_and_the_identity_menu() {
 }
 
 #[test]
+fn a_second_click_where_the_x_was_does_not_reach_the_host_that_moved_up() {
+    let mut ws = workspace_hosts(3);
+    let rx1 = capture_host(&mut ws, 1);
+    ws.hosts[1].model.connected = true;
+    ws.settings.hosts[0].collapsed = true;
+    ws.settings.hosts[1].collapsed = true;
+    ws.sidebar.toggle();
+    let mut rt = runtime(ws);
+    let was = rect(&rt, "host-hide:0");
+    click(&mut rt, "host-hide:0");
+    settle(&mut rt);
+    assert_eq!(
+        rect(&rt, "host-new-session:1"),
+        was,
+        "the next host's + is now under the pointer"
+    );
+    click(&mut rt, "host-new-session:1");
+    assert!(creates(&rx1).is_empty(), "the double-click created nothing");
+    click(&mut rt, "host-hide:2");
+    assert!(
+        !rt.state.settings.hosts[2].hidden_offline,
+        "nor hid another host"
+    );
+    // A moment later the same buttons work.
+    rt.update(|s, _| s.host_hidden_at = None);
+    click(&mut rt, "host-new-session:1");
+    assert_eq!(creates(&rx1).len(), 1);
+}
+
+#[test]
 fn commands_offer_activity() {
     use rex_rune::settings::SidebarMode;
     let mut ws = workspace();

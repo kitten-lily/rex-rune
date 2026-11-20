@@ -62,7 +62,10 @@ fn host_header(s: &Workspace, index: usize) -> El {
             .preserve_focus_on_press(true)
             .tab_index(-1)
             .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                s.create_session(index, None, tx);
+                // Not for the second click of a double-click on the × that was just here.
+                if !s.host_just_hidden() {
+                    s.create_session(index, None, tx);
+                }
                 tx.blur();
             })
             .child(glyph(&PLUS, 13., rgb(muted())))
@@ -81,7 +84,11 @@ fn host_header(s: &Workspace, index: usize) -> El {
             .preserve_focus_on_press(true)
             .tab_index(-1)
             .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-                s.hide_offline_host(index);
+                // The next host's button moves under the pointer; see `host_just_hidden`.
+                if !s.host_just_hidden() {
+                    s.hide_offline_host(index);
+                    s.host_hidden_at = Some(std::time::Instant::now());
+                }
                 tx.blur();
             })
             .child(glyph(&CLOSE, 13., rgb(muted())))

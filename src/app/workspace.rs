@@ -77,6 +77,9 @@ pub struct Workspace {
     next_notice: u64,
     zoom_notice: Option<u64>,
     pub drag: Option<DividerDrag>,
+    /// When the sidebar's × last hid a host. The list closes up under the pointer, so for a
+    /// moment the header buttons ignore a press: the second click of a double-click.
+    pub host_hidden_at: Option<std::time::Instant>,
     /// Keys whose press went to a terminal; only their releases follow.
     pub forwarded: HashSet<super::bindings::Identity>,
     pub bindings: super::bindings::State,
@@ -289,6 +292,7 @@ impl Workspace {
             next_notice: 0,
             zoom_notice: None,
             drag: None,
+            host_hidden_at: None,
             forwarded: HashSet::new(),
             bindings: Default::default(),
             local_keymap,
@@ -1465,6 +1469,13 @@ impl Workspace {
             },
             tx,
         );
+    }
+
+    /// Whether a host's group has only just left the sidebar from under the pointer, so a
+    /// press on a header button is the tail of a double-click on the ×, not a choice.
+    pub fn host_just_hidden(&self) -> bool {
+        self.host_hidden_at
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(400))
     }
 
     /// Whether the user hid this host while it was offline and it has not connected since.
