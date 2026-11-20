@@ -47,7 +47,7 @@ fn host_header(s: &Workspace, index: usize) -> El {
     // An offline host dims; its Retry connection row below says why.
     let tone = rgb(if active && connected { ink() } else { muted() });
     let new_help = format!("New session on {}", config.label);
-    // One step to a new session; offline hosts keep the slot so the column lines up.
+    // One step to a new session; an offline host's slot hides it until it reconnects.
     let plus = if connected {
         el().key(format!("host-new-session:{index}"))
             .role("button")
@@ -67,8 +67,24 @@ fn host_header(s: &Workspace, index: usize) -> El {
             })
             .child(glyph(&PLUS, 13., rgb(muted())))
     } else {
-        el().key(format!("host-new-session-slot:{index}"))
+        let hide_help = format!("Hide {} until it reconnects", config.label);
+        el().key(format!("host-hide:{index}"))
+            .role("button")
+            .label(hide_help.clone())
+            .help(hide_help)
             .size(22., 22.)
+            .center()
+            .radius(6.)
+            .hover(white(0.06))
+            .press(white(0.1))
+            .cursor(Cursor::Pointer)
+            .preserve_focus_on_press(true)
+            .tab_index(-1)
+            .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                s.hide_offline_host(index);
+                tx.blur();
+            })
+            .child(glyph(&CLOSE, 13., rgb(muted())))
     };
     row()
         .key(format!("host:{index}"))
@@ -829,13 +845,32 @@ fn flat_session_list(s: &Workspace) -> (El, f32) {
     )
 }
 
+/// What the host list says in place of hosts when every one is hidden.
+pub(super) fn hidden_hosts_note(hidden: usize) -> String {
+    match hidden {
+        1 => "1 offline host hidden".into(),
+        n => format!("{n} offline hosts hidden"),
+    }
+}
+
 fn session_list(s: &Workspace) -> (El, f32) {
     if s.settings.sidebar_sessions == SessionList::Flat {
         return flat_session_list(s);
     }
     let mut list = col().key("sidebar-content").px(8.);
     let mut height = 0.;
+    let hidden = (0..s.hosts.len()).filter(|&i| s.host_hidden(i)).count();
+    if hidden > 0 && hidden == s.hosts.len() {
+        // Never an empty list: say why, and where the hosts still are.
+        let note = note(&hidden_hosts_note(hidden), muted())
+            .key("hosts-hidden")
+            .help("Find a session lists them");
+        return (list.child(note), NOTE_ROW);
+    }
     for (index, host) in s.hosts.iter().enumerate() {
+        if s.host_hidden(index) {
+            continue;
+        }
         let config = &s.settings.hosts[index];
         let mut group = col()
             .key(format!("group:{index}"))

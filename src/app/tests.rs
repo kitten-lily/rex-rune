@@ -353,7 +353,7 @@ fn host_plus_creates_on_its_own_host_at_once_with_its_shell() {
     let mut rt = runtime(ws);
     assert!(has(&rt, "host-new-session:0") && has(&rt, "host-new-session:1"));
     assert!(!has(&rt, "host-new-session:2"), "offline hosts have no +");
-    assert!(has(&rt, "host-new-session-slot:2"), "but keep its slot");
+    assert!(has(&rt, "host-hide:2"), "its slot hides it instead");
 
     click(&mut rt, "host-new-session:1");
     assert_eq!(creates(&other), [(None, Some("zsh".to_owned()))]);
@@ -417,6 +417,7 @@ fn host_menu_rows_online_and_offline() {
         [
             ("New session".to_owned(), String::new(), false),
             ("Retry connection".to_owned(), String::new(), true),
+            ("Hide until it reconnects".to_owned(), String::new(), true),
             ("Default shell…".to_owned(), String::new(), true),
             ("Edit host…".to_owned(), String::new(), true),
             ("Remove host…".to_owned(), String::new(), true),
@@ -5233,6 +5234,133 @@ fn a_hidden_host_is_not_prefetched_for_sidebar_tabs() {
     assert_eq!(latest(&rx), Some(vec!["s".to_owned()]));
     ws.hide_offline_host(0);
     assert_eq!(latest(&rx), Some(vec![]));
+}
+
+fn reconnects(rx: &flume::Receiver<HostCommand>) -> usize {
+    rx.try_iter()
+        .filter(|c| matches!(c, HostCommand::Reconnect))
+        .count()
+}
+
+/// Press Down until the keyboard is on the row labelled `label`.
+fn highlight_row(rt: &mut Runtime<Workspace>, label: &str) {
+    for _ in 0..rt.state.entries().len() {
+        let selected = rt.state.panel.as_ref().expect("an open list").selected;
+        if rt.state.entries()[selected].label == label {
+            return;
+        }
+        press(rt, Key::Down);
+    }
+    panic!("never reached {label}");
+}
+
+#[test]
+fn an_offline_hosts_x_hides_its_group_until_it_connects() {
+    let (mut ws, _rx0, _rx1) = offline_pair();
+    ws.sidebar.toggle();
+    let mut rt = runtime(ws);
+    assert!(has(&rt, "host-hide:1") && !has(&rt, "host-hide:0"));
+    assert!(has(&rt, "retry-host:1") && has(&rt, "session:1:away"));
+    click(&mut rt, "host-hide:1");
+    settle(&mut rt);
+    for key in ["host:1", "retry-host:1", "session:1:away", "hosts-hidden"] {
+        assert!(!has(&rt, key), "{key}");
+    }
+    assert!(has(&rt, "host:0"));
+    rt.update(|s, _| report_connected(s, 1, true));
+    settle(&mut rt);
+    assert!(has(&rt, "host:1") && has(&rt, "host-new-session:1"));
+}
+
+#[test]
+fn the_host_menu_offers_hide_only_while_offline() {
+    let (mut ws, _rx0, _rx1) = offline_pair();
+    ws.sidebar.toggle();
+    let mut rt = runtime(ws);
+    let labels = |rt: &Runtime<Workspace>| -> Vec<String> {
+        rt.state.entries().into_iter().map(|e| e.label).collect()
+    };
+    secondary_click(&mut rt, "host:0");
+    assert!(!labels(&rt).iter().any(|l| l.starts_with("Hide")));
+    press(&mut rt, Key::Escape);
+    secondary_click(&mut rt, "host:1");
+    assert_eq!(
+        labels(&rt)[1..3],
+        ["Retry connection", "Hide until it reconnects"]
+    );
+    highlight_row(&mut rt, "Hide until it reconnects");
+    press(&mut rt, Key::Enter);
+    assert!(rt.state.settings.hosts[1].hidden_offline);
+    assert!(rt.state.panel.is_none(), "the menu closes");
+}
+
+#[test]
+fn hide_under_the_keyboard_runs_nothing_once_the_host_has_connected() {
+    let (mut ws, _rx0, rx1) = offline_pair();
+    ws.sidebar.toggle();
+    let mut rt = runtime(ws);
+    secondary_click(&mut rt, "host:1");
+    highlight_row(&mut rt, "Hide until it reconnects");
+    rt.update(|s, _| report_connected(s, 1, true));
+    press(&mut rt, Key::Enter);
+    assert!(!rt.state.settings.hosts[1].hidden_offline);
+    assert!(
+        !matches!(
+            rt.state.panel.as_ref().map(|p| &p.kind),
+            Some(PanelKind::Form(_))
+        ),
+        "Edit host…, which took its place, did not run"
+    );
+    assert!(creates(&rx1).is_empty());
+    assert!(
+        rt.state
+            .notices
+            .iter()
+            .any(|n| n.text.contains("no longer in the list"))
+    );
+}
+
+#[test]
+fn with_every_host_hidden_the_list_says_how_many() {
+    let mut ws = workspace_hosts(2);
+    ws.sidebar.toggle();
+    ws.hide_offline_host(0);
+    let mut rt = runtime(ws);
+    assert!(!has(&rt, "hosts-hidden"), "one of two is hidden");
+    rt.update(|s, _| s.hide_offline_host(1));
+    settle(&mut rt);
+    assert!(has(&rt, "hosts-hidden") && !has(&rt, "host:0") && !has(&rt, "host:1"));
+    assert_eq!(
+        super::sidebar::hidden_hosts_note(1),
+        "1 offline host hidden"
+    );
+    assert_eq!(
+        super::sidebar::hidden_hosts_note(2),
+        "2 offline hosts hidden"
+    );
+}
+
+#[test]
+fn a_hidden_host_is_still_retried_from_find_a_session_and_the_identity_menu() {
+    let (mut ws, rx0, rx1) = offline_pair();
+    ws.sidebar.toggle();
+    ws.hide_offline_host(1);
+    let mut rt = runtime(ws);
+    rx1.try_iter().count();
+    for opener in ["session-search", "identity"] {
+        click(&mut rt, opener);
+        highlight_row(&mut rt, "Retry connection");
+        press(&mut rt, Key::Enter);
+        assert_eq!(reconnects(&rx1), 1, "from {opener}");
+        if rt.state.panel.is_some() {
+            press(&mut rt, Key::Escape);
+        }
+    }
+    assert_eq!(reconnects(&rx0), 0);
+    assert!(
+        rt.state.settings.hosts[1].hidden_offline,
+        "still hidden until it connects"
+    );
 }
 
 #[test]

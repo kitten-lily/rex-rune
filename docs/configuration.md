@@ -34,7 +34,8 @@ Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json`
 (default `~/.config/rex-rune/workspace.json`; on macOS
 `~/Library/Application Support/rex-rune/workspace.json`). The file holds:
 
-- saved hosts (label, endpoint, collapsed state, optional default shell), the last
+- saved hosts (label, endpoint, collapsed state, `hidden_offline` while a host you
+  hid has not connected again, optional default shell), the last
   host and session per host, whether the sidebar is open and its width, what it
   lists (`sidebar_mode`: `"sessions"` or `"activity"`), how it lists sessions
   (`sidebar_sessions`: `"by_host"` or `"flat"`), how the Activity view groups rows
@@ -219,6 +220,14 @@ activity word, the `Zoomed` chip and the reconnecting strip it draws keeps its n
 and buttons instead, so the glyph never pushes Close out of its pane or Retry over
 the buttons. It is chrome only: the header row stays 30 pt, so no terminal moves
 or resizes. See [checks and captures](parity-2026-11/pane-header-icon.md).
+
+An offline host's header has a × where a connected host has its +. It hides that
+host's group until the host connects again, when it comes back by itself; **Hide
+until it reconnects** in the header's right-click menu does the same. Hiding only
+changes the sidebar: the client keeps trying to connect as before, and the host
+stays in **Find a session**, the toolbar's identity menu (both offer **Retry
+connection**) and Settings → Hosts. Editing a hidden host's endpoint shows it
+again.
 
 In Interface settings, **Tab position → Sidebar** lists each session's tabs under
 it in the sidebar, with their program icon, label and activity word, and takes the

@@ -690,7 +690,7 @@ impl Workspace {
         entries
     }
 
-    /// A sidebar host header's menu, in groups: New session; Retry while offline and Start
+    /// A sidebar host header's menu, in groups: New session; Retry and Hide while offline and Start
     /// personal server… when it applies; Default shell… and Edit host…; Remove host…, last and
     /// destructive (not for the only host).
     fn host_entries(&self, host: usize) -> Vec<Entry> {
@@ -699,9 +699,15 @@ impl Workspace {
         create.enabled = connected;
         let mut entries = vec![create];
         if !connected {
-            entries.push(
-                Entry::new("Retry connection", "", "", Intent::RetryHost(host)).in_section(1),
-            );
+            // Both leave the list when the host connects, so they are run by identity: Enter
+            // on one that has gone runs nothing, never the row that moved into its place.
+            let mut retry =
+                Entry::new("Retry connection", "", "", Intent::RetryHost(host)).in_section(1);
+            retry.id = Some("host.retry".into());
+            let mut hide = Entry::new("Hide until it reconnects", "", "", Intent::HideHost(host))
+                .in_section(1);
+            hide.id = Some("host.hide".into());
+            entries.extend([retry, hide]);
         }
         if self.can_start_ssh(host) {
             entries.push(
