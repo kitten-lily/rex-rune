@@ -189,8 +189,19 @@ impl TerminalStream {
                         )?;
                     }
                     Some("theme") => {
-                        terminal.set_default_fg_color(parse_color(value["foreground"].as_str()))?;
-                        terminal.set_default_bg_color(parse_color(value["background"].as_str()))?;
+                        // Ghostty updates cached foreground/background together only when
+                        // both defaults exist. Omissions mean its built-in white/black,
+                        // rather than retaining a previous theme's cached colours.
+                        terminal.set_default_fg_color(Some(
+                            parse_color(value["foreground"].as_str()).unwrap_or(RgbColor {
+                                r: 255,
+                                g: 255,
+                                b: 255,
+                            }),
+                        ))?;
+                        terminal.set_default_bg_color(Some(
+                            parse_color(value["background"].as_str()).unwrap_or_default(),
+                        ))?;
                         terminal.set_default_cursor_color(parse_color(value["cursor"].as_str()))?;
                         // Each theme replaces the previous palette, including omissions.
                         terminal.set_default_color_palette(None)?;
@@ -602,6 +613,60 @@ mod tests {
         let hidden_cursor = renderer.frame(&terminal).unwrap();
         assert!(hidden_cursor.cursor.is_none());
         assert_eq!(hidden_cursor.display_row_start(3), 2);
+    }
+
+    #[test]
+    fn live_theme_changes_refresh_cached_colors_without_program_output() {
+        let original = Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 12,
+            rows: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut stream = TerminalStream::new(42);
+        stream
+            .feed(&ghostty_vt::snapshot::encode(&original).unwrap())
+            .unwrap();
+        let mut renderer = Renderer::new().unwrap();
+        assert_eq!(
+            renderer
+                .frame(stream.terminal.as_ref().unwrap())
+                .unwrap()
+                .bg,
+            0
+        );
+        stream
+            .feed(b"\x1b_rex1;42;{\"type\":\"theme\",\"background\":\"#191724\"}\x1b\\")
+            .unwrap();
+        assert_eq!(
+            renderer
+                .frame(stream.terminal.as_ref().unwrap())
+                .unwrap()
+                .bg,
+            0x191724
+        );
+        stream
+            .feed(b"\x1b_rex1;42;{\"type\":\"theme\"}\x1b\\")
+            .unwrap();
+        assert_eq!(
+            renderer
+                .frame(stream.terminal.as_ref().unwrap())
+                .unwrap()
+                .bg,
+            0
+        );
+        // A program's OSC override still wins over the server's default.
+        stream.feed(b"\x1b]11;#123456\x07").unwrap();
+        stream
+            .feed(b"\x1b_rex1;42;{\"type\":\"theme\",\"background\":\"#191724\"}\x1b\\")
+            .unwrap();
+        assert_eq!(
+            renderer
+                .frame(stream.terminal.as_ref().unwrap())
+                .unwrap()
+                .bg,
+            0x123456
+        );
     }
 
     #[test]
