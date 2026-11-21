@@ -569,6 +569,35 @@ fn closing_a_tab_names_it_and_a_tab_that_closed_leaves_its_panel() {
 }
 
 #[test]
+fn with_confirm_before_closing_off_a_tab_closes_at_once_but_several_still_ask() {
+    let (mut ws, rx) = three_tabs("a");
+    assert!(ws.settings.interface.confirm_close, "asking is the default");
+    ws.settings.interface.confirm_close = false;
+    let mut rt = runtime(ws);
+    secondary_click(&mut rt, "tab:c");
+    choose(&mut rt, "Close tab…");
+    assert!(
+        rt.state.panel.is_none(),
+        "no question and no menu left open"
+    );
+    let sent = requests(&rx);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, "session.close_window");
+    assert_eq!(sent[0].2, json!({"session_id":"s","window_id":"c"}));
+
+    rt.update(|s, tx| {
+        let target = s.current_tab("a").unwrap();
+        s.perform(Intent::Window(target, TabAction::CloseOthers), tx);
+    });
+    assert_eq!(
+        rt.state.panel.as_ref().unwrap().title,
+        "Close 2 other tabs?"
+    );
+    assert!(requests(&rx).is_empty());
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn a_named_tab_can_go_back_to_its_default_title() {
     let (ws, rx) = three_tabs("a");
     let mut rt = runtime(ws);

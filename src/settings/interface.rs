@@ -43,6 +43,8 @@ pub struct InterfaceConfig {
     /// Local header name and enabled-button fading only; never terminal content.
     pub fade_inactive_pane_headers: bool,
     pub fade_pane_headers_in_inactive_window: bool,
+    /// Ask before closing one tab or one pane. Closing several at once always asks.
+    pub confirm_close: bool,
 }
 
 impl Default for InterfaceConfig {
@@ -56,6 +58,7 @@ impl Default for InterfaceConfig {
             highlight_active_pane: None,
             fade_inactive_pane_headers: false,
             fade_pane_headers_in_inactive_window: false,
+            confirm_close: true,
         }
     }
 }

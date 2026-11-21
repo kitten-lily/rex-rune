@@ -473,6 +473,16 @@ impl Workspace {
                 );
                 self.panel.as_mut().unwrap().tab = Some(target);
             }
+            TabAction::Close if !self.settings.interface.confirm_close => {
+                if self.panel.is_some() {
+                    self.close_panel(tx);
+                }
+                self.tab_request(
+                    &target,
+                    "session.close_window",
+                    json!({"window_id": target.window}),
+                );
+            }
             TabAction::Close => {
                 let title = format!("Close {}?", target.name);
                 let description = format!(

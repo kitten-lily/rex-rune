@@ -63,7 +63,7 @@ const TOOLBARS: [ToolbarBehavior; 3] = [
     ToolbarBehavior::Hidden,
 ];
 
-fn header_fade_switch(
+fn interface_switch(
     key: &str,
     label: &str,
     on: bool,
@@ -218,7 +218,7 @@ fn interface(s: &Workspace) -> El {
                     setting(
                         "Fade inactive pane headers",
                         "For panes without the keyboard.",
-                        header_fade_switch(
+                        interface_switch(
                             "fade-inactive-headers",
                             "Fade inactive pane headers",
                             s.settings.interface.fade_inactive_pane_headers,
@@ -228,7 +228,7 @@ fn interface(s: &Workspace) -> El {
                     setting(
                         "Fade headers in inactive windows",
                         "While this window is not focused.",
-                        header_fade_switch(
+                        interface_switch(
                             "fade-headers-inactive-window",
                             "Fade headers in inactive windows",
                             s.settings.interface.fade_pane_headers_in_inactive_window,
@@ -338,6 +338,16 @@ fn interface(s: &Workspace) -> El {
                         })
                         .build(k)
                         .key("tabs-fill"),
+                ),
+                setting(
+                    "Confirm before closing",
+                    "Asks before closing one tab or pane. Closing several always asks.",
+                    interface_switch(
+                        "confirm-close",
+                        "Confirm before closing",
+                        s.settings.interface.confirm_close,
+                        |i| &mut i.confirm_close,
+                    ),
                 ),
             ])],
         ),

@@ -143,6 +143,24 @@ fn header_buttons_act_on_their_own_pane_and_close_asks_by_name() {
 }
 
 #[test]
+fn with_confirm_before_closing_off_close_ends_its_own_pane_at_once() {
+    let (mut rt, host) = drawn("split", PaneHeader::Auto, PaneDensity::Comfortable);
+    rt.update(|s, _| s.settings.interface.confirm_close = false);
+    let _ = requests(&host);
+    click(&mut rt, "pane-close:block:c");
+    assert!(rt.state.panel.is_none(), "nothing asks");
+    let sent = requests(&host);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, "block.close");
+    assert_eq!(
+        sent[0].2["block_id"], "block:c",
+        "the pane whose button it was"
+    );
+    assert_eq!(sent[0].2["session_id"], "s");
+    std::fs::remove_file(&rt.state.settings_path).ok();
+}
+
+#[test]
 fn header_buttons_show_the_bound_keys_and_never_hold_focus() {
     let (mut rt, _host) = drawn("split", PaneHeader::Auto, PaneDensity::Comfortable);
     let help = |rt: &Runtime<Workspace>, key: &str| -> String {

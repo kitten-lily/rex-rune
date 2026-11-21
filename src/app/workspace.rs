@@ -2060,6 +2060,18 @@ impl Workspace {
                 );
                 self.panel.as_mut().unwrap().target = Some(target);
             }
+            PaneAction::Close if !self.settings.interface.confirm_close => {
+                if self.panel.is_some() {
+                    self.close_panel(tx);
+                }
+                self.send(
+                    target.host,
+                    HostCommand::Request {
+                        method: "block.close".into(),
+                        payload: json!({"session_id": target.session, "block_id": target.block}),
+                    },
+                );
+            }
             PaneAction::Close => {
                 let title = format!("Close {} in {}?", target.name, target.tab);
                 let description = format!(

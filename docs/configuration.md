@@ -200,7 +200,10 @@ limits](parity-2026-11/M2.7-header-fading.md).
 A pane's header shows its program's icon, then its name, a `Zoomed` chip while it
 fills its tab, its program's activity, and four buttons: Split right, Split down,
 Zoom (or Restore) and Close. The buttons act on that pane, focused or not; Close
-asks first, naming the pane, tab and host. Zoom is dimmed on the only pane of a
+asks first, naming the pane, tab and host. Turning off **Confirm before closing**
+in Interface → Sidebar and tabs (`interface.confirm_close`, on by default) closes
+one pane or one tab at once instead, from its header, menu, Commands or shortcut.
+Closing other panes or tabs, a floating layer or a session still asks. Zoom is dimmed on the only pane of a
 tab, and the header's Close is dimmed on the last pane of a session (one tab with
 one pane), as in Rex for macOS; the pane menu, Commands and the tab's menu still
 close it. **Pane headers** (`pane_header`) chooses where headers are: **Auto**

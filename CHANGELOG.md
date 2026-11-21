@@ -18,6 +18,7 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 
 ### Added
 
+- **Confirm before closing** in Settings → Interface → Sidebar and tabs, on by default. Turned off, closing one pane or one tab no longer asks first. Closing other panes or tabs, a floating layer or a session still asks. Saved as `interface.confirm_close`. From [Aleks Tacconi](https://github.com/Aleks-Tacconi)'s fork.
 - **Last session** in Commands goes back to the session you were in before this one, including on another host, and pressing it again returns. It opens the session's current tab, not the tab you last had there. Nothing is bound by default; bind `client.session.last` in Settings → Shortcuts. It is refused remotely. From [rollsrobby](https://github.com/rollsrobby)'s fork.
 - Activity view: panes of the same tab are drawn as one entry named after the tab, with a thin line between them, when they sit together in the list (always when grouped by session; within one priority section when grouped by priority). Each pane is still pressed on its own.
 - Hide an offline host: the × on an offline host's sidebar header (or **Hide until it reconnects** in its menu) takes it out of the host list until it connects again, when it returns by itself. It stays in Find a session, the identity menu and Settings, and connection attempts carry on unchanged. New per-host setting `hidden_offline`.
