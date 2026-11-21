@@ -30,6 +30,7 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 
 ### Fixed
 
+- The active pane's outline is one plain 1 pt accent edge, without the glow, and in Compact density it has the same rounded corners as a Comfortable card instead of square ones. Cards' corners are now plainly circular. From [Aleks Tacconi](https://github.com/Aleks-Tacconi)'s fork.
 - Activity view: a pane with subtasks no longer repeats a subtask's title as its own detail. The detail is the pane's own message; each subtask is listed once, on its own line.
 - Activity view: a pane's reported subtasks are now part of its row, which grows by a line for each, with their titles under the pane's name. They were separate lines indented less than the name that could not be pressed, so they read as rows of their own without an icon or a pane.
 - A program that replaces its Kitty image on every frame no longer flickers: the pane keeps drawing the last frame whose images were ready until the new ones are. From [saithat](https://github.com/saithat)'s fork.
