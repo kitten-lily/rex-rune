@@ -70,6 +70,12 @@ pub struct Term {
     /// The last cell a motion report named, so moves within a cell send nothing.
     pub mouse_cell: Option<(u16, u16)>,
     images: HashMap<usize, (Arc<ImagePixels>, rune::Image)>,
+    /// The current frame's images with their textures, in frame order.
+    shown_images: Vec<(TermImage, rune::Image)>,
+    /// The last frame's images whose textures were all ready. Textures upload off the UI
+    /// thread, so a program that replaces its image every frame (a browser drawing through
+    /// Kitty graphics) would otherwise flash an empty pane until each new one is ready.
+    held_images: Vec<(TermImage, rune::Image)>,
     /// The link under the pointer while Ctrl is held, with the cell the pointer is on.
     pub link: Option<(usize, Link)>,
     /// The link a Ctrl+press went down on; releasing over the same link opens it.
@@ -255,6 +261,8 @@ impl Term {
             mouse: None,
             mouse_cell: None,
             images: HashMap::new(),
+            shown_images: Vec::new(),
+            held_images: Vec::new(),
             link: None,
             pressed_link: None,
             search: None,
@@ -309,10 +317,17 @@ impl Term {
     }
 
     pub fn cache_images(&mut self, cache: Option<&rune::ImageCache>) {
+        let previous = std::mem::take(&mut self.shown_images);
         let (Some(cache), Some(frame)) = (cache, &self.frame) else {
             self.images.clear();
+            self.held_images.clear();
             return;
         };
+        if frame.images.is_empty() {
+            self.held_images.clear();
+        } else if !previous.is_empty() && previous.iter().all(|(_, texture)| texture.is_ready()) {
+            self.held_images = previous;
+        }
         // Keeping the pixel Arc beside the texture prevents pointer reuse from making
         // a fresh snapshot look like the previous image with the same protocol id.
         for image in &frame.images {
@@ -332,6 +347,28 @@ impl Term {
                 .iter()
                 .any(|image| Arc::as_ptr(&image.pixels) as usize == *key)
         });
+        self.shown_images = frame
+            .images
+            .iter()
+            .filter_map(|image| {
+                let (_, texture) = self.images.get(&(Arc::as_ptr(&image.pixels) as usize))?;
+                Some((image.clone(), texture.clone()))
+            })
+            .collect();
+    }
+
+    /// The images to draw: this frame's once all their textures are ready, and until then the
+    /// last frame's that were, so replacing an image never shows the pane without one.
+    fn drawn_images(&self) -> &[(TermImage, rune::Image)] {
+        if self
+            .shown_images
+            .iter()
+            .all(|(_, texture)| texture.is_ready())
+        {
+            &self.shown_images
+        } else {
+            &self.held_images
+        }
     }
 
     fn display_frame(&self) -> Option<&Arc<Frame>> {
@@ -1376,17 +1413,15 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         grid
     };
     let images = |mut grid: El, layer: i32| {
-        for (index, image) in frame
-            .images
+        for (index, (image, texture)) in term
+            .drawn_images()
             .iter()
             .enumerate()
-            .filter(|(_, image)| image.placement.layer == layer)
+            .filter(|(_, (image, _))| image.placement.layer == layer)
         {
-            if let Some((_, texture)) = term.images.get(&(Arc::as_ptr(&image.pixels) as usize)) {
-                grid = grid.child(
-                    image_el(image, texture, frame, m, start).key(format!("{key}/image:{index}")),
-                );
-            }
+            grid = grid.child(
+                image_el(image, texture, frame, m, start).key(format!("{key}/image:{index}")),
+            );
         }
         grid
     };
