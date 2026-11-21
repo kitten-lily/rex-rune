@@ -31,6 +31,7 @@ From [Lily](https://github.com/kitten-lily)'s fork ([kitten-lily/rex-rune](https
 - Activity view: a pane with subtasks no longer repeats a subtask's title as its own detail. The detail is the pane's own message; each subtask is listed once, on its own line.
 - Activity view: a pane's reported subtasks are now part of its row, which grows by a line for each, with their titles under the pane's name. They were separate lines indented less than the name that could not be pressed, so they read as rows of their own without an icon or a pane.
 - A program that replaces its Kitty image on every frame no longer flickers: the pane keeps drawing the last frame whose images were ready until the new ones are. From [saithat](https://github.com/saithat)'s fork.
+- Programs that stream large Kitty images are no longer slowed by the search for Rex's own escape sequences, which now skips to the next escape character instead of checking every byte. From [saithat](https://github.com/saithat)'s fork.
 - **SSH setup explains when a personal server stops (#147).** Closing the client leaves the server running. The preview and host docs explain Linux systemd logout and lingering, and point to `rex server install` for boot-time startup. The explanation scrolls in small windows while setup status and actions remain visible.
 
 ## 0.10.1 - 2026-11-14

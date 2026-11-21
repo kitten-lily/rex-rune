@@ -37,8 +37,23 @@ impl ApcParser {
     }
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Part>> {
         let mut parts = Vec::new();
-        let mut output = Vec::new();
-        for &byte in bytes {
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            // Outside a possible Rex APC, only an ESC can start one, so everything before the
+            // next ESC is output as is. Copying it in bulk keeps large output, such as Kitty
+            // image data, from going through the byte-at-a-time matching below.
+            if self.pending.is_empty() {
+                let rest = &bytes[index..];
+                let Some(escape) = rest.iter().position(|&b| b == 0x1b) else {
+                    output.extend_from_slice(rest);
+                    break;
+                };
+                output.extend_from_slice(&rest[..escape]);
+                index += escape;
+            }
+            let byte = bytes[index];
+            index += 1;
             self.pending.push(byte);
             loop {
                 if self.pending.starts_with(&self.prefix) {
@@ -812,6 +827,51 @@ mod tests {
             parser.feed(message).unwrap(),
             vec![Part::Output(message.to_vec())]
         );
+    }
+    #[test]
+    fn bulk_output_between_escapes_survives_every_chunking() {
+        // Kitty image chunks, near misses of the Rex prefix and two Rex APCs, cut at every
+        // chunk size, must give the same output and metadata as feeding the stream whole.
+        let rex = b"\x1b_rex1;7;{\"type\":\"child_exited\",\"exit_code\":0}\x1b\\";
+        let mut stream = Vec::new();
+        let mut expected = Vec::new();
+        for piece in [
+            &b"plain text "[..],
+            b"\x1b_Ga=T,f=24,s=2,v=2,i=1,m=1;AAAAAAAA\x1b\\",
+            b"\x1b_Gm=0;AAAAAAAA\x1b\\",
+            b"\x1b_rex1;8;not ours\x1b\\",
+            b"\x1b_re\x1b[31mred\x1b[0m",
+            b"\x1b\x1b_rex",
+        ] {
+            stream.extend_from_slice(piece);
+            expected.extend_from_slice(piece);
+        }
+        stream.extend_from_slice(rex);
+        stream.extend_from_slice(b"middle");
+        expected.extend_from_slice(b"middle");
+        stream.extend_from_slice(rex);
+        stream.extend_from_slice(b"\x1b_");
+        expected.extend_from_slice(b"\x1b_");
+        stream.extend_from_slice(b"Gtail\x1b\\");
+        expected.extend_from_slice(b"Gtail\x1b\\");
+        for size in 1..=stream.len() {
+            let mut parser = ApcParser::new(7);
+            let mut output = Vec::new();
+            let mut metadata = 0;
+            for chunk in stream.chunks(size) {
+                for part in parser.feed(chunk).unwrap() {
+                    match part {
+                        Part::Output(bytes) => output.extend(bytes),
+                        Part::Metadata(value) => {
+                            assert_eq!(value["type"], "child_exited");
+                            metadata += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(output, expected, "chunk size {size}");
+            assert_eq!(metadata, 2, "chunk size {size}");
+        }
     }
     #[test]
     fn snapshot_tail_and_parser_continuation_survive_fragmentation() {
