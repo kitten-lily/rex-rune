@@ -445,3 +445,84 @@ async fn keymap_timeout_is_nonfatal() {
     drop(host);
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn returned_client_callbacks_are_discarded_when_their_socket_disconnects() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (close, closed) = tokio::sync::oneshot::channel();
+    let (replacement, replace) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 12).await;
+        let request = recv(&mut ws).await;
+        send(
+            &mut ws,
+            json!({"type":"response","id":request["id"],"seq":10,"payload":boot()}),
+        )
+        .await;
+        let request = recv(&mut ws).await;
+        assert_eq!(request["method"], "client.action");
+        send(&mut ws, json!({"type":"response","id":request["id"],"payload":{"client_actions":[{"action":"client.sidebar.toggle"}]}})).await;
+        closed.await.unwrap();
+        ws.close(None).await.unwrap();
+        drop(ws);
+        replace.await.unwrap();
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 12).await;
+        let request = recv(&mut ws).await;
+        send(
+            &mut ws,
+            json!({"type":"response","id":request["id"],"seq":10,"payload":boot()}),
+        )
+        .await;
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    let epoch = host.model.lock().unwrap().connection_epoch;
+    host.commands
+        .send(HostCommand::Action {
+            generation: 7,
+            request: Box::new(rexrs::api::client::Action::new("fixture").origin("key")),
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.model.lock().unwrap().client_actions.is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(host.model.lock().unwrap().client_actions[0].generation, 7);
+    close.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.model.lock().unwrap().connected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        host.model.lock().unwrap().client_actions.is_empty(),
+        "callbacks must leave with the socket that returned them"
+    );
+    replacement.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let reconnected = {
+                let m = host.model.lock().unwrap();
+                m.connected && m.connection_epoch > epoch
+            };
+            if reconnected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(host.model.lock().unwrap().client_actions.is_empty());
+    drop(host);
+    server.await.unwrap();
+}

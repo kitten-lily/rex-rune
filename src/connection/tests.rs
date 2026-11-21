@@ -11,6 +11,8 @@ mod download_tests;
 mod keymap_tests;
 #[path = "navigation_tests.rs"]
 mod navigation_tests;
+#[path = "notification_queue_tests.rs"]
+mod notification_queue_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
 #[path = "server_controls_tests.rs"]

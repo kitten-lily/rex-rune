@@ -1573,6 +1573,9 @@ async fn run_host(
             shared.update(|m| {
                 m.connection_epoch += 1;
                 m.performs.clear();
+                m.client_actions.clear();
+                m.notices.clear();
+                m.bells.clear();
                 m.client_id = identity.id.clone();
                 m.protocol.api_revision = control.welcome().api_revision;
                 m.server_info = server_info::ServerInfo::welcomed(control.welcome());
@@ -1872,6 +1875,9 @@ async fn run_host(
         }
         shared.update(|m| {
             m.performs.clear();
+            m.client_actions.clear();
+            m.notices.clear();
+            m.bells.clear();
             m.ssh_problem = result
                 .as_ref()
                 .err()
