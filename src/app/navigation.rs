@@ -28,6 +28,8 @@ pub struct Pending {
 pub struct History {
     entries: Vec<Visit>,
     cursor: usize,
+    current_session: Option<Visit>,
+    previous_session: Option<Visit>,
     pub pending: Option<Pending>,
     serial: u64,
 }
@@ -41,6 +43,13 @@ impl History {
             return;
         }
         self.pending = None;
+        let session = Visit {
+            window: None,
+            ..visit.clone()
+        };
+        if self.current_session.as_ref() != Some(&session) {
+            self.previous_session = self.current_session.replace(session);
+        }
         if self.entries.get(self.cursor) == Some(&visit) {
             return;
         }
@@ -100,6 +109,32 @@ impl History {
 }
 
 impl Workspace {
+    fn last_session_target(&self) -> Option<Visit> {
+        let visit = self.navigation.previous_session.as_ref()?;
+        let host = self.hosts.iter().find(|h| h.id == visit.host)?;
+        (host.model.connected
+            && host
+                .model
+                .sessions
+                .iter()
+                .any(|s| s.session_id == visit.session))
+        .then(|| visit.clone())
+    }
+
+    pub fn has_last_session(&self) -> bool {
+        self.navigation.pending.is_none() && self.last_session_target().is_some()
+    }
+
+    /// Toggle the last two successfully visited sessions, without restoring an old tab.
+    pub fn last_session(&mut self, tx: &mut Tx) {
+        self.observe_navigation();
+        if self.navigation.pending.is_none()
+            && let Some(visit) = self.last_session_target()
+        {
+            self.navigate_to(visit, tx);
+        }
+    }
+
     fn current_visit(&self) -> Option<Visit> {
         let host = self.hosts.get(self.active)?;
         let session = host.model.selected.clone()?;

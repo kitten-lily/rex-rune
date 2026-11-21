@@ -49,6 +49,145 @@ fn recorded_history() -> (Runtime<Workspace>, flume::Receiver<HostCommand>) {
     (runtime(ws), rx)
 }
 
+fn two_session_history() -> (Workspace, flume::Receiver<HostCommand>) {
+    let (mut ws, rx) = tabbed_workspace("single");
+    ws.observe_navigation();
+    let mut other = ws.hosts[0].model.views["s"].clone();
+    other.session_id = Some("other".into());
+    ws.hosts[0].model.sessions.push(session("other"));
+    ws.hosts[0].model.views.insert("other".into(), other);
+    ws.select_visit(0, "other".into(), &mut rune::Tx::default());
+    acknowledge(&mut ws);
+    requests(&rx);
+    (ws, rx)
+}
+
+fn session_navigations(rx: &flume::Receiver<HostCommand>) -> Vec<(String, Option<String>)> {
+    rx.try_iter()
+        .filter_map(|command| match command {
+            HostCommand::Navigate {
+                session, window, ..
+            } => Some((session, window)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn last_session_toggles_without_restoring_tabs_or_repeating_while_pending() {
+    let (mut ws, rx) = two_session_history();
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("s")
+        .unwrap()
+        .active_window_id = Some("split".into());
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("other")
+        .unwrap()
+        .active_window_id = Some("split".into());
+    ws.observe_navigation();
+    let mut tx = rune::Tx::default();
+    for expected in ["s", "other", "s"] {
+        assert!(actions::run(
+            &mut ws,
+            actions::LAST_SESSION,
+            &serde_json::Value::Null,
+            &mut tx
+        ));
+        let sent = session_navigations(&rx);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, expected);
+        assert!(sent[0].1.is_none());
+        ws.last_session(&mut tx);
+        assert!(
+            session_navigations(&rx).is_empty(),
+            "wait for the in-flight switch"
+        );
+        acknowledge(&mut ws);
+        assert_eq!(
+            ws.model().view().unwrap().active_window_id.as_deref(),
+            Some("split")
+        );
+    }
+}
+
+#[test]
+fn last_session_is_not_tab_history_and_requires_a_previous_session() {
+    let (mut rt, rx) = recorded_history();
+    rt.update(|s, tx| {
+        assert!(!s.has_last_session());
+        s.last_session(tx);
+    });
+    assert!(session_navigations(&rx).is_empty());
+}
+
+#[test]
+fn last_session_ignores_missing_or_disconnected_targets() {
+    for removed_host in [false, true] {
+        let (mut ws, rx) = two_session_history();
+        ws.hosts[0].model.connected = false;
+        ws.last_session(&mut rune::Tx::default());
+        assert!(!ws.has_last_session());
+        assert!(session_navigations(&rx).is_empty());
+        ws.hosts[0].model.connected = true;
+        assert!(ws.has_last_session(), "reconnect preserves the target");
+        if removed_host {
+            ws.hosts[0].id = crate::app::workspace::HostId(99);
+        } else {
+            ws.hosts[0].model.sessions.retain(|s| s.session_id != "s");
+        }
+        ws.last_session(&mut rune::Tx::default());
+        assert!(!ws.has_last_session());
+        assert!(session_navigations(&rx).is_empty());
+    }
+}
+
+#[test]
+fn failed_last_session_switch_can_be_retried() {
+    let (mut ws, rx) = two_session_history();
+    let mut tx = rune::Tx::default();
+    ws.last_session(&mut tx);
+    requests(&rx);
+    let id = ws.navigation.pending.as_ref().unwrap().id;
+    ws.hosts[0].model.navigation_result = Some((id, false));
+    ws.observe_navigation();
+    assert_eq!(ws.model().selected.as_deref(), Some("other"));
+    ws.last_session(&mut tx);
+    assert_eq!(session_navigations(&rx)[0].0, "s");
+}
+
+#[test]
+fn last_session_crosses_hosts_even_with_identical_session_ids() {
+    let (seed, _) = tabbed_workspace("single");
+    let mut ws = workspace_hosts(2);
+    for host in &mut ws.hosts {
+        host.model = seed.hosts[0].model.clone();
+    }
+    ws.observe_navigation();
+    ws.active = 1;
+    ws.observe_navigation();
+    let rx0 = capture_host(&mut ws, 0);
+    let rx1 = capture_host(&mut ws, 1);
+    let mut tx = rune::Tx::default();
+    ws.last_session(&mut tx);
+    assert_eq!(ws.active, 0);
+    assert_eq!(session_navigations(&rx0)[0].0, "s");
+    acknowledge(&mut ws);
+    ws.last_session(&mut tx);
+    assert_eq!(ws.active, 1);
+    assert_eq!(session_navigations(&rx1)[0].0, "s");
+    let id = ws.navigation.pending.as_ref().unwrap().id;
+    ws.hosts[1].model.navigation_result = Some((id, false));
+    ws.observe_navigation();
+    assert_eq!(ws.active, 0, "failure returns to the origin host");
+    ws.last_session(&mut tx);
+    assert_eq!(ws.active, 1);
+    assert_eq!(session_navigations(&rx1)[0].0, "s", "retry the same target");
+}
+
 #[test]
 fn reconnect_keeps_history() {
     // Adopted from scratch_reconnect_keeps_history.

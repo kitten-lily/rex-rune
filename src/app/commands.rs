@@ -436,6 +436,9 @@ impl Workspace {
             Command::action("session.next", G, "Next session", NEXT_SESSION).enabled(elsewhere),
             Command::action("session.previous", G, "Previous session", PREVIOUS_SESSION)
                 .enabled(elsewhere),
+            Command::action("session.last", G, "Last session", actions::LAST_SESSION)
+                .enabled(self.has_last_session())
+                .keywords("toggle return recent"),
             Command::action("history.back", G, "Back in history", actions::HISTORY_BACK)
                 .detail("Mouse Back")
                 .keywords("navigate"),

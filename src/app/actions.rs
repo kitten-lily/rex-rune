@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 pub const SEARCH: &str = "client.search";
 pub const SELECT_SESSION: &str = "session.select";
+pub const LAST_SESSION: &str = "client.session.last";
 pub const NEXT_GLOBAL: &str = "client.tab.next_global";
 pub const PREVIOUS_GLOBAL: &str = "client.tab.previous_global";
 pub const HISTORY_BACK: &str = "client.history.back";
@@ -43,6 +44,7 @@ enum Handler {
     ZoomOut,
     ZoomReset,
     SwitchSession,
+    LastSession,
     StopServer,
     SelectSession,
     NewSession,
@@ -133,6 +135,7 @@ specs! {
     "client.zoom.out" => ZoomOut,
     "client.zoom.reset" => ZoomReset,
     "session.switch" => SwitchSession,
+    LAST_SESSION => LastSession,
     super::server_page::STOP => StopServer,
     SELECT_SESSION => SelectSession,
     "session.new" => NewSession,
@@ -292,7 +295,7 @@ impl Spec {
             ZoomIn | ZoomOut | ZoomReset => Remote::Never(
                 "Only the person at this computer can change saved interface preferences.",
             ),
-            NextGlobal | PreviousGlobal | Back | Forward => {
+            NextGlobal | PreviousGlobal | Back | Forward | LastSession => {
                 Remote::Never("Use rex do session.select on the target host instead.")
             }
             Reconnect => Remote::Never("Only the person at this computer can reconnect terminals."),
@@ -424,6 +427,7 @@ impl Spec {
             Handler::ZoomOut => "Decrease interface zoom",
             Handler::ZoomReset => "Reset interface zoom",
             Handler::SwitchSession => "Switch session",
+            Handler::LastSession => "Last session",
             Handler::StopServer => "Stop server…",
             Handler::SelectSession => "Show session",
             Handler::NewSession => "New session",
@@ -512,6 +516,7 @@ impl Spec {
             | Handler::Back
             | Handler::Forward
             | Handler::SwitchSession
+            | Handler::LastSession
             | Handler::SelectSession
             | Handler::GotoTab
             | Handler::NextSession
@@ -693,6 +698,7 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
         Handler::ZoomOut => s.change_ui_scale(-1, tx),
         Handler::ZoomReset => s.change_ui_scale(0, tx),
         Handler::SwitchSession => s.picker(true),
+        Handler::LastSession => s.last_session(tx),
         Handler::StopServer => s.stop_server(),
         Handler::SelectSession => {
             let visit = s.session_visit(s.active, args);
