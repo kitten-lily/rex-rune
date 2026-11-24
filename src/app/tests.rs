@@ -8,6 +8,8 @@ mod bindings_integration_tests;
 mod command_tests;
 #[path = "compatibility_tests.rs"]
 mod compatibility_tests;
+#[path = "copy_mode_tests.rs"]
+mod copy_mode_tests;
 #[path = "directory_tests.rs"]
 mod directory_tests;
 // These fixtures exercise Unix process identity and the POSIX download store.
@@ -22,6 +24,8 @@ mod floating_tests;
 mod font_settings_tests;
 #[path = "header_fading_tests.rs"]
 mod header_fading_tests;
+#[path = "ime_tests.rs"]
+mod ime_tests;
 #[path = "key_mode_tests.rs"]
 mod key_mode_tests;
 #[path = "menu_tests.rs"]
@@ -56,8 +60,12 @@ mod server_page_tests;
 mod settings_nav_tests;
 #[path = "settings_tests.rs"]
 mod settings_tests;
+#[path = "shared_hosts_tests.rs"]
+mod shared_hosts_tests;
 #[path = "shortcuts_page_tests.rs"]
 mod shortcuts_page_tests;
+#[path = "ssh_agent_tests.rs"]
+mod ssh_agent_tests;
 #[path = "tab_fill_tests.rs"]
 mod tab_fill_tests;
 #[path = "tab_icon_colour_tests.rs"]
@@ -117,6 +125,7 @@ fn workspace_hosts(count: usize) -> Workspace {
                 collapsed: false,
                 hidden_offline: false,
                 shell: None,
+                shared: None,
             })
             .collect(),
         ..Settings::default()
@@ -2020,6 +2029,11 @@ fn settings_sections_and_their_forms_return_to_settings() {
     let mut rt = runtime(ws);
     click(&mut rt, "settings-section:hosts");
     assert!(has(&rt, "host-row:0") && has(&rt, "host-row:1"));
+    // Remote Hosts now includes Shared host list and SSH cards; bring the second host into view.
+    rt.update(|_, tx| tx.scroll_center("host-edit:1"));
+    for _ in 0..30 {
+        rt.frame(1. / 60.);
+    }
     click(&mut rt, "host-edit:1");
     let panel = rt.state.panel.as_ref().expect("the edit form");
     assert!(matches!(panel.kind, PanelKind::Form(Form::EditHost(1))));

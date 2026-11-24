@@ -59,6 +59,7 @@ enum Handler {
     RaiseLayer,
     ReturnToTiles,
     CloseLayer,
+    CopyMode,
     Copy,
     Paste,
     Reconnect,
@@ -150,6 +151,7 @@ specs! {
     "pane.raise_layer" => RaiseLayer,
     "pane.return_to_tiles" => ReturnToTiles,
     "pane.close_layer" => CloseLayer,
+    super::copy_mode::ACTION => CopyMode,
     "pane.copy" => Copy,
     "pane.paste" => Paste,
     "pane.reconnect" => Reconnect,
@@ -263,6 +265,7 @@ impl Spec {
             Copy => Remote::Never(
                 "Use rex capture instead; remote actions cannot change this computer's clipboard.",
             ),
+            CopyMode => Remote::Never("Only the person at this computer can enter copy mode."),
             SendKey => Remote::Never("Use rex send-key instead."),
             NewSession => Remote::Never("Use rex new instead."),
             NewTab => Remote::Never("Use rex window new instead."),
@@ -368,6 +371,21 @@ impl Spec {
             Handler::ZoomIn | Handler::ZoomOut | Handler::ZoomReset
         )
     }
+
+    /// Actions that write to the PTY or replace terminal selection and must be swallowed
+    /// while copy mode is active.
+    pub fn blocked_in_copy_mode(&self) -> bool {
+        matches!(
+            self.handler,
+            Handler::Paste
+                | Handler::SendKey
+                | Handler::ClearTerminal
+                | Handler::ResetTerminal
+                | Handler::InsertPath
+                | Handler::GoToDirectory
+                | Handler::SelectAll
+        )
+    }
     pub fn repeats(&self) -> bool {
         matches!(
             self.name,
@@ -442,6 +460,7 @@ impl Spec {
             Handler::RaiseLayer => "Bring floating layer to front",
             Handler::ReturnToTiles => "Return pane to tiles",
             Handler::CloseLayer => "Close floating layer",
+            Handler::CopyMode => "Copy mode",
             Handler::Copy => "Copy selection",
             Handler::Paste => "Paste",
             Handler::Reconnect => "Reconnect terminal",
@@ -553,7 +572,8 @@ impl Spec {
             | Handler::RaiseLayer
             | Handler::ReturnToTiles
             | Handler::CloseLayer => "Panes",
-            Handler::Copy
+            Handler::CopyMode
+            | Handler::Copy
             | Handler::Paste
             | Handler::SelectAll
             | Handler::Scroll
@@ -670,6 +690,9 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
     let Some(spec) = find(name).filter(|spec| spec.accepts(args)) else {
         return false;
     };
+    if s.in_copy_mode() && spec.blocked_in_copy_mode() {
+        return true;
+    }
     match spec.handler {
         Handler::Compatibility => super::compatibility::run(s, name, args, tx),
         Handler::Palette => s.picker(false),
@@ -739,7 +762,11 @@ pub fn run(s: &mut Workspace, name: &str, args: &Value, tx: &mut Tx) -> bool {
             };
             s.focused_layer_action(verb);
         }
+        Handler::CopyMode => s.enter_copy_mode(tx),
         Handler::Copy => {
+            if s.yank_copy_mode_selection() {
+                return true;
+            }
             if let Some(text) = s.active_terminal().and_then(|t| t.copy_text()) {
                 tx.copy(text);
             }

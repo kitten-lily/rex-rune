@@ -55,7 +55,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "rex-rune";
-  version = "0.10.1";
+  version = "0.11.0";
   src = lib.cleanSourceWith {
     src = lib.cleanSource ../.;
     # Keep local build trees out of `path:` builds.
@@ -93,6 +93,7 @@ rustPlatform.buildRustPackage {
     pkgs.clippy
     pkgs.rustfmt
     pkgs.python3
+    pkgs.procps
     pkgs.desktop-file-utils
     fontconfig
   ];

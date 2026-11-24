@@ -6,7 +6,7 @@
 //! Cards spring when the layout changes; the terminal grid inside never animates.
 use super::{
     activity::{PaneProgram, pane_activity, progress_bar, shown_progress, shown_word},
-    find,
+    find, floating_drag,
     pane_header::{self, Placement, full_bleed},
     panel::{Form, Intent, PanelKind},
     tab_icons,
@@ -17,7 +17,7 @@ use super::{
 };
 use rex_rune::{
     connection::Command,
-    layout,
+    layers, layout,
     settings::{PaneDensity, PaneHeader},
     terminal::selection::Phase as SelectionPhase,
 };
@@ -26,7 +26,7 @@ use rune::{Cursor, El, Phase, PointerButton, PointerEvent, Tx, WheelEvent, col, 
 use std::borrow::Cow;
 
 /// The area cards are laid out in, in the pane area's own points.
-fn inner(s: &Workspace) -> [f32; 4] {
+pub(super) fn inner(s: &Workspace) -> [f32; 4] {
     let [_, _, aw, ah] = s.area;
     if s.settings.pane_density == PaneDensity::Compact {
         return [0., 0., aw, ah];
@@ -111,18 +111,25 @@ fn header(
         .pr(pane_header::HEADER_TAIL)
         .gap(pane_header::HEADER_GAP)
         .center_y()
-        .preserve_focus_on_press(true)
-        .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
-            if s.focused_block().as_deref() != Some(id.as_str())
-                && let Some(t) = s.terminals.get(&s.term_key(&id))
-            {
-                let _ = t.connection.commands.focus();
+        .preserve_focus_on_press(true);
+    let h = if let Some((host_id, layer_id)) = floating_drag::draggable_header(s, window, block) {
+        // Clicks under the drag slop still focus the pane on release; drags send only
+        // `ResizeLayer` and never fire an accidental focus press on a horizontal move.
+        floating_drag::attach_drag(h, host_id, layer_id, id, layers::Grip::Move)
+    } else {
+        h.on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+            if s.focused_block().as_deref() != Some(id.as_str()) {
+                s.exit_copy_mode();
+                if let Some(t) = s.terminals.get(&s.term_key(&id)) {
+                    let _ = t.connection.commands.focus();
+                }
             }
             tx.blur();
         })
-        .on_secondary_press(move |s: &mut Workspace, p, _| {
-            s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
-        });
+    }
+    .on_secondary_press(move |s: &mut Workspace, p, _| {
+        s.pane_menu(menu_id.clone(), Some((p.x, p.y)))
+    });
     // The pane's own program before its name, as the title row draws the lone pane's: the
     // tab glyph rule, lit with its pane, and faded with the name where headers fade. The
     // glyph is decided from the room the row will have: its pads and gaps, the buttons it
@@ -301,7 +308,7 @@ fn pane_card(
     // The search field has the terminal's top-right corner, so nothing floats over it.
     let searching = s.terminals.get(&key).is_some_and(|t| t.search.is_some());
     let placement = match pane_header::placement(s, window, block) {
-        Placement::Floating if searching => Placement::None,
+        Placement::Floating if searching && s.grabbed_header() != Some(block) => Placement::None,
         placement => placement,
     };
     let headed = placement == Placement::Row;
@@ -321,7 +328,7 @@ fn pane_card(
             s.pane_menu(id.clone(), Some((p.x, p.y)))
         })
         .on_drop_hover(move |s: &mut Workspace, inside, _| {
-            if inside {
+            if inside && !s.in_copy_mode() {
                 s.drop_hover = Some(hover_id.clone());
             } else if s.drop_hover.as_ref() == Some(&hover_id) {
                 s.drop_hover = None;
@@ -380,7 +387,7 @@ fn pane_card(
                     .terminal
                     .cursor_force
                     .then(|| s.settings.terminal.cursor_style.shape()),
-                ime: keyboard,
+                ime: keyboard && !s.copy_mode_on(&key),
                 colors,
             };
             let (k1, k2, k3) = (key.clone(), key.clone(), key.clone());
@@ -440,13 +447,37 @@ fn pane_card(
                     let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k2.1.as_str());
                     let copies = s.settings.terminal.copy_on_selection || s.primary_selection();
-                    let Some(t) = s.terminals.get_mut(&k2) else {
-                        return;
-                    };
                     let button = match tx.button() {
                         PointerButton::Primary => "left",
                         PointerButton::Middle => "middle",
                         _ => return,
+                    };
+                    if s.in_copy_mode() {
+                        if button == "middle" {
+                            if let Some(t) = s.terminals.get_mut(&k2) {
+                                t.primary_press = None;
+                                t.mouse = None;
+                            }
+                            return;
+                        }
+                        if d.phase == Phase::Down {
+                            let same_pane = s.copy_mode_on(&k2);
+                            s.exit_copy_mode();
+                            if let Some(t) = s.terminals.get_mut(&k2) {
+                                if !same_pane && !focused {
+                                    let _ = t.connection.commands.focus();
+                                }
+                                t.mouse = None;
+                                t.mouse_cell = Some(t.cell_at(d.x, d.y, cell));
+                                t.pressed_link = None;
+                                t.primary_press = None;
+                                t.selecting = false;
+                            }
+                        }
+                        return;
+                    }
+                    let Some(t) = s.terminals.get_mut(&k2) else {
+                        return;
                     };
                     let mods = tx.mods();
                     let at = t.cell_at(d.x, d.y, cell);
@@ -549,6 +580,7 @@ fn pane_card(
                 .on_pointer_move_local(move |s: &mut Workspace, p: PointerEvent, tx: &mut Tx| {
                     let cell = s.metrics().cell;
                     let focused = s.focused_block().as_deref() == Some(k4.1.as_str());
+                    let in_copy = s.copy_mode_on(&k4);
                     let Some(t) = s.terminals.get_mut(&k4) else {
                         tx.live_only();
                         return;
@@ -568,15 +600,19 @@ fn pane_card(
                     if same {
                         tx.live_only();
                     }
-                    if tx.mods().shift
+                    let at = t.cell_at(p.x, p.y, cell);
+                    if in_copy
+                        || tx.mods().shift
                         || !focused
                         || t.mouse.is_some()
                         || !t.tracking()
                         || !t.status().live
                     {
+                        if in_copy {
+                            t.mouse_cell = Some(at);
+                        }
                         return;
                     }
-                    let at = t.cell_at(p.x, p.y, cell);
                     if t.mouse_cell != Some(at) {
                         t.send_mouse("motion", None, at, tx.mods());
                     }
@@ -593,18 +629,26 @@ fn pane_card(
                     let cell = s.metrics().cell;
                     let mods = tx.mods();
                     let focused = s.focused_block().as_deref() == Some(k5.1.as_str());
+                    if s.copy_mode_on(&k5) && mods.shift {
+                        return;
+                    }
                     if let Some(t) = s.terminals.get_mut(&k5)
                         && t.tracking()
                         && mods.shift
                         && t.status().live
                     {
                         if !focused {
-                            let _ = t.connection.commands.focus();
+                            s.exit_copy_mode();
+                            if let Some(t) = s.terminals.get_mut(&k5) {
+                                let _ = t.connection.commands.focus();
+                            }
                         }
-                        let at = t.cell_at(p.x, p.y, cell);
-                        t.clear_selection();
-                        t.send_mouse("press", Some("right"), at, mods);
-                        t.send_mouse("release", Some("right"), at, mods);
+                        if let Some(t) = s.terminals.get_mut(&k5) {
+                            let at = t.cell_at(p.x, p.y, cell);
+                            t.clear_selection();
+                            t.send_mouse("press", Some("right"), at, mods);
+                            t.send_mouse("release", Some("right"), at, mods);
+                        }
                         return;
                     }
                     let w = p.window();
@@ -613,19 +657,29 @@ fn pane_card(
                 .on_wheel(move |s: &mut Workspace, e: WheelEvent, _| {
                     let scale = if e.precise { s.ui_scale() } else { 1. };
                     let cell = s.metrics().cell;
-                    let Some(t) = s.terminals.get_mut(&k3) else {
-                        return false;
+                    let in_copy = s.copy_mode_on(&k3);
+                    let lines = {
+                        let Some(t) = s.terminals.get_mut(&k3) else {
+                            return false;
+                        };
+                        t.scroll -= e.dy / (cell.1 * scale);
+                        let lines = t.scroll.trunc();
+                        if lines != 0. {
+                            t.scroll -= lines;
+                        }
+                        lines
                     };
-                    t.scroll -= e.dy / (cell.1 * scale);
-                    let lines = t.scroll.trunc();
                     if lines != 0. {
-                        t.scroll -= lines;
-                        // Shift + wheel keeps scrolling the local scrollback.
-                        if t.tracking() && !e.mods.shift && t.status().live {
-                            let at = t.cell_at(e.x, e.y, cell);
-                            t.send_wheel(at, lines as i32);
-                        } else {
-                            t.send(Command::Scroll(lines as isize));
+                        if in_copy {
+                            s.copy_mode_scroll(lines as i32);
+                        } else if let Some(t) = s.terminals.get_mut(&k3) {
+                            // Shift + wheel keeps scrolling the local scrollback.
+                            if t.tracking() && !e.mods.shift && t.status().live {
+                                let at = t.cell_at(e.x, e.y, cell);
+                                t.send_wheel(at, lines as i32);
+                            } else {
+                                t.send(Command::Scroll(lines as isize));
+                            }
                         }
                     }
                     true
@@ -881,7 +935,9 @@ pub fn area(s: &Workspace, px: f32) -> El {
     let (panes, dividers) =
         layout::placements(current, preview.as_ref().map(|(k, r)| (k.as_str(), *r)));
     let bleed = full_bleed(s, current);
-    for placement in panes {
+    let [ix, iy, iw, ih] = inner(s);
+
+    let emit_card = |placement: &layout::Placement| {
         let rect = if bleed {
             [0., 0., s.area[2], s.area[3]]
         } else {
@@ -897,7 +953,7 @@ pub fn area(s: &Workspace, px: f32) -> El {
         } else {
             CardState::Plain
         };
-        area = area.child(pane_card(
+        pane_card(
             s,
             current,
             &placement.block,
@@ -906,10 +962,10 @@ pub fn area(s: &Workspace, px: f32) -> El {
             state,
             is_focus && s.panel.is_none(),
             bleed || s.settings.pane_density == PaneDensity::Compact,
-        ));
-    }
-    let [ix, iy, iw, ih] = inner(s);
-    for divider in dividers {
+        )
+    };
+
+    let emit_divider = |divider: &layout::Divider| {
         let [x, y, w, h] = divider.rect;
         let horizontal = divider.horizontal;
         let dragging = s
@@ -932,47 +988,75 @@ pub fn area(s: &Workspace, px: f32) -> El {
             .w(w as f32 * iw)
         };
         let d = divider.clone();
-        area = area.child(
-            divider_handle(
-                handle.key(format!("divider:{}", divider.key())),
-                horizontal,
-                dragging,
-                s.settings.pane_density == PaneDensity::Compact,
-            )
-            .on_drag(move |s: &mut Workspace, g, tx| {
-                let Some(session) = s.model().selected.clone() else {
-                    return;
+        divider_handle(
+            handle.key(format!("divider:{}", divider.key())),
+            horizontal,
+            dragging,
+            s.settings.pane_density == PaneDensity::Compact,
+        )
+        .on_drag(move |s: &mut Workspace, g, tx| {
+            let Some(session) = s.model().selected.clone() else {
+                return;
+            };
+            if g.phase == Phase::Down || s.drag.is_none() {
+                s.layer_drag = None;
+                s.drag = Some(DividerDrag {
+                    host: s.active,
+                    session,
+                    divider: d.clone(),
+                    start: d.ratio,
+                    ratio: d.ratio,
+                });
+            }
+            let [_, _, iw, ih] = inner(s);
+            let scale = s.ui_scale() as f64;
+            if let Some(drag) = &mut s.drag {
+                let [_, _, w, h] = drag.divider.rect;
+                let moved = if drag.divider.horizontal {
+                    g.dx as f64 / (iw as f64 * w * scale)
+                } else {
+                    g.dy as f64 / (ih as f64 * h * scale)
                 };
-                if g.phase == Phase::Down || s.drag.is_none() {
-                    s.drag = Some(DividerDrag {
-                        host: s.active,
-                        session,
-                        divider: d.clone(),
-                        start: d.ratio,
-                        ratio: d.ratio,
-                    });
+                drag.ratio = (drag.start + moved).clamp(0.1, 0.9);
+            }
+            tx.instant();
+            if g.phase == Phase::Up {
+                if g.cancelled() {
+                    s.drag = None;
+                } else {
+                    s.finish_drag();
                 }
-                let [_, _, iw, ih] = inner(s);
-                let scale = s.ui_scale() as f64;
-                if let Some(drag) = &mut s.drag {
-                    let [_, _, w, h] = drag.divider.rect;
-                    let moved = if drag.divider.horizontal {
-                        g.dx as f64 / (iw as f64 * w * scale)
-                    } else {
-                        g.dy as f64 / (ih as f64 * h * scale)
-                    };
-                    drag.ratio = (drag.start + moved).clamp(0.1, 0.9);
+            }
+        })
+    };
+
+    if current.zoomed_block_id.is_some() {
+        for placement in &panes {
+            area = area.child(emit_card(placement));
+        }
+    } else {
+        // Emit layer by layer back to front: that layer's cards, then its own split dividers,
+        // then (for floating layers on API >= 13 drawn at their bounds) its outer resize grips.
+        // A tiled divider behind a floating card never steals pointer input through the card.
+        for (layer_index, layer) in current.layers.iter().enumerate() {
+            if layers::minimized(layer) {
+                continue;
+            }
+            for placement in panes.iter().filter(|p| p.layer_index == layer_index) {
+                area = area.child(emit_card(placement));
+            }
+            for divider in dividers.iter().filter(|d| d.layer_index == layer_index) {
+                area = area.child(emit_divider(divider));
+            }
+            if !bleed && layers::floating(layer) {
+                for grip in floating_drag::grips(s, layer) {
+                    area = area.child(grip);
                 }
-                tx.instant();
-                if g.phase == Phase::Up {
-                    if g.cancelled() {
-                        s.drag = None;
-                    } else {
-                        s.finish_drag();
-                    }
-                }
-            }),
-        );
+            }
+        }
+    }
+    if let Some(ghost) = floating_drag::ghost(s) {
+        area = area.child(ghost);
     }
     area
 }

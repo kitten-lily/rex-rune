@@ -26,6 +26,32 @@ fn hosts_settings(mut ws: Workspace) -> Runtime<Workspace> {
     rt
 }
 
+/// Scrolls Settings until the control keyed `key` is well inside the page, then presses it:
+/// the shared host list and SSH agent rows can push a host's Tailscale rows below the fold.
+fn click(rt: &mut Runtime<Workspace>, key: &str) {
+    let elements = rt.elements();
+    let rect_of = |wanted: &dyn Fn(&str) -> bool| {
+        elements
+            .iter()
+            .find(|e| !e.exiting && e.key.as_deref().is_some_and(wanted))
+            .map(|e| e.rect)
+    };
+    let page = rect_of(&|k| k.starts_with("settings-scroll:"));
+    let control = rect_of(&|k| k == key).unwrap_or_else(|| panic!("missing {key}"));
+    if let Some(page) = page {
+        let (x, middle) = (page[0] + page[2] / 2., page[1] + page[3] / 2.);
+        let off = control[1] + control[3] / 2. - middle;
+        if off.abs() > page[3] / 2. - 60. {
+            rt.pointer_move(x, middle);
+            rt.wheel(x, middle, -off);
+            for _ in 0..30 {
+                rt.frame(1. / 60.);
+            }
+        }
+    }
+    super::click(rt, key);
+}
+
 fn commands(rx: &flume::Receiver<HostCommand>) -> Vec<HostCommand> {
     rx.try_iter().collect()
 }

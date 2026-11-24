@@ -482,6 +482,7 @@ impl Workspace {
             collapsed: false,
             hidden_offline: false,
             shell: None,
+            shared: None,
         };
         let back = self.settings_back();
         self.close_panel(tx);

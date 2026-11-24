@@ -7,6 +7,8 @@ mod directory_tests;
 #[cfg(unix)]
 #[path = "download_tests.rs"]
 mod download_tests;
+#[path = "hosts_tests.rs"]
+mod hosts_tests;
 #[path = "keymap_tests.rs"]
 mod keymap_tests;
 #[path = "navigation_tests.rs"]
@@ -19,6 +21,9 @@ mod perform_tests;
 mod server_controls_tests;
 #[path = "server_info_tests.rs"]
 mod server_info_tests;
+#[cfg(unix)]
+#[path = "ssh_agent_tests.rs"]
+mod ssh_agent_tests;
 #[path = "tailscale_tests.rs"]
 mod tailscale_tests;
 #[path = "verb_tests.rs"]
@@ -2369,4 +2374,899 @@ fn the_old_name_answers_version_as_the_old_updater_checks_it() {
     );
     let options = Options::from_arguments(["rex-linux", "--session", "work"].map(Into::into), true);
     assert_eq!(options.session.as_deref(), Some("work"));
+}
+
+#[tokio::test]
+async fn copy_mode_worker_round_trip_yank_generation_guard_and_auto_exit() {
+    use crate::terminal::copy_mode::{CopyModeInput, CopyModeOp, CopyMotion, CopyUnit, CopyView};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (push_tx, push_rx) = flume::unbounded::<Vec<u8>>();
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 20,
+        rows: 4,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    source.vt_write(b"alpha beta\r\ngamma delta\r\n");
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    // Fake data server: handshake, send Ghostty snapshot, then forward pushed PTY bytes.
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let hello = ws.next().await.unwrap().unwrap().into_data();
+        assert_eq!((hello.len(), hello[0]), (17, 1));
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+
+        while let Ok(bytes) = push_rx.recv_async().await {
+            ws.send(Message::Binary(bytes.into())).await.unwrap();
+        }
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:copy".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+            assert!(generation >= 1);
+
+            // 1. Stale generation is ignored without stamping selection_revision or entering copy mode.
+            let rev_before = model.lock().unwrap().revision;
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation: generation + 99,
+                    epoch: 1,
+                    revision: 42,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            // Deterministic fence: a benign CursorStyle update proves the stale CopyMode
+            // command ahead of it in the FIFO channel was already processed and ignored.
+            cmd_tx
+                .send(DataCommand::CursorStyle(crate::terminal::CursorShape::Bar))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| m.revision > rev_before).await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(
+                    frame.copy, None,
+                    "stale generation must not enter copy mode"
+                );
+                assert_eq!(
+                    frame.selection_revision, 0,
+                    "stale generation must not stamp selection_revision"
+                );
+            }
+
+            // 2. Valid Begin + Top + Select(Char) + WordEnd -> check frame.copy & selection_revision.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 1,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 2,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 3,
+                    visible_rows: None,
+                    op: CopyModeOp::Select(CopyUnit::Char),
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 4,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::WordEnd,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 4)
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(
+                    frame.copy,
+                    Some(CopyView {
+                        epoch: 1,
+                        cursor: (4, 0),
+                        wide: false,
+                        unit: Some(CopyUnit::Char),
+                        display_start: 0,
+                    })
+                );
+                assert_eq!(frame.selection_text.as_deref(), Some("alpha"));
+            }
+
+            // 3. Back-to-back Yank (rev 5) + End (rev 6) delivers CopyYank without racing!
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 5,
+                    visible_rows: None,
+                    op: CopyModeOp::Yank,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 6,
+                    visible_rows: None,
+                    op: CopyModeOp::End,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 6)
+            })
+            .await;
+            {
+                let mut m = model.lock().unwrap();
+                assert_eq!(m.frame.as_ref().unwrap().copy, None);
+                let yank = m.copy_yank.take().expect("yank preserved across End");
+                assert_eq!(
+                    (yank.epoch, yank.revision, yank.text.as_str()),
+                    (1, 5, "alpha")
+                );
+                assert_eq!(m.copy_ended_epoch, 0, "explicit End does not bump auto-end");
+            }
+
+            // 4. Re-enter copy mode (epoch 2), then stream alternate-screen switch over live PTY
+            //    to verify automatic exit and monotonic copy_ended_epoch reporting.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 2,
+                    revision: 7,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 7)
+            })
+            .await;
+            assert!(model.lock().unwrap().frame.as_ref().unwrap().copy.is_some());
+
+            push_tx.send(b"\x1b[?1049h".to_vec()).unwrap();
+            wait_for(&model, &wake_rx, |m| m.copy_ended_epoch == 2).await;
+            {
+                let m = model.lock().unwrap();
+                assert_eq!(m.frame.as_ref().unwrap().copy, None);
+                assert_eq!(m.copy_ended_epoch, 2);
+            }
+
+            // 5. Disconnected forwarding covers Command::CopyMode too.
+            let (fw_tx, fw_rx) = flume::unbounded();
+            let workers = HashMap::from([(
+                "b".to_owned(),
+                PaneWorker {
+                    session: "s".into(),
+                    commands: fw_tx,
+                    task: tokio::task::spawn_local(async {}),
+                    size: None,
+                },
+            )]);
+            let sample = CopyModeInput {
+                generation,
+                epoch: 3,
+                revision: 8,
+                visible_rows: None,
+                op: CopyModeOp::Begin,
+            };
+            assert!(forward_search(&workers, "b", &Command::CopyMode(sample)));
+            assert!(matches!(
+                fw_rx.try_recv(),
+                Ok(DataCommand::CopyMode(got)) if got == sample
+            ));
+
+            drop(push_tx);
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_mode_and_pointer_selection_coordinate_without_clobber_or_orphans() {
+    use crate::terminal::{
+        copy_mode::{CopyModeInput, CopyModeOp, CopyMotion, CopyUnit},
+        selection::{Geometry, Input as SelInput, Phase},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 20,
+        rows: 4,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    for i in 0..20 {
+        source.vt_write(format!("line-{i:02} alpha beta\r\n").as_bytes());
+    }
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let _hello = ws.next().await.unwrap().unwrap().into_data();
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let geom = Geometry {
+        columns: 20,
+        cell_width: 10,
+        padding_left: 0,
+        screen_height: 80,
+    };
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:coord".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+
+            // (a) Active edge pointer drag (which would autoscroll) -> CopyMode::Begin stops the drag.
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 1,
+                    phase: Phase::Down(1),
+                    at: (0, 2),
+                    position: (0., 40.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 2,
+                    phase: Phase::Move,
+                    at: (0, 0),
+                    position: (0., -20.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 3,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 3)
+            })
+            .await;
+            let cursor_after_begin = model.lock().unwrap().frame.as_ref().unwrap().copy.unwrap();
+            assert_eq!(
+                model.lock().unwrap().frame.as_ref().unwrap().selection_text,
+                None,
+                "Begin clears prior pointer selection and stops drag"
+            );
+
+            // (b) Select(Char) in copy mode -> stray Selection(Phase::Up) and idle Phase::Move
+            //     must NOT drop copy mode's ownership or leave an orphaned Ghostty highlight on End.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 4,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 5,
+                    visible_rows: None,
+                    op: CopyModeOp::Select(CopyUnit::Char),
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 6,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::WordEnd,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            // Stray Phase::Up + idle Phase::Move while no drag is active:
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 7,
+                    phase: Phase::Up,
+                    at: (0, 0),
+                    position: (0., 0.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::Selection(SelInput {
+                    generation,
+                    revision: 8,
+                    phase: Phase::Move,
+                    at: (2, 0),
+                    position: (20., 0.),
+                    geometry: geom,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 8)
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(frame.copy.unwrap().unit, Some(CopyUnit::Char));
+                assert_eq!(frame.selection_text.as_deref(), Some("line"));
+                assert_eq!(cursor_after_begin.epoch, 1);
+            }
+
+            // Now End copy mode: Ghostty's selection MUST be cleared (no orphan highlight).
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 9,
+                    visible_rows: None,
+                    op: CopyModeOp::End,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 9)
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(frame.copy, None);
+                assert_eq!(
+                    frame.selection_text, None,
+                    "End clears copy-mode selection cleanly after stray pointer Up/Move"
+                );
+            }
+
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_mode_search_to_match_and_steps_settle_when_queued_without_pre_tick() {
+    use crate::terminal::copy_mode::{CopyModeInput, CopyModeOp, CopyMotion};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 30,
+        rows: 6,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    source.vt_write(b"needle-01 top\r\nfiller\r\nneedle-02 mid\r\nfiller\r\nneedle-03 bot");
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let _hello = ws.next().await.unwrap().unwrap().into_data();
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:search-race".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+
+            // Enter copy mode and move cursor away from the bottom match to row 0.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 1,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 2,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| f.selection_revision == 2)
+            })
+            .await;
+
+            // Case 1: Queue DataCommand::Search + CopyModeOp::ToMatch in the same burst
+            // with zero pre-tick (mirrors `/` + fast typing + Enter within 16ms).
+            cmd_tx
+                .send(DataCommand::Search("needle-03".into()))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 3,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 3
+                        && f.search
+                            .as_ref()
+                            .is_some_and(|s| s.total == 1 && s.selected.is_some())
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                let sel = frame.search.as_ref().unwrap().selected.unwrap();
+                assert_eq!(
+                    frame.copy.unwrap().cursor,
+                    sel.start,
+                    "ToMatch queued immediately after Search must jump once search settles"
+                );
+            }
+
+            // Case 2: Queue DataCommand::Search + ToMatch + SearchStep(true) in one burst
+            // (mirrors `2n` re-opening `find.last` without an open find bar).
+            cmd_tx.send(DataCommand::Search("needle".into())).unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 4,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            cmd_tx.send(DataCommand::SearchStep(true)).unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 4
+                        && f.search
+                            .as_ref()
+                            .is_some_and(|s| s.total == 3 && s.index == Some(1))
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                let sel = frame.search.as_ref().unwrap().selected.unwrap();
+                assert_eq!(
+                    frame.copy.unwrap().cursor,
+                    sel.start,
+                    "queued SearchStep after Search+ToMatch must land on index 1"
+                );
+                assert_eq!(sel.start.1, 2, "needle-02 is on row 2");
+            }
+
+            // Case 3: A manual motion queued before the search settles cancels the pending jump.
+            cmd_tx
+                .send(DataCommand::Search("needle-03".into()))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 5,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 6,
+                    visible_rows: None,
+                    op: CopyModeOp::Move {
+                        motion: CopyMotion::Top,
+                        count: 1,
+                    },
+                }))
+                .unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 6 && f.search.as_ref().is_some_and(|s| s.total == 1)
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                assert_eq!(
+                    frame.copy.unwrap().cursor.1,
+                    0,
+                    "subsequent Move must cancel pending search jump"
+                );
+            }
+
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn search_step_with_copy_mode_off_is_never_dropped_while_unsettled() {
+    use crate::terminal::copy_mode::{CopyModeInput, CopyModeOp};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+
+    let mut source = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+        cols: 30,
+        rows: 6,
+        max_scrollback: 1 << 16,
+    })
+    .unwrap();
+    source.vt_write(b"needle-01 top\r\nfiller\r\nneedle-02 mid\r\nfiller\r\nneedle-03 bot");
+    let snapshot = ghostty_vt::snapshot::encode(&source).unwrap().to_vec();
+    drop(source);
+
+    let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, wire::PROTOCOL).await;
+        let _hello = ws.next().await.unwrap().unwrap().into_data();
+        let mut welcome = vec![0u8; 32];
+        welcome[0] = 0x81;
+        welcome[24] = 1;
+        ws.send(Message::Binary(welcome.into())).await.unwrap();
+        ws.send(Message::Binary(snapshot.into())).await.unwrap();
+        while let Some(frame) = push_rx.recv().await {
+            ws.send(Message::Binary(frame.into())).await.unwrap();
+        }
+        while ws.next().await.is_some() {}
+    });
+
+    let (host_tx, host_rx) = flume::unbounded::<HostCommand>();
+    let ticket_task = tokio::spawn(async move {
+        if let Ok(HostCommand::Ticket { reply, .. }) = host_rx.recv_async().await {
+            let _ = reply.send(Ok(TerminalTicket {
+                token: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                bundled: false,
+            }));
+        }
+    });
+
+    let model = Arc::new(Mutex::new(Model::default()));
+    let (wake_tx, wake_rx) = flume::bounded(1);
+    let (host_wake_tx, _host_wake_rx) = flume::bounded(1);
+    let (cmd_tx, cmd_rx) = flume::unbounded::<DataCommand>();
+    let pane = PaneShared {
+        model: model.clone(),
+        wake: wake_tx,
+        host_wake: host_wake_tx,
+    };
+
+    async fn wait_for(
+        model: &Arc<Mutex<Model>>,
+        wake_rx: &flume::Receiver<()>,
+        pred: impl Fn(&Model) -> bool,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if pred(&model.lock().unwrap()) {
+                    return;
+                }
+                wake_rx.recv_async().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let worker = tokio::task::spawn_local(run_data(
+                endpoint,
+                SESSION.into(),
+                "block:search-off".into(),
+                host_tx,
+                cmd_rx,
+                pane,
+            ));
+
+            wait_for(&model, &wake_rx, |m| m.connected && m.frame.is_some()).await;
+            let generation = model.lock().unwrap().restore_generation;
+
+            // (a) Copy mode OFF: establish an active search (`total == 3`, `index == Some(0)`).
+            cmd_tx.send(DataCommand::Search("needle".into())).unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.search
+                        .as_ref()
+                        .is_some_and(|s| s.total == 3 && s.index == Some(0))
+                })
+            })
+            .await;
+
+            // Re-send `Search("needle")` (which marks `settled = false` while keeping the active
+            // `Search` instance) followed immediately by `SearchStep(true)` in the same burst,
+            // plus streaming terminal output, with copy mode OFF. The step must NOT be dropped.
+            push_tx.send(b"\r\nextra output".to_vec()).unwrap();
+            cmd_tx.send(DataCommand::Search("needle".into())).unwrap();
+            cmd_tx.send(DataCommand::SearchStep(true)).unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.copy.is_none()
+                        && f.search
+                            .as_ref()
+                            .is_some_and(|s| s.total == 3 && s.index == Some(1))
+                })
+            })
+            .await;
+
+            // (b) Copy mode ON: `Search` + `ToMatch` + `SearchStep(true)` queued while unsettled
+            // still queues and settles cleanly onto index 1 with the copy cursor on that match.
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 1,
+                    visible_rows: None,
+                    op: CopyModeOp::Begin,
+                }))
+                .unwrap();
+            cmd_tx.send(DataCommand::Search(String::new())).unwrap();
+            cmd_tx.send(DataCommand::Search("needle".into())).unwrap();
+            cmd_tx
+                .send(DataCommand::CopyMode(CopyModeInput {
+                    generation,
+                    epoch: 1,
+                    revision: 2,
+                    visible_rows: None,
+                    op: CopyModeOp::ToMatch,
+                }))
+                .unwrap();
+            cmd_tx.send(DataCommand::SearchStep(true)).unwrap();
+            wait_for(&model, &wake_rx, |m| {
+                m.frame.as_ref().is_some_and(|f| {
+                    f.selection_revision == 2
+                        && f.copy.is_some()
+                        && f.search
+                            .as_ref()
+                            .is_some_and(|s| s.total == 3 && s.index == Some(1))
+                })
+            })
+            .await;
+            {
+                let m = model.lock().unwrap();
+                let frame = m.frame.as_ref().unwrap();
+                let sel = frame.search.as_ref().unwrap().selected.unwrap();
+                assert_eq!(frame.copy.unwrap().cursor, sel.start);
+            }
+
+            drop(push_tx);
+            cmd_tx.send(DataCommand::Stop).unwrap();
+            worker.await.unwrap();
+        })
+        .await;
+
+    ticket_task.await.unwrap();
+    server.await.unwrap();
 }

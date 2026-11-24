@@ -61,7 +61,7 @@ impl Workspace {
         targets
     }
 
-    fn layer_target_in(
+    pub(super) fn layer_target_in(
         &self,
         host: usize,
         session: &str,
@@ -115,7 +115,7 @@ impl Workspace {
         }
     }
 
-    fn layer_host(&self, target: &LayerTarget) -> Option<usize> {
+    pub(super) fn layer_host(&self, target: &LayerTarget) -> Option<usize> {
         self.hosts
             .get(target.host)
             .filter(|host| host.id == target.host_id)
@@ -123,7 +123,7 @@ impl Workspace {
             .or_else(|| self.host_index(target.host_id))
     }
 
-    fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
+    pub(super) fn captured_layer_gate(&self, target: &LayerTarget) -> Option<layers::Blocked> {
         let Some(index) = self.layer_host(target) else {
             return Some(layers::Blocked::Stale);
         };
@@ -131,7 +131,7 @@ impl Workspace {
         layers::unsupported(model.connected, model.protocol.api_revision)
     }
 
-    fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {
+    pub(super) fn layer_window(&self, target: &LayerTarget) -> Option<&Window> {
         let model = &self.hosts[self.layer_host(target)?].model;
         if model.connection_epoch != target.epoch
             || !model
@@ -306,29 +306,43 @@ impl Workspace {
         }
         match action {
             // The menu's own tab, session and folder, never the ones on screen now.
-            LayerAction::NewFloating => self.new_floating_layer(
-                self.layer_host(&target).expect("validated host"),
-                &target.session,
-                &target.window,
-                Some(&target.block),
-            ),
+            LayerAction::NewFloating => {
+                self.exit_copy_mode();
+                self.new_floating_layer(
+                    self.layer_host(&target).expect("validated host"),
+                    &target.session,
+                    &target.window,
+                    Some(&target.block),
+                )
+            }
             LayerAction::Float => self.layer_request(
                 &target,
                 "session.float_block",
                 json!({"block_id":target.block,"bounds":layers::REQUESTED_BOUNDS}),
             ),
             // The server keeps the block and its program; only the state changes.
-            LayerAction::Minimize => self.layer_request(
-                &target,
-                "session.set_layer_state",
-                json!({"layer_id":target.layer,"state":"minimized"}),
-            ),
+            LayerAction::Minimize => {
+                if self.copy_mode.as_ref().is_some_and(|session| {
+                    session.key.0 == target.host_id
+                        && target.panes.iter().any(|(id, _)| id == &session.key.1)
+                }) {
+                    self.exit_copy_mode();
+                }
+                self.layer_request(
+                    &target,
+                    "session.set_layer_state",
+                    json!({"layer_id":target.layer,"state":"minimized"}),
+                )
+            }
             // One call restores or focuses and raises, in one revision: no second request.
-            LayerAction::Focus => self.layer_request(
-                &target,
-                "session.set_layer_state",
-                json!({"layer_id":target.layer,"state":"normal","focus":true}),
-            ),
+            LayerAction::Focus => {
+                self.exit_copy_mode();
+                self.layer_request(
+                    &target,
+                    "session.set_layer_state",
+                    json!({"layer_id":target.layer,"state":"normal","focus":true}),
+                )
+            }
             // Bring to front never focuses, so it is named for raising alone.
             LayerAction::Raise => self.layer_request(
                 &target,

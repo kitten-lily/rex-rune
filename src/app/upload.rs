@@ -56,7 +56,7 @@ impl Workspace {
     }
 
     pub fn drop_files(&mut self, block: &str, paths: &[PathBuf]) {
-        if self.panel.is_some() || paths.is_empty() {
+        if self.panel.is_some() || self.in_copy_mode() || paths.is_empty() {
             return;
         }
         if self.focused_block().as_deref() != Some(block)
@@ -79,6 +79,9 @@ impl Workspace {
     /// (`while_focused`); a pane menu's names its pane, focused or not, and reaches it as long
     /// as it is still a pane of that session. Either way nothing is pasted under a dialog.
     pub fn paste_into(&mut self, block: &str, while_focused: bool, tx: &mut Tx) {
+        if self.in_copy_mode() {
+            return;
+        }
         let asked = self.term_key(block);
         if !self.terminals.get(&asked).is_some_and(|t| t.status().live) {
             return;
@@ -92,7 +95,7 @@ impl Workspace {
                     && s.model().selected == session
                     && s.target(&asked.1).is_some_and(|t| s.target_exists(&t))
             };
-            if !still || s.panel.is_some() {
+            if !still || s.panel.is_some() || s.in_copy_mode() {
                 return;
             }
             if !content.files().is_empty() {

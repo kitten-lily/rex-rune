@@ -62,7 +62,8 @@ Preferences are stored as JSON in `$XDG_CONFIG_HOME/rex-rune/workspace.json`
   last view (`activity_view`: `"session"` or `"priority"`, the default, omitted
   when saved), the tabs muted on this client (`muted_tabs`), automatic update
   checks (`updates.check`, default `true`), automatic installation for eligible
-  install.sh installs (`updates.install_automatically`, default `false`), and
+  install.sh installs (`updates.install_automatically`, default `false`), the
+  optional SSH agent socket (`ssh.agent`, omitted when System default), and
   whether agents may name sessions (`agent_session_naming`).
 
 Update check state and dismissed versions are stored in
@@ -87,8 +88,9 @@ these pages:
   default shell and generated titles.
 - **Shortcuts**, **Integrations** (Rex's skill and hooks for coding agents on this
   machine), **Notifications** (a table of where each program state shows: tabs,
-  desktop notifications, the unread count and sound), **Remote Hosts** (add, edit
-  or remove saved hosts, and a local host's Tailscale controls), **Updates** and **About**.
+  desktop notifications, the unread count and sound), **Remote Hosts** (client
+  label, SSH agent picker on Linux/macOS, add, edit or remove saved hosts, and a
+  local host's Tailscale controls), **Updates** and **About**.
 
 A host's name, endpoint and default shell can also be edited from its sidebar
 header's right-click menu, from Edit host… in Commands, or from an offline
@@ -312,7 +314,10 @@ so once this client has declared any theme (remembered as
 empty `set_theme`, Rex's own colours, to each pane this client owns or nobody owns:
 once per pane per connection, when its stream starts, when this client takes it,
 and again after a reconnect. A server without `set_theme` is reported once and the
-choice is kept for other hosts.
+choice is kept for other hosts. Under the same **Colours** card, **Keep program
+backgrounds** (`terminal.keep_program_background`, off by default) keeps a
+pane's own OSC 11 default background instead of substituting the chrome or
+declared theme's background.
 
 ## Terminal display, selection and fonts
 

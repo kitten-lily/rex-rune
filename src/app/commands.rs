@@ -548,6 +548,10 @@ impl Workspace {
             pane("pane.paste", "Paste", PaneAction::Paste).keywords("clipboard"),
             pane("pane.select_all", "Select all", PaneAction::SelectAll)
                 .keywords("screen scrollback text"),
+            Command::action("pane.copy_mode", G, "Copy mode", super::copy_mode::ACTION)
+                .enabled(self.can_enter_copy_mode())
+                .keywords("vim scrollback select yank visual")
+                .section(1),
             Command::action("pane.search", G, "Search terminal…", actions::SEARCH)
                 .keywords("find")
                 .section(1),
@@ -765,18 +769,24 @@ impl Workspace {
         use Group::Host as G;
         let host = self.active;
         let saved = &self.settings.hosts[host];
+        let blocked = self.shared_write_blocked(host);
         let name = &saved.label;
+        let mut edit = Command::new(
+            "host.edit",
+            G,
+            format!("Edit host {name}…"),
+            Intent::EditHost(host),
+        )
+        .enabled(blocked.is_none())
+        .keywords("endpoint name");
+        if let Some(reason) = &blocked {
+            edit = edit.detail(reason.clone());
+        }
         let mut rows = vec![
             Command::action("host.switch", G, "Switch host…", "client.host.switch"),
             Command::new("host.add", G, "Add host…", Intent::AddHost)
                 .keywords("remote connect server"),
-            Command::new(
-                "host.edit",
-                G,
-                format!("Edit host {name}…"),
-                Intent::EditHost(host),
-            )
-            .keywords("endpoint name"),
+            edit,
             Command::new(
                 "host.shell",
                 G,
@@ -847,15 +857,21 @@ impl Workspace {
             )
             .enabled(self.can_stop_server())
             .destructive(),
-            Command::new(
-                "host.remove",
-                G,
-                format!("Remove host {name}…"),
-                Intent::RemoveHost(host),
-            )
-            .enabled(self.settings.hosts.len() > 1)
-            .keywords("forget delete")
-            .destructive(),
+            {
+                let mut remove = Command::new(
+                    "host.remove",
+                    G,
+                    format!("Remove host {name}…"),
+                    Intent::RemoveHost(host),
+                )
+                .enabled(self.settings.hosts.len() > 1 && blocked.is_none())
+                .keywords("forget delete")
+                .destructive();
+                if let Some(reason) = &blocked {
+                    remove = remove.detail(reason.clone());
+                }
+                remove
+            },
         ]);
         rows
     }

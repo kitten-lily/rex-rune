@@ -18,10 +18,11 @@ Implementation follow-up records, each with scope and verification. They do not 
 - M3.3: [first, read-only Server settings slice](M3.3-server-settings.md); [running duration and confirmed Stop server (partial)](M3.3-server-controls.md), and pairing from a local host's Tailscale controls (see [Tailscale](../hosts.md#tailscale-on-a-local-host)).
 - M3.4: [notification quality and health (partial)](M3.4-notification-quality.md); sound hints ride on notifications here, without upstream's local sound player.
 - M3.7: [prompt navigation verified and implemented](prompt-navigation.md).
+- M4: [floating panes, slice 1 (server actions and lifecycle)](M4-floating-layers.md); [floating panes, slice 2 (pointer drag and 8-way edge resize)](M4-floating-drag-resize.md).
 - M4.4: [recovery: shortcut recorder](M4.4.md).
 - M7: [terminal fonts without fontconfig, and bundled Nerd Font symbols](M7-fonts.md).
 - M11: [macOS notifications through the notification centre](M11-macos-notifications.md).
-- No milestone: [pane header on a single pane](single-pane-header.md); [pane header program icon](pane-header-icon.md); [active key-mode chip](key-mode-chip.md).
+- No milestone: [pane header on a single pane](single-pane-header.md); [pane header program icon](pane-header-icon.md); [active key-mode chip](key-mode-chip.md); [Vim copy mode (UI integration)](copy-mode.md).
 
 ## Layout
 

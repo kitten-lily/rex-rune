@@ -264,6 +264,7 @@ impl Workspace {
         timeout: Duration,
         tx: &mut Tx,
     ) {
+        self.exit_copy_mode();
         self.navigation.serial += 1;
         let now = Instant::now();
         self.navigation.pending = Some(Pending {
@@ -294,6 +295,7 @@ impl Workspace {
         };
         self.active = host;
         self.drag = None;
+        self.layer_drag = None;
         self.settings.hosts[host].collapsed = false;
         self.update_visibility();
         if !self.hosts[host].model.connected {

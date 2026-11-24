@@ -79,6 +79,12 @@ pub enum Intent {
     ChooseChrome,
     /// Draw the chrome in this palette from now on, then return to Settings.
     Chrome(ChromeTheme),
+    /// The SSH agent picker, from Settings → Remote Hosts.
+    ChooseSshAgent,
+    /// Use this SSH agent for `ssh://` hosts, then return to Settings.
+    SshAgent(rex_rune::settings::ssh::SshAgent),
+    /// Open the custom SSH agent socket form from the SSH agent picker.
+    SshAgentCustom,
     /// Open Settings → Updates.
     Updates,
     /// Trigger an immediate release metadata check.
@@ -188,6 +194,8 @@ impl Intent {
                 | Intent::ClientLabel
                 | Intent::ChooseTheme
                 | Intent::ChooseChrome
+                | Intent::ChooseSshAgent
+                | Intent::SshAgentCustom
                 | Intent::AddHost
                 | Intent::AddMachine(_)
                 | Intent::MachineForm(_)
@@ -326,6 +334,8 @@ pub enum Form {
     TailscaleName(usize),
     /// Where downloads are saved: `downloads.directory`.
     DownloadFolder,
+    /// Custom SSH agent Unix socket path: `ssh.agent`.
+    SshAgentSocket,
     /// `None`: the selected session (Commands); `Some`: a sidebar row's session.
     RenameSession(Option<SessionTarget>),
     RenameWindow(String),
@@ -425,6 +435,8 @@ pub enum PanelKind {
     Fonts(super::font_picker::FontPick),
     /// The chrome palettes.
     Chromes,
+    /// The SSH agent choices (System default, detected agents, Custom socket…).
+    SshAgents,
     /// The values of one setting, from a Settings `select_row`.
     Choice(Choice),
     /// The Add host list of the tailnet's machines, filtered by the search field.
@@ -496,6 +508,11 @@ pub struct Panel {
     pub anchor_to: Option<String>,
     /// A switcher row being renamed in place, and its field.
     pub rename: Option<(SessionTarget, TextEdit)>,
+    /// For `Form::AddHost`: whether to save the new host to Rex's shared host list (`hosts.put`).
+    pub save_shared: bool,
+    /// For `Form::EditHost` / `PanelKind::RemoveHost`: the host's `shared.id` when the panel
+    /// opened, so a stale dialog cannot mutate a host whose shared link changed meanwhile.
+    pub opened_shared_id: Option<String>,
 }
 
 impl Panel {
@@ -530,6 +547,8 @@ impl Panel {
             anchor: None,
             anchor_to: None,
             rename: None,
+            save_shared: false,
+            opened_shared_id: None,
         }
     }
     pub fn is_list(&self) -> bool {
@@ -547,6 +566,7 @@ impl Panel {
                 | PanelKind::Themes
                 | PanelKind::Fonts(_)
                 | PanelKind::Chromes
+                | PanelKind::SshAgents
                 | PanelKind::Choice(_)
                 | PanelKind::Discover
                 | PanelKind::ShortcutMenu
@@ -673,9 +693,16 @@ impl Workspace {
                 Entry::new("Retry connection", "", "", Intent::RetryHost(target.host))
                     .in_section(2),
             );
-            entries.push(
-                Entry::new("Edit host…", "", "", Intent::EditHost(target.host)).in_section(2),
-            );
+            let blocked = self.shared_write_blocked(target.host);
+            let mut edit = Entry::new(
+                "Edit host…",
+                blocked.as_deref().unwrap_or(""),
+                "",
+                Intent::EditHost(target.host),
+            )
+            .in_section(2);
+            edit.enabled = blocked.is_none();
+            entries.push(edit);
         }
         let mut close = Entry::new(
             "Close session…",
@@ -747,11 +774,25 @@ impl Workspace {
             )
             .in_section(2),
         );
-        entries.push(Entry::new("Edit host…", "", "", Intent::EditHost(host)).in_section(2));
-        let mut remove = Entry::new("Remove host…", "", "", Intent::RemoveHost(host))
-            .in_section(3)
-            .destructive();
-        remove.enabled = self.settings.hosts.len() > 1;
+        let blocked = self.shared_write_blocked(host);
+        let mut edit = Entry::new(
+            "Edit host…",
+            blocked.as_deref().unwrap_or(""),
+            "",
+            Intent::EditHost(host),
+        )
+        .in_section(2);
+        edit.enabled = blocked.is_none();
+        entries.push(edit);
+        let mut remove = Entry::new(
+            "Remove host…",
+            blocked.as_deref().unwrap_or(""),
+            "",
+            Intent::RemoveHost(host),
+        )
+        .in_section(3)
+        .destructive();
+        remove.enabled = self.settings.hosts.len() > 1 && blocked.is_none();
         entries.push(remove);
         entries
     }
@@ -846,6 +887,9 @@ impl Workspace {
                     e
                 })
                 .collect();
+        }
+        if matches!(panel.kind, PanelKind::SshAgents) {
+            return self.ssh_agent_entries();
         }
         if let PanelKind::Choice(choice) = &panel.kind {
             return choice

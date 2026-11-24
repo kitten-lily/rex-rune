@@ -16,7 +16,7 @@ use rex_rune::{
         typography::Typography,
     },
     terminal::{
-        Cell, CursorShape, Frame, SelectionUnit,
+        Cell, CopyModeOp, CopyYank, CursorShape, Frame, SelectionUnit,
         graphics::{Image as TermImage, ImagePixels},
     },
     terminal_theme::{TerminalTheme, is_light},
@@ -84,6 +84,16 @@ pub struct Term {
     pub search: Option<TextEdit>,
     /// The last text searched here and the corner the find bar is in.
     pub find: super::find::Memory,
+    /// Monotonically increasing copy-mode epoch allocated on this pane.
+    copy_epoch: u64,
+    /// Active copy-mode epoch on this pane, if any (for defense-in-depth guards).
+    copy_mode_active: Option<u64>,
+    /// Highest copy-mode epoch ended automatically by the pane worker.
+    copy_ended_epoch: u64,
+    /// Pending yank taken from `Model::copy_yank`, ready for one-shot clipboard delivery.
+    pending_copy_yank: Option<CopyYank>,
+    /// Last delivered `(epoch, revision)` so each yank is copied at most once.
+    last_copy_yank: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Copy)]
@@ -235,9 +245,13 @@ pub struct Status {
 
 impl Term {
     pub fn new(connection: Connection) -> Self {
-        let (frame, restore_generation) = {
+        let (frame, restore_generation, copy_ended_epoch) = {
             let model = connection.model.lock().expect("terminal model");
-            (model.frame.clone(), model.restore_generation)
+            (
+                model.frame.clone(),
+                model.restore_generation,
+                model.copy_ended_epoch,
+            )
         };
         Self {
             connection,
@@ -267,35 +281,63 @@ impl Term {
             pressed_link: None,
             search: None,
             find: Default::default(),
+            copy_epoch: 0,
+            copy_mode_active: None,
+            copy_ended_epoch,
+            pending_copy_yank: None,
+            last_copy_yank: None,
         }
     }
 
     pub fn refresh(&mut self) {
-        let (frame, generation, notice) = {
+        let (frame, generation, notice, copy_yank, copy_ended_epoch) = {
             let mut model = self.connection.model.lock().expect("terminal model");
             (
                 model.frame.clone(),
                 model.restore_generation,
                 model.notice.take(),
+                model.copy_yank.take(),
+                model.copy_ended_epoch,
             )
         };
         if notice.is_some() {
             self.notice = notice;
         }
+        self.copy_ended_epoch = self.copy_ended_epoch.max(copy_ended_epoch);
         if generation != self.restore_generation {
             self.selection = None;
             self.selection_anchor = None;
             self.selecting = false;
             self.last_selection_input = None;
             self.copy_wanted = None;
+            self.copy_mode_active = None;
+            self.pending_copy_yank = None;
             self.restore_generation = generation;
+        }
+        if self
+            .copy_mode_active
+            .is_some_and(|epoch| self.copy_ended_epoch >= epoch)
+        {
+            self.copy_mode_active = None;
+        }
+        if let Some(yank) = copy_yank
+            && Some((yank.epoch, yank.revision)) != self.last_copy_yank
+        {
+            self.pending_copy_yank = Some(yank);
         }
         if let Some(frame) = &frame {
             if frame.selection_error != self.frame.as_ref().and_then(|f| f.selection_error.clone())
             {
                 self.notice = frame.selection_error.clone();
             }
-            if frame.selection_revision == self.selection_revision {
+            if frame.copy.is_some() {
+                // Copy mode owns Ghostty's selection; never fall back to pointer (0, 0)
+                // selection or let visual cursor motions trigger copy_on_selection.
+                self.selection = None;
+                self.selection_anchor = None;
+                self.selecting = false;
+                self.copy_wanted = None;
+            } else if frame.selection_revision == self.selection_revision {
                 if frame.selection_text.is_some() && self.selection.is_none() {
                     self.selection = Some((0, 0));
                 } else if !self.selecting && frame.selection_text.is_none() {
@@ -404,7 +446,34 @@ impl Term {
     }
 
     /// The same send and notice, with acceptance feedback for local path history.
+    /// Defense-in-depth: exits copy mode before any PTY input command reaches the worker.
     pub fn try_send(&mut self, command: Command) -> bool {
+        let is_pty_input = match &command {
+            Command::Key(payload) => {
+                payload.get("action").and_then(|v| v.as_str()) != Some("release")
+            }
+            Command::KeyWithPrefix { .. }
+            | Command::Paste(_)
+            | Command::SendKey(_)
+            | Command::Mouse(_)
+            | Command::Wheel(_)
+            | Command::Reset
+            | Command::Clear => true,
+            _ => false,
+        };
+        if is_pty_input && let Some(epoch) = self.copy_mode_active.take() {
+            self.selection_revision = self.selection_revision.wrapping_add(1);
+            let _ = self
+                .connection
+                .commands
+                .try_send(Command::CopyMode(super::copy_mode::input(
+                    self.restore_generation,
+                    epoch,
+                    self.selection_revision,
+                    None,
+                    CopyModeOp::End,
+                )));
+        }
         if let Err(error) = self.connection.commands.try_send(command) {
             self.notice = Some(format!("Input not sent: {error}"));
             return false;
@@ -412,8 +481,98 @@ impl Term {
         true
     }
 
+    pub fn restore_generation(&self) -> u64 {
+        self.restore_generation
+    }
+
+    pub fn copy_ended_epoch(&self) -> u64 {
+        self.copy_ended_epoch
+    }
+
+    pub fn copy_mode_is_active(&self, epoch: u64) -> bool {
+        self.copy_mode_active == Some(epoch)
+    }
+
+    pub fn clear_copy_mode_active(&mut self) {
+        self.copy_mode_active = None;
+    }
+
+    pub fn copy_visible_rows(&self, cell: (f32, f32)) -> Option<u16> {
+        if self.rect[3] <= 0. {
+            return None;
+        }
+        Some(self.visible_rows(cell).min(usize::from(u16::MAX)) as u16)
+    }
+
+    /// Allocate a monotonically increasing non-zero copy-mode epoch strictly greater than
+    /// `model.copy_ended_epoch`, clear local pointer selection, and send `CopyModeOp::Begin`.
+    pub fn begin_copy_mode(&mut self, cell: (f32, f32)) -> (u64, u64) {
+        {
+            let model = self.connection.model.lock().expect("terminal model");
+            self.restore_generation = model.restore_generation;
+            self.copy_ended_epoch = self.copy_ended_epoch.max(model.copy_ended_epoch);
+        }
+        let epoch = self
+            .copy_epoch
+            .max(self.copy_ended_epoch)
+            .saturating_add(1)
+            .max(1);
+        self.copy_epoch = epoch;
+        self.copy_mode_active = Some(epoch);
+        self.selection = None;
+        self.selection_anchor = None;
+        self.selecting = false;
+        self.copy_wanted = None;
+        self.last_selection_input = None;
+        self.primary_press = None;
+        self.mouse = None;
+        self.send_copy_mode(self.restore_generation, epoch, cell, CopyModeOp::Begin);
+        (self.restore_generation, epoch)
+    }
+
+    /// Send one stamped copy-mode operation to the pane worker.
+    pub fn send_copy_mode(
+        &mut self,
+        generation: u64,
+        epoch: u64,
+        cell: (f32, f32),
+        op: CopyModeOp,
+    ) {
+        self.selection_revision = self.selection_revision.wrapping_add(1);
+        self.copy_wanted = None;
+        let visible_rows = self.copy_visible_rows(cell);
+        self.send(Command::CopyMode(super::copy_mode::input(
+            generation,
+            epoch,
+            self.selection_revision,
+            visible_rows,
+            op,
+        )));
+    }
+
+    /// Take the latest pending copy-mode yank once, deduplicated by `(epoch, revision)`.
+    pub fn take_copy_yank(&mut self) -> Option<CopyYank> {
+        let yank = self.pending_copy_yank.take()?;
+        if yank.epoch != self.copy_epoch || Some((yank.epoch, yank.revision)) == self.last_copy_yank
+        {
+            return None;
+        }
+        self.last_copy_yank = Some((yank.epoch, yank.revision));
+        Some(yank)
+    }
+
     pub fn visible_rows(&self, cell: (f32, f32)) -> usize {
         (self.rect[3] / cell.1).floor().max(1.) as usize
+    }
+
+    pub fn visible_cols(&self, cell: (f32, f32)) -> usize {
+        if self.rect[2] <= 0. {
+            return self
+                .frame
+                .as_ref()
+                .map_or(1, |f| usize::from(f.cols).max(1));
+        }
+        (self.rect[2] / cell.0).floor().max(1.) as usize
     }
 
     pub fn display_row(&self, cell: (f32, f32)) -> usize {
@@ -964,6 +1123,13 @@ fn selected_colors(colors: &TermColors, text: u32, ground: u32) -> (u32, u32) {
     }
 }
 
+/// The server's default background for a row and the colour this client draws it as.
+#[derive(Clone, Copy)]
+struct RowBg {
+    frame: u32,
+    body: u32,
+}
+
 #[cfg(test)]
 fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m: &Metrics) -> El {
     let marks = Marks {
@@ -971,27 +1137,27 @@ fn row_el(cells: &[Cell], y: f32, frame_bg: u32, sel: Option<(usize, usize)>, m:
         corners: [true; 4],
         ..Marks::default()
     };
-    row_pass(
-        cells,
-        y,
-        frame_bg,
-        &marks,
-        m,
-        RowPass::All,
-        &TermColors::default(),
-    )
+    let colors = TermColors::default();
+    let bg = RowBg {
+        frame: frame_bg,
+        body: colors.body(frame_bg, false),
+    };
+    row_pass(cells, y, bg, &marks, m, RowPass::All, &colors)
 }
 
 fn row_pass(
     cells: &[Cell],
     y: f32,
-    frame_bg: u32,
+    bg: RowBg,
     marks: &Marks<'_>,
     m: &Metrics,
     pass: RowPass,
     colors: &TermColors,
 ) -> El {
-    let body = colors.body(frame_bg);
+    let RowBg {
+        frame: frame_bg,
+        body,
+    } = bg;
     let (cw, ch) = m.cell;
     let sel = marks.selection;
     // Memoized rows are flattened on their own, so each says again that it never animates:
@@ -1294,6 +1460,9 @@ pub struct TermColors {
     pub search_match: u32,
     /// The selected match's text, over its highlight.
     pub search_text: u32,
+    /// Keep a background colour a program set for its pane (OSC 11) instead of substituting
+    /// `background`.
+    pub keep_program_background: bool,
 }
 impl Default for TermColors {
     fn default() -> Self {
@@ -1314,6 +1483,7 @@ impl TermColors {
             cursor_text: theme.cursor_text,
             search_match: palette.accent,
             search_text: palette.on_accent,
+            keep_program_background: false,
         }
     }
 
@@ -1323,13 +1493,22 @@ impl TermColors {
         self
     }
 
-    /// What the server's default background `frame_bg` draws as: `background` when both are
-    /// equally dark or light (Rex's built-in black, or another owner's theme), so a single
-    /// pane reads as one surface with the chrome; otherwise the server's own, so the default
-    /// text drawn for it stays readable. Only that exact colour is replaced, so explicit
-    /// backgrounds and inverse video's block keep theirs.
-    pub fn body(&self, frame_bg: u32) -> u32 {
-        if is_light(frame_bg) == is_light(self.background) {
+    /// Whether a program-set default background (OSC 11) keeps its own colour.
+    pub fn with_program_background(mut self, keep: bool) -> Self {
+        self.keep_program_background = keep;
+        self
+    }
+
+    /// What the server's default background `frame_bg` draws as: `frame_bg` when a program
+    /// chose it (`from_program`) and `keep_program_background` is on; otherwise `background`
+    /// when both are equally dark or light (Rex's built-in black, or another owner's theme),
+    /// so a single pane reads as one surface with the chrome; otherwise the server's own, so
+    /// the default text drawn for it stays readable. Only that exact colour is replaced, so
+    /// explicit backgrounds and inverse video's block keep theirs.
+    pub fn body(&self, frame_bg: u32, from_program: bool) -> u32 {
+        if self.keep_program_background && from_program {
+            frame_bg
+        } else if is_light(frame_bg) == is_light(self.background) {
             self.background
         } else {
             frame_bg
@@ -1342,7 +1521,7 @@ impl Term {
     pub fn body(&self, colors: &TermColors) -> u32 {
         self.frame
             .as_ref()
-            .map_or(colors.background, |f| colors.body(f.bg))
+            .map_or(colors.background, |f| colors.body(f.bg, f.bg_from_program))
     }
 }
 
@@ -1356,12 +1535,15 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
     let start = frame.display_row_start(visible);
     let cols = frame.cols as usize;
     let colors = &look.colors;
-    let body = colors.body(frame.bg);
+    let body = colors.body(frame.bg, frame.bg_from_program);
     let selection = term.selection.map(|(a, b)| (a.min(b), a.max(b)));
+    let in_copy = frame.copy.is_some();
     let selected_on = |y: usize| {
         if y >= frame.cells.len() {
             None
-        } else if term.selection.is_some() && frame.selection_revision == term.selection_revision {
+        } else if in_copy
+            || (term.selection.is_some() && frame.selection_revision == term.selection_revision)
+        {
             frame.selection_rows.get(y).copied().flatten()
         } else {
             selection.and_then(|(a, b)| {
@@ -1395,6 +1577,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             (
                 &marks,
                 frame.bg,
+                body,
                 cw.to_bits(),
                 ch.to_bits(),
                 m.px.to_bits(),
@@ -1406,8 +1589,12 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                 .hash(&mut h);
             let top = (y - start) as f32 * ch;
             let id = format!("{key}/r{}:{pass:?}", y - start);
+            let bg = RowBg {
+                frame: frame.bg,
+                body,
+            };
             grid = grid.child(memo(id, h.finish(), || {
-                row_pass(cells, top, frame.bg, &marks, m, pass, colors)
+                row_pass(cells, top, bg, &marks, m, pass, colors)
             }));
         }
         grid
@@ -1440,7 +1627,55 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             grid = grid.child(mark);
         }
     }
-    if let Some((x, y)) = frame.cursor
+    if let Some(view) = frame.copy {
+        let (x, y) = view.cursor;
+        if let Some(cursor_look) = look.cursor
+            && (y as usize) >= start
+            && (y as usize) < start + visible
+        {
+            let (px, py) = (x as f32 * cw, (y as usize - start) as f32 * ch);
+            let width = if view.wide { 2. * cw } else { cw };
+            let color = rgb(colors.search_match);
+            let shape = match cursor_look {
+                CursorLook::Block => CursorShape::Block,
+                CursorLook::Hollow => CursorShape::Hollow,
+            };
+            let cursor =
+                cursor_el(shape, (px, py), (width, ch), color).key(format!("{key}/copy-cursor"));
+            grid = grid.child(cursor);
+            if shape == CursorShape::Block
+                && let Some(cell) = frame
+                    .cells
+                    .get(y as usize)
+                    .and_then(|r| r.get(x as usize))
+                    .filter(|c| !c.text.is_empty() && !c.text.starts_with('\u{10eeee}'))
+            {
+                let mut chars = cell.text.chars();
+                let single = chars.next().filter(|_| chars.next().is_none());
+                if let Some(sprite) = single.and_then(Sprite::of) {
+                    let layer = el()
+                        .key(format!("{key}/copy-cursor-sprite"))
+                        .absolute(px, py)
+                        .size(width, ch);
+                    grid = grid.child(sprite.draw(
+                        layer,
+                        0.,
+                        (width, ch),
+                        m.px,
+                        rgb(colors.search_text),
+                    ));
+                } else {
+                    let mut style = RunStyle {
+                        fg: colors.search_text,
+                        ..RunStyle::of(cell, frame.bg, body)
+                    };
+                    style.bold &= m.bold;
+                    style.italic &= m.italic;
+                    grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
+                }
+            }
+        }
+    } else if let Some((x, y)) = frame.cursor
         && let Some(cursor_look) = look.cursor
         && (y as usize) >= start
         && (y as usize) < start + visible
@@ -1453,21 +1688,31 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
             CursorLook::Block => look.cursor_force.unwrap_or(frame.cursor_shape),
             CursorLook::Hollow => CursorShape::Hollow,
         };
-        let mut cursor = cursor_el(shape, (px, py), m.cell, color).key(format!("{key}/cursor"));
-        if look.ime {
-            cursor = cursor.ime_cursor();
-        }
+        let cursor = cursor_el(shape, (px, py), m.cell, color).key(format!("{key}/cursor"));
         grid = grid.child(cursor);
         if shape == CursorShape::Block
             && let Some(cell) =
                 cell.filter(|c| !c.text.is_empty() && !c.text.starts_with('\u{10eeee}'))
         {
             let style = RunStyle {
-                fg: colors.cursor_text.unwrap_or(body),
+                fg: colors
+                    .cursor_text
+                    .filter(|_| body == colors.background)
+                    .unwrap_or(body),
                 ..RunStyle::of(cell, frame.bg, body)
             };
             grid = grid.child(glyph_run(cell.text.clone(), style, px, py, m));
         }
+    }
+    if look.ime {
+        let (col, pane_row) = ime_cell(frame, start, visible, term.visible_cols(m.cell));
+        let (px, py) = (col as f32 * cw, pane_row as f32 * ch);
+        grid = grid.child(
+            el().key(format!("{key}/ime"))
+                .absolute(px, py)
+                .size(cw, ch)
+                .ime_cursor(),
+        );
         if !term.preedit.is_empty() {
             let len = term.preedit.len();
             grid = grid.child(
@@ -1478,6 +1723,7 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
                         ..Span::new(0, len)
                     }],
                 )
+                .key(format!("{key}/preedit"))
                 .no_wrap()
                 .font(m.style)
                 .color(rgb(frame.fg))
@@ -1487,6 +1733,30 @@ pub fn grid(key: &str, term: &Term, m: &Metrics, look: GridLook) -> El {
         }
     }
     grid
+}
+
+/// The cell `(col, pane_row)` inside the visible grid where the IME anchor and inline preedit
+/// sit: the terminal's cursor cell clamped to the visible viewport, or the bottom-left visible
+/// cell when scrolled away from the cursor.
+fn ime_cell(
+    frame: &Frame,
+    start: usize,
+    visible_rows: usize,
+    visible_cols: usize,
+) -> (usize, usize) {
+    let shown_rows = (frame.rows as usize)
+        .saturating_sub(start)
+        .min(visible_rows.max(1))
+        .max(1);
+    let max_row = start + shown_rows - 1;
+    let max_col = visible_cols.max(1).min((frame.cols as usize).max(1)) - 1;
+    match frame.cursor_at {
+        Some((x, y)) => (
+            (x as usize).min(max_col),
+            (y as usize).clamp(start, max_row) - start,
+        ),
+        None => (0, shown_rows - 1),
+    }
 }
 
 /// The cursor, `shape` on the cell at `at`.
@@ -2069,10 +2339,14 @@ mod tests {
     fn the_default_background_takes_the_chromes_only_on_its_own_side() {
         let follow = TermColors::default();
         let card = MIDNIGHT.card;
-        assert_eq!(follow.body(0x000000), card, "Rex's built-in black");
-        assert_eq!(follow.body(0x1e1e2e), card, "another owner's dark theme");
+        assert_eq!(follow.body(0x000000, false), card, "Rex's built-in black");
         assert_eq!(
-            follow.body(0xfdf6e3),
+            follow.body(0x1e1e2e, false),
+            card,
+            "another owner's dark theme"
+        );
+        assert_eq!(
+            follow.body(0xfdf6e3, false),
             0xfdf6e3,
             "another owner's light theme"
         );
@@ -2083,10 +2357,10 @@ mod tests {
             }),
             &MIDNIGHT,
         );
-        assert_eq!(light.body(0xfdf6e3), 0xfdf6e3);
-        assert_eq!(light.body(0xeeeeee), 0xfdf6e3);
+        assert_eq!(light.body(0xfdf6e3, false), 0xfdf6e3);
+        assert_eq!(light.body(0xeeeeee, false), 0xfdf6e3);
         assert_eq!(
-            light.body(0x000000),
+            light.body(0x000000, false),
             0x000000,
             "a server without set_theme keeps its black under its light default text"
         );
@@ -2098,14 +2372,19 @@ mod tests {
             "Rex's own colours draw like Follow server"
         );
         let rose = TermColors::of(None, &crate::app::theme::ROSE_PINE);
-        assert_eq!(rose.body(0x000000), 0x191724, "another chrome's card");
+        assert_eq!(
+            rose.body(0x000000, false),
+            0x191724,
+            "another chrome's card"
+        );
         assert_eq!(rose.selection_bg, 0x403d52, "and its selection");
         assert_ne!(rose, follow, "so rows memoized on the colours draw again");
 
         for (bg, fg, body) in [(0x1e1e2e, 0xcdd6f4, card), (0xfdf6e3, 0x586e75, 0xfdf6e3)] {
             let frame = themed_frame(bg, fg);
             assert_eq!(frame.bg, bg);
-            let body_drawn = follow.body(frame.bg);
+            assert!(!frame.bg_from_program);
+            let body_drawn = follow.body(frame.bg, frame.bg_from_program);
             assert_eq!(body_drawn, body);
             let [plain, red, inverse] = [0, 1, 2].map(|i| &frame.cells[0][i]);
             assert_eq!(plain.bg, frame.bg, "drawn as the pane's fill, {body:06x}");
@@ -2119,5 +2398,329 @@ mod tests {
                 "inverse text is cut out of the block in the pane's fill"
             );
         }
+    }
+
+    #[test]
+    fn keep_program_background_preserves_osc11_and_invalidates_memo_and_cursor_text() {
+        use rex_rune::connection::{Connection, TerminalSender};
+        let hash_of = |colors: TermColors| {
+            let mut h = DefaultHasher::new();
+            colors.hash(&mut h);
+            h.finish()
+        };
+
+        let follow = TermColors::default();
+        let follow_keep = follow.with_program_background(true);
+        assert_ne!(follow, follow_keep);
+        assert_ne!(hash_of(follow), hash_of(follow_keep));
+
+        // Issue #143: OSC 11 #1d2a2b over dark Midnight card (#001528) and dark declared theme
+        // (#1a2116), plus non-program server backgrounds and light/dark combinations.
+        let dark_declared = TermColors::of(
+            Some(&TerminalTheme {
+                background: Some(0x1a2116),
+                cursor_text: Some(0xff00ff),
+                ..TerminalTheme::default()
+            }),
+            &MIDNIGHT,
+        );
+        let dark_declared_keep = dark_declared.with_program_background(true);
+        let light_declared = TermColors::of(
+            Some(&TerminalTheme {
+                background: Some(0xfdf6e3),
+                ..TerminalTheme::default()
+            }),
+            &MIDNIGHT,
+        );
+        let light_declared_keep = light_declared.with_program_background(true);
+
+        // Off: same-side is substituted even when from_program is true; opposite-side is kept.
+        assert_eq!(follow.body(0x1d2a2b, false), MIDNIGHT.card);
+        assert_eq!(follow.body(0x1d2a2b, true), MIDNIGHT.card);
+        assert_eq!(follow.body(0xfdf6e3, false), 0xfdf6e3);
+        assert_eq!(follow.body(0xfdf6e3, true), 0xfdf6e3);
+        assert_eq!(dark_declared.body(0x1d2a2b, false), 0x1a2116);
+        assert_eq!(dark_declared.body(0x1d2a2b, true), 0x1a2116);
+        assert_eq!(light_declared.body(0xe8f0e8, false), 0xfdf6e3);
+        assert_eq!(light_declared.body(0xe8f0e8, true), 0xfdf6e3);
+        assert_eq!(light_declared.body(0x1d2a2b, false), 0x1d2a2b);
+        assert_eq!(light_declared.body(0x1d2a2b, true), 0x1d2a2b);
+
+        // On: only from_program overrides same-side substitution; non-program stays substituted.
+        assert_eq!(follow_keep.body(0x1d2a2b, false), MIDNIGHT.card);
+        assert_eq!(follow_keep.body(0x1d2a2b, true), 0x1d2a2b);
+        assert_eq!(follow_keep.body(0xfdf6e3, false), 0xfdf6e3);
+        assert_eq!(follow_keep.body(0xfdf6e3, true), 0xfdf6e3);
+        assert_eq!(dark_declared_keep.body(0x1d2a2b, false), 0x1a2116);
+        assert_eq!(dark_declared_keep.body(0x1d2a2b, true), 0x1d2a2b);
+        assert_eq!(light_declared_keep.body(0xe8f0e8, false), 0xfdf6e3);
+        assert_eq!(light_declared_keep.body(0xe8f0e8, true), 0xe8f0e8);
+        assert_eq!(light_declared_keep.body(0x1d2a2b, false), 0x1d2a2b);
+        assert_eq!(light_declared_keep.body(0x1d2a2b, true), 0x1d2a2b);
+
+        // Live grid rendering: inverse video and block cursor text respond immediately to both
+        // toggling the option and OSC 11 / OSC 111 without stale memoized rows.
+        let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 8,
+            rows: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        terminal
+            .set_default_bg_color(Some(ghostty_vt::style::RgbColor {
+                r: 0x1a,
+                g: 0x21,
+                b: 0x16,
+            }))
+            .unwrap();
+        terminal
+            .set_default_fg_color(Some(ghostty_vt::style::RgbColor {
+                r: 0xe0,
+                g: 0xe0,
+                b: 0xe0,
+            }))
+            .unwrap();
+        // Cell 0: 'C' under the block cursor; cell 1: 'I' in inverse video (fg = default bg).
+        terminal.vt_write(b"\x1b]11;#1d2a2b\x1b\\C\x1b[7mI\x1b[0m\x1b[1;1H");
+        let mut renderer = rex_rune::terminal::Renderer::new().unwrap();
+        let osc11_frame = renderer.frame(&terminal).unwrap();
+        assert!(osc11_frame.bg_from_program);
+        assert_eq!(osc11_frame.bg, 0x1d2a2b);
+        assert_eq!(osc11_frame.cursor, Some((0, 0)));
+
+        let mut term = Term::new(Connection {
+            model: Default::default(),
+            commands: TerminalSender::new(flume::unbounded().0, "s".into(), "b".into()),
+            wake: flume::unbounded().1,
+        });
+        term.frame = Some(Arc::new(osc11_frame));
+        term.rect = [0., 0., 200., clipped_metrics().cell.1];
+
+        struct State {
+            term: Term,
+            colors: TermColors,
+        }
+        let view = |s: &State, _: &mut Cx<State>| {
+            let look = GridLook {
+                cursor: Some(CursorLook::Block),
+                cursor_force: None,
+                ime: false,
+                colors: s.colors,
+            };
+            el().w_full()
+                .h_full()
+                .motion(crate::app::theme::STILL)
+                .child(grid("g", &s.term, &clipped_metrics(), look))
+        };
+        let mut rt = Runtime::new(
+            State {
+                term,
+                colors: dark_declared,
+            },
+            view,
+            (200., 60.),
+            Env::default(),
+        );
+        let glyph_count = |rt: &Runtime<State>, color: u32| {
+            let c = rgb(color);
+            let want = [c.r, c.g, c.b, c.a];
+            rt.instances
+                .iter()
+                .filter(|q| q.params[1] == rune::render::KIND_GLYPH && q.fill == want)
+                .count()
+        };
+
+        // Switch off: body == 0x1a2116 == colors.background -> inverse uses 0x1a2116,
+        // cursor text uses theme cursor_text (0xff00ff).
+        rt.frame(1. / 60.);
+        assert_eq!(rt.state.term.body(&rt.state.colors), 0x1a2116);
+        assert!(glyph_count(&rt, 0x1a2116) >= 1, "inverse text in theme bg");
+        assert!(glyph_count(&rt, 0xff00ff) >= 1, "cursor text uses theme's");
+        assert_eq!(glyph_count(&rt, 0x1d2a2b), 0, "OSC 11 not used while off");
+
+        // Flip switch on: memoized row redraws immediately; inverse text and block cursor text
+        // both use OSC 11 (0x1d2a2b), never theme cursor_text (0xff00ff).
+        rt.update(|s, tx| {
+            s.colors = dark_declared_keep;
+            tx.instant();
+        });
+        rt.frame(1. / 60.);
+        assert_eq!(rt.state.term.body(&rt.state.colors), 0x1d2a2b);
+        assert!(
+            glyph_count(&rt, 0x1d2a2b) >= 2,
+            "both inverse text and block cursor text draw in 0x1d2a2b"
+        );
+        assert_eq!(
+            glyph_count(&rt, 0xff00ff),
+            0,
+            "declared cursor_text never clashes over a program background"
+        );
+        assert_eq!(glyph_count(&rt, 0x1a2116), 0, "no stale row from before");
+
+        // Program resets with OSC 111 while switch stays on: row redraws back to 0x1a2116
+        // and theme cursor_text (0xff00ff) returns.
+        terminal.vt_write(b"\x1b]111\x1b\\");
+        let reset_frame = renderer.frame(&terminal).unwrap();
+        assert!(!reset_frame.bg_from_program);
+        assert_eq!(reset_frame.bg, 0x1a2116);
+        rt.update(|s, tx| {
+            s.term.frame = Some(Arc::new(reset_frame));
+            tx.instant();
+        });
+        rt.frame(1. / 60.);
+        assert_eq!(rt.state.term.body(&rt.state.colors), 0x1a2116);
+        assert!(
+            glyph_count(&rt, 0x1a2116) >= 1,
+            "inverse text back to theme"
+        );
+        assert!(glyph_count(&rt, 0xff00ff) >= 1, "cursor text back to theme");
+        assert_eq!(glyph_count(&rt, 0x1d2a2b), 0, "no stale OSC 11 row");
+    }
+
+    fn ime_test_term(terminal: &ghostty_vt::Terminal, rect: [f32; 4]) -> Term {
+        use rex_rune::connection::{Connection, TerminalSender};
+        let frame = rex_rune::terminal::Renderer::new()
+            .unwrap()
+            .frame(terminal)
+            .unwrap();
+        let mut term = Term::new(Connection {
+            model: Default::default(),
+            commands: TerminalSender::new(flume::unbounded().0, "s".into(), "b".into()),
+            wake: flume::unbounded().1,
+        });
+        term.frame = Some(Arc::new(frame));
+        term.rect = rect;
+        term
+    }
+
+    #[test]
+    fn ime_anchor_works_when_cursor_is_hidden_visible_cropped_or_scrolled() {
+        use ghostty_vt::terminal::ScrollViewport;
+        struct ImeState {
+            term: Term,
+            ime: bool,
+            cursor: Option<CursorLook>,
+        }
+        let view = |s: &ImeState, _: &mut Cx<ImeState>| {
+            let look = GridLook {
+                cursor: s.cursor,
+                cursor_force: None,
+                ime: s.ime,
+                colors: TermColors::default(),
+            };
+            el().w_full()
+                .h_full()
+                .child(grid("g", &s.term, &clipped_metrics(), look))
+        };
+        let (cw, ch) = clipped_metrics().cell;
+        let full_rect = [0., 0., 20. * cw, 5. * ch];
+
+        let mut terminal = ghostty_vt::Terminal::new(ghostty_vt::TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 1 << 16,
+        })
+        .unwrap();
+        terminal.vt_write(b"abc\x1b[?25l\x1b[3;5H");
+
+        // Hidden cursor + look.ime == true: ime_area aligned with cursor cell, no /cursor drawn.
+        let mut rt = Runtime::new(
+            ImeState {
+                term: ime_test_term(&terminal, full_rect),
+                ime: true,
+                cursor: Some(CursorLook::Block),
+            },
+            view,
+            (20. * cw, 5. * ch),
+            Env::default(),
+        );
+        rt.frame(0.);
+        assert_eq!(rt.ime_area, Some([4. * cw, 2. * ch, cw, ch]));
+        assert!(
+            !rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("g/cursor")),
+            "hidden cursor draws no cursor element"
+        );
+        assert!(
+            rt.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("g/ime"))
+        );
+
+        // Preedit renders at the anchor even while cursor is hidden.
+        rt.update(|s, _| s.term.preedit = "你好".into());
+        rt.frame(0.);
+        let preedit = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("g/preedit"))
+            .expect("preedit rendered at hidden cursor anchor");
+        assert_eq!(preedit.text.as_deref(), Some("你好"));
+        assert_eq!((preedit.rect[0], preedit.rect[1]), (4. * cw, 2. * ch));
+        rt.update(|s, _| s.term.preedit.clear());
+
+        // look.ime == false disables ime_area whether hidden or visible.
+        rt.update(|s, _| s.ime = false);
+        rt.frame(0.);
+        assert_eq!(rt.ime_area, None);
+        terminal.vt_write(b"\x1b[?25h");
+        rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+        rt.frame(0.);
+        assert_eq!(rt.ime_area, None);
+
+        // Visible bar and underline cursors keep their own shapes while ime_area uses full cell.
+        rt.update(|s, _| s.ime = true);
+        for (seq, expected_size) in [(&b"\x1b[6 q"[..], (2., ch)), (&b"\x1b[4 q"[..], (cw, 2.))] {
+            terminal.vt_write(seq);
+            rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+            rt.frame(0.);
+            let cursor = rt
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some("g/cursor"))
+                .expect("visible cursor drawn");
+            assert_eq!((cursor.rect[2], cursor.rect[3]), expected_size);
+            assert_eq!(rt.ime_area, Some([4. * cw, 2. * ch, cw, ch]));
+        }
+
+        // Rapid hidden -> visible -> hidden transitions never drop ime_area.
+        for (seq, expect_cursor) in [
+            (&b"\x1b[?25l"[..], false),
+            (&b"\x1b[?25h"[..], true),
+            (&b"\x1b[?25l"[..], false),
+        ] {
+            terminal.vt_write(seq);
+            rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+            rt.frame(0.);
+            assert_eq!(rt.ime_area, Some([4. * cw, 2. * ch, cw, ch]));
+            assert_eq!(
+                rt.elements()
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some("g/cursor")),
+                expect_cursor
+            );
+        }
+
+        // Cropped pane: cursor hidden on row 1, col 15; pane shows 3 bottom rows and 10 cols.
+        terminal.vt_write(b"\x1b[2;16H\x1b[?25l");
+        let cropped_rect = [0., 0., 10. * cw, 3. * ch];
+        rt.update(|s, _| s.term = ime_test_term(&terminal, cropped_rect));
+        rt.frame(0.);
+        // display_row_start(3) == 2 (bottom-aligned because cursor is hidden), so row 1 clamps to
+        // pane row 0 and col 15 clamps to col 9.
+        assert_eq!(rt.ime_area, Some([9. * cw, 0., cw, ch]));
+
+        // Scrolled back (cursor_at == None): anchor falls back to bottom-left visible cell.
+        terminal.vt_write(b"\x1b[5;1H");
+        for i in 0..10 {
+            terminal.vt_write(format!("line {i}\r\n").as_bytes());
+        }
+        terminal.vt_write(b"\x1b[?25l");
+        terminal.scroll_viewport(ScrollViewport::Delta(-6));
+        rt.update(|s, _| s.term = ime_test_term(&terminal, full_rect));
+        rt.frame(0.);
+        assert_eq!(rt.state.term.frame.as_ref().unwrap().cursor_at, None);
+        assert_eq!(rt.ime_area, Some([0., 4. * ch, cw, ch]));
     }
 }

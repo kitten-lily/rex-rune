@@ -612,6 +612,9 @@ fn terminal(s: &Workspace) -> El {
 
 fn host_card(s: &Workspace, i: usize, last: bool) -> El {
     let host = &s.settings.hosts[i];
+    let managed = s.is_shared_managed(i);
+    let blocked = s.shared_write_blocked(i);
+    let shared_record = s.shared_host_record(i);
     let connected = s.hosts.get(i).is_some_and(|h| h.model.connected);
     let mut actions = row().gap(6.).center_y();
     // Quiet when healthy: only trouble gets words, beside the action that fixes it.
@@ -625,13 +628,19 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
                 move |s, tx| s.perform(Intent::RetryHost(i), tx),
             ));
     }
-    actions = actions.child(button(
-        &format!("host-edit:{i}"),
-        "Edit…",
-        Pill::Neutral,
-        move |s, tx| s.perform(Intent::EditHost(i), tx),
-    ));
-    actions = actions.child(if last {
+    actions = actions.child(if let Some(reason) = &blocked {
+        unavailable(&format!("host-edit:{i}"), "Edit…", reason)
+    } else {
+        button(
+            &format!("host-edit:{i}"),
+            "Edit…",
+            Pill::Neutral,
+            move |s, tx| s.perform(Intent::EditHost(i), tx),
+        )
+    });
+    actions = actions.child(if let Some(reason) = &blocked {
+        unavailable(&format!("host-remove:{i}"), "Remove…", reason)
+    } else if last {
         unavailable(
             &format!("host-remove:{i}"),
             "Remove…",
@@ -659,46 +668,75 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
                 .color(rgb(muted())),
         );
     }
-    card(
-        [
-            row_frame(true)
-                .key(format!("host-row:{i}"))
-                .gap(12.)
-                .child(glyph(s.host_icon(i), 16., rgb(muted())))
-                .child(
-                    col()
-                        .grow(1.)
-                        .min_w(0.)
-                        .gap(2.)
-                        .child(
-                            text(host.label.clone())
-                                .font(medium(13.))
-                                .color(rgb(ink()))
-                                .truncate(),
-                        )
-                        .child(address),
-                )
-                .child(actions),
-            setting(
-                "Remote control",
-                "Let rex do and other clients on this host change the view in this window.",
-                Switch::new(host.remote_control)
-                    .label(format!("Remote control for {}", host.label))
-                    .hide_label()
-                    .on_toggle(move |s: &mut Workspace| s.toggle_remote_control(i))
-                    .build(kit())
-                    .key(format!("remote-control:{i}")),
+    let mut header_info = col()
+        .grow(1.)
+        .min_w(0.)
+        .gap(2.)
+        .child(
+            text(host.label.clone())
+                .font(medium(13.))
+                .color(rgb(ink()))
+                .truncate(),
+        )
+        .child(address);
+    if managed {
+        let provenance = match shared_record.and_then(|r| r.source.as_deref()) {
+            Some(src) => format!("Shared via rex hosts · Declared in {src} (read-only)"),
+            None => match &blocked {
+                Some(reason) => format!("Shared via rex hosts · {reason}"),
+                None => "Shared via rex hosts".to_owned(),
+            },
+        };
+        header_info = header_info.child(
+            text(provenance)
+                .font(ui(11.))
+                .color(rgb(muted()))
+                .truncate()
+                .key(format!("host-shared:{i}")),
+        );
+    }
+    let mut rows = vec![
+        row_frame(true)
+            .key(format!("host-row:{i}"))
+            .gap(12.)
+            .child(glyph(s.host_icon(i), 16., rgb(muted())))
+            .child(header_info)
+            .child(actions),
+    ];
+    if managed {
+        let shell_detail = match &host.shell {
+            Some(shell) => format!("Local preference: {shell}."),
+            None => "Server default. Local preference for new terminals on this host.".into(),
+        };
+        rows.push(setting(
+            "Default shell",
+            &shell_detail,
+            button(
+                &format!("host-shell-btn:{i}"),
+                "Shell…",
+                Pill::Neutral,
+                move |s, tx| s.perform(Intent::HostShell(i), tx),
             ),
-        ]
-        .into_iter()
-        .chain(super::tailscale::rows(s, i)),
-    )
+        ));
+    }
+    rows.push(setting(
+        "Remote control",
+        "Let rex do and other clients on this host change the view in this window.",
+        Switch::new(host.remote_control)
+            .label(format!("Remote control for {}", host.label))
+            .hide_label()
+            .on_toggle(move |s: &mut Workspace| s.toggle_remote_control(i))
+            .build(kit())
+            .key(format!("remote-control:{i}")),
+    ));
+    rows.extend(super::tailscale::rows(s, i));
+    card(rows)
 }
 
 fn hosts(s: &Workspace) -> El {
     let last = s.settings.hosts.len() == 1;
     let cards = (0..s.settings.hosts.len()).map(|i| host_card(s, i, last));
-    page([
+    let mut sections = vec![
         section(
             "This client",
             [card([disclosure(
@@ -709,21 +747,26 @@ fn hosts(s: &Workspace) -> El {
                 |s, tx| s.perform(Intent::ClientLabel, tx),
             )])],
         ),
-        section(
-            "Hosts",
-            cards.chain([
-                row().px(2.).child(button(
-                    "settings-add-host",
-                    "Add host…",
-                    Pill::Neutral,
-                    |s, tx| s.perform(Intent::AddHost, tx),
-                )),
-                footnote(
-                    "Removing a host only stops this app connecting to it; its sessions keep running.",
-                ),
-            ]),
-        ),
-    ])
+        super::shared_hosts::section(s),
+    ];
+    if let Some(ssh) = super::ssh_agent::section(s) {
+        sections.push(ssh);
+    }
+    sections.push(section(
+        "Hosts",
+        cards.chain([
+            row().px(2.).child(button(
+                "settings-add-host",
+                "Add host…",
+                Pill::Neutral,
+                |s, tx| s.perform(Intent::AddHost, tx),
+            )),
+            footnote(
+                "Removing a local host only stops this app connecting to it; removing a shared host also removes it from Rex's shared host list. Sessions keep running.",
+            ),
+        ]),
+    ));
+    page(sections)
 }
 
 /// The headings of the Shortcuts page, in order. Every action's `category()` is one of them

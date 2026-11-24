@@ -5,7 +5,7 @@ use ghostty_vt::{
     Terminal,
     search::{Search, Status},
     selection::Selection,
-    terminal::PointSpace,
+    terminal::{PointCoordinate, PointSpace},
 };
 
 /// One match on screen, from `start` to `end` inclusive, as viewport (column, row) cells.
@@ -81,13 +81,25 @@ impl Results {
 pub struct Controller {
     needle: String,
     search: Option<Search>,
+    settled: bool,
 }
 
 impl Controller {
+    /// Whether a non-empty search needle is currently configured.
+    pub fn has_needle(&self) -> bool {
+        !self.needle.is_empty()
+    }
+
+    /// Whether the current needle has completed its scan against the current terminal.
+    pub fn is_settled(&self) -> bool {
+        self.settled || self.needle.is_empty()
+    }
+
     /// Searches for `needle` (empty stops searching) in `terminal`, or in the terminal a
     /// snapshot brings later.
     pub fn set_needle(&mut self, terminal: Option<&Terminal>, needle: String) -> Result<()> {
         self.needle = needle;
+        self.settled = self.needle.is_empty();
         match (terminal, &mut self.search) {
             (Some(terminal), Some(search)) if !self.needle.is_empty() => {
                 search.set_needle(terminal, Some(&self.needle))?;
@@ -133,12 +145,27 @@ impl Controller {
         if search.selected_index()?.is_none() && search.total_matches()? > 0 {
             search.select_next(terminal)?;
         }
-        Ok(status != Status::Complete)
+        let pending = status != Status::Complete;
+        self.settled = !pending;
+        Ok(pending)
     }
 
     /// The search no longer applies to the terminal it ran on: a fresh snapshot replaced it.
     pub fn forget_terminal(&mut self) {
         self.search = None;
+        self.settled = self.needle.is_empty();
+    }
+
+    /// The selected match's starting cell in full-screen (scrollback + active) coordinates,
+    /// or `None` when no search match is selected.
+    pub fn selected_match_screen(&self, terminal: &Terminal) -> Result<Option<PointCoordinate>> {
+        let Some(search) = &self.search else {
+            return Ok(None);
+        };
+        let Some(found) = search.selected_match(terminal)? else {
+            return Ok(None);
+        };
+        Ok(terminal.point_from_grid_ref(&found.start(), PointSpace::Screen)?)
     }
 
     pub fn results(&self, terminal: &Terminal) -> Result<Option<Results>> {

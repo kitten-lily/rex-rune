@@ -81,6 +81,7 @@ impl Workspace {
     fn spawn_ssh_start(&mut self, endpoint: String) {
         let handle = self.handle.clone();
         let task_endpoint = endpoint.clone();
+        let agent = self.ssh_agent_socket();
         let spawned = std::thread::Builder::new()
             .name("rex-ssh-setup".into())
             .spawn(move || {
@@ -88,7 +89,9 @@ impl Workspace {
                     .enable_all()
                     .build()
                     .map_err(|e| setup::Failure::from(anyhow::Error::from(e)))
-                    .and_then(|runtime| runtime.block_on(setup::start_personal(&task_endpoint)));
+                    .and_then(|runtime| {
+                        runtime.block_on(setup::start_personal(&task_endpoint, agent.as_deref()))
+                    });
                 handle.update(move |s, tx| s.ssh_start_finished(&task_endpoint, result, tx));
             });
         if let Err(error) = spawned {
@@ -137,6 +140,38 @@ impl Workspace {
         }
         let saved = self.settings.hosts[host].clone();
         self.close_panel(tx);
+        if self.is_shared_managed(host) {
+            if let Some(reason) = self.shared_write_blocked(host) {
+                self.inform(format!("{} cannot be updated: {reason}.", saved.label));
+                return;
+            }
+            let editing_shared_id = saved.shared.as_ref().map(|l| l.id.as_str());
+            if self
+                .settings
+                .hosts
+                .iter()
+                .enumerate()
+                .any(|(i, h)| i != host && rex_rune::hosts::same_endpoint(&h.endpoint, &proposed))
+                || self.has_pending_shared_write_endpoint(&proposed, editing_shared_id)
+            {
+                self.inform(format!(
+                    "Cannot save {}: that endpoint is already in the workspace.",
+                    proposed
+                ));
+                return;
+            }
+            if let Err(reason) = self.start_shared_edit(
+                host,
+                saved.label,
+                proposed,
+                saved.shell,
+                false,
+                Some(endpoint.to_owned()),
+            ) {
+                self.inform(reason);
+            }
+            return;
+        }
         self.edit_host(host, saved.label, proposed, saved.shell);
         self.ssh_setup.attachment.remove(endpoint);
         self.inform(

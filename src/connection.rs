@@ -19,6 +19,7 @@ pub mod activity;
 pub mod clipboard;
 pub mod directory;
 pub mod downloads;
+pub mod hosts;
 mod prefetch;
 mod probes;
 pub mod server_info;
@@ -141,6 +142,7 @@ pub mod perform;
 
 pub enum Command {
     Selection(crate::terminal::selection::Input),
+    CopyMode(crate::terminal::copy_mode::CopyModeInput),
     Key(Value),
     KeyWithPrefix {
         key: Value,
@@ -186,6 +188,13 @@ pub struct Model {
     pub input_events: u64,
     /// Words for the user from the pane's worker (a failed search), taken once shown.
     pub notice: Option<String>,
+    /// Latest completed copy-mode yank (`Yank` / `YankLine`), taken once by the UI so a
+    /// fast `Yank` followed by `End` never races with selection clearing.
+    pub copy_yank: Option<crate::terminal::copy_mode::CopyYank>,
+    /// Highest copy-mode epoch ended automatically by the pane worker (screen switch,
+    /// lost tracked reference, or fresh snapshot/reconnect); monotonic so the UI
+    /// reconciles once.
+    pub copy_ended_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -315,6 +324,12 @@ pub struct HostModel {
     pub tailscale_problem: Option<String>,
     /// What the server says about itself; see [`server_info`].
     pub server_info: server_info::ServerInfo,
+    /// Shared host list from this server (`hosts.list` / `hosts_changed`).
+    pub shared: hosts::SharedHostState,
+    /// Bumped whenever `shared` updates from a `hosts.list` reply.
+    pub shared_revision: u64,
+    /// Completed shared-host write outcomes (`hosts.put` / `hosts.remove`), taken once by the UI.
+    pub shared_writes: Vec<hosts::WriteResult>,
 }
 impl HostModel {
     /// Record a block's owner (none when nobody owns it), in its session's view and its pane.
@@ -522,6 +537,22 @@ pub enum HostCommand {
     /// Read the server's version once on each connection from now on, and its status again
     /// when the server says it changed; see [`server_info`]. Read-only, and a refusal is quiet.
     Identify,
+    /// Read `hosts.list` once per connection and re-read on `hosts_changed`; see [`hosts`].
+    WatchSharedHosts,
+    /// Create or update one host in this server's shared host list (`hosts.put`) on `epoch` only.
+    /// Never auto-retried or queued across reconnects.
+    PutSharedHost {
+        id: u64,
+        epoch: u64,
+        host: Value,
+    },
+    /// Remove one host from this server's shared host list (`hosts.remove`) on `epoch` only.
+    /// Never auto-retried or queued across reconnects.
+    RemoveSharedHost {
+        id: u64,
+        epoch: u64,
+        host_id: String,
+    },
     Action {
         generation: u64,
         request: Box<rexrs::api::client::Action>,
@@ -558,6 +589,16 @@ pub enum HostCommand {
         method: String,
         payload: Value,
     },
+    /// Move or resize a floating layer on this connection epoch only (API revision 13).
+    /// Checked against the live epoch and negotiated API revision right before sending; never
+    /// replayed across disconnect/reconnect.
+    ResizeLayer {
+        epoch: u64,
+        session: String,
+        layer: String,
+        bounds: [f64; 4],
+        raise_first: bool,
+    },
     /// Explicit tab/split creation, inheriting the named source block's shell directory.
     /// A failed or slow read leaves the server's default starting directory unchanged.
     NewTerminal {
@@ -584,6 +625,13 @@ pub enum HostCommand {
     DownloadConfirm(u64),
     /// Stop a download at any point; its partial file is deleted.
     DownloadCancel(u64),
+    /// Update `SSH_AUTH_SOCK` for future SSH runs on this host without dropping live
+    /// connections. When `wake_auth_retry` is true and this is a disconnected `ssh://` host
+    /// whose last error was `Problem::AuthFailed`, cut short backoff and retry immediately.
+    SshAgent {
+        socket: Option<PathBuf>,
+        wake_auth_retry: bool,
+    },
     Reconnect,
     /// The terminal theme to declare from now on, also while disconnected; none declares
     /// nothing (Follow server).
@@ -815,6 +863,7 @@ impl PaneShared {
 enum DataCommand {
     CursorStyle(crate::terminal::CursorShape),
     Selection(crate::terminal::selection::Input),
+    CopyMode(crate::terminal::copy_mode::CopyModeInput),
     Visible(bool),
     Scroll(isize),
     Search(String),
@@ -912,6 +961,52 @@ impl HostConnection {
         // The saved device name to keep built-in Tailscale on as; none leaves it alone.
         keep_tailscale: Option<String>,
     ) -> Self {
+        Self::spawn_with_ssh_agent(
+            endpoint,
+            preferred,
+            create,
+            block,
+            visible,
+            theme,
+            label,
+            keep_tailscale,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_with_ssh_agent(
+        endpoint: String,
+        preferred: Option<String>,
+        create: Option<(String, Option<String>)>,
+        block: Option<String>,
+        visible: bool,
+        theme: Option<SetTheme>,
+        label: String,
+        // The saved device name to keep built-in Tailscale on as; none leaves it alone.
+        keep_tailscale: Option<String>,
+        ssh_auth_sock: Option<PathBuf>,
+    ) -> Self {
+        Self::spawn_internal(
+            endpoint,
+            Startup {
+                preferred,
+                create,
+                block,
+                theme,
+                label,
+                keep_tailscale,
+                ssh_auth_sock,
+                #[cfg(test)]
+                ssh_program: None,
+                #[cfg(test)]
+                tunnel_dir: None,
+            },
+            visible,
+        )
+    }
+
+    fn spawn_internal(endpoint: String, startup: Startup, visible: bool) -> Self {
         let model = Arc::new(Mutex::new(HostModel {
             visible,
             status: "Connecting…".into(),
@@ -924,14 +1019,6 @@ impl HostConnection {
             wake,
         };
         let sender = commands.clone();
-        let startup = Startup {
-            preferred,
-            create,
-            block,
-            theme,
-            label,
-            keep_tailscale,
-        };
         let alive = HostThread(Arc::as_ptr(&model) as usize);
         running_hosts().push(alive.0);
         std::thread::Builder::new()
@@ -1398,6 +1485,9 @@ async fn handle_event(
         }
         return Ok(());
     }
+    if event.name == "hosts_changed" {
+        return Ok(());
+    }
     if !state.includes(&event) {
         return Ok(());
     }
@@ -1525,6 +1615,11 @@ struct Startup {
     block: Option<String>,
     theme: Option<SetTheme>,
     keep_tailscale: Option<String>,
+    ssh_auth_sock: Option<PathBuf>,
+    #[cfg(test)]
+    ssh_program: Option<PathBuf>,
+    #[cfg(test)]
+    tunnel_dir: Option<PathBuf>,
 }
 
 async fn run_host(
@@ -1541,6 +1636,11 @@ async fn run_host(
         mut theme,
         label,
         mut keep_tailscale,
+        mut ssh_auth_sock,
+        #[cfg(test)]
+        ssh_program,
+        #[cfg(test)]
+        tunnel_dir,
     } = startup;
     let mut token: Option<String> = None;
     let mut workers = HashMap::<String, PaneWorker>::new();
@@ -1549,6 +1649,7 @@ async fn run_host(
     let mut probes = probes::Probes::default();
     let mut keymap: Option<Box<keymap::Declaration>> = None;
     let mut server_reads = server_info::Reader::default();
+    let mut hosts_reads = hosts::Reader::default();
     let mut directory_reads = directory::Reader::default();
     // An ssh:// host is reached through a forward of its Rex socket; every attempt opens a
     // fresh one, and its end is a disconnect like any other.
@@ -1559,7 +1660,26 @@ async fn run_host(
             let endpoint = match &ssh {
                 Some(target) => {
                     shared.status("Connecting over SSH…", false);
-                    let opened = crate::ssh::Tunnel::open(target).await?;
+                    let opened = {
+                        #[cfg(test)]
+                        if ssh_program.is_some() || tunnel_dir.is_some() {
+                            crate::ssh::Tunnel::open_with(
+                                target,
+                                ssh_program
+                                    .as_deref()
+                                    .map_or(std::ffi::OsStr::new("ssh"), std::path::Path::as_os_str),
+                                ssh_auth_sock.as_deref(),
+                                tunnel_dir.as_deref(),
+                            )
+                            .await?
+                        } else {
+                            crate::ssh::Tunnel::open(target, ssh_auth_sock.as_deref()).await?
+                        }
+                        #[cfg(not(test))]
+                        {
+                            crate::ssh::Tunnel::open(target, ssh_auth_sock.as_deref()).await?
+                        }
+                    };
                     let local = opened.endpoint().to_owned();
                     tunnel = Some(opened);
                     local
@@ -1675,6 +1795,8 @@ async fn run_host(
             if let Some(call) = startup_call { tailscale_call(&mut control, shared, &mut state, &call).await?; }
             server_reads.reset();
             server_reads.start(&mut control).await?;
+            hosts_reads.reset();
+            hosts_reads.start(&mut control).await?;
             // The last connection's listing can no longer be answered.
             directory_reads.abandon(shared, directory::Failure::Disconnected);
             retry = 0;
@@ -1694,6 +1816,17 @@ async fn run_host(
                     if let Some(event) = control.next_event().now_or_never() {
                         let event = event?;
                         if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
+                        if event.name == "hosts_changed"
+                            && hosts::changed(
+                                &shared.model.lock().expect("host model").shared,
+                                hosts_reads.in_flight_hash(),
+                                &event.payload,
+                            )
+                        {
+                            hosts_reads
+                                .reread_for(&mut control, event.payload["hash"].as_str())
+                                .await?;
+                        }
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
@@ -1750,11 +1883,23 @@ async fn run_host(
                         }
                     }
                     reply = server_reads.finished(), if server_reads.in_flight() => server_info::record(shared, reply),
+                    reply = hosts_reads.finished(), if hosts_reads.in_flight() => hosts::record(shared, reply),
                     _ = directory_reads.finished(shared), if directory_reads.in_flight() => {}
                     event = control.next_event() => {
                         busy_since = Some(Instant::now());
                         let event = event?;
                         if event.name == "tailscale_status_changed" { server_reads.reread_status(&mut control).await?; }
+                        if event.name == "hosts_changed"
+                            && hosts::changed(
+                                &shared.model.lock().expect("host model").shared,
+                                hosts_reads.in_flight_hash(),
+                                &event.payload,
+                            )
+                        {
+                            hosts_reads
+                                .reread_for(&mut control, event.payload["hash"].as_str())
+                                .await?;
+                        }
                         handle_event(event, &mut control, shared, &mut workers, &mut state, keymap.as_deref(), keep_tailscale.as_deref()).await?;
                         state.prune(&shared.model.lock().expect("host model"));
                         reconcile(&endpoint, shared, &sender, &mut workers);
@@ -1766,6 +1911,10 @@ async fn run_host(
                         let Ok(command) = command else { control.close().await?; return Ok(true); };
                         if matches!(command, HostCommand::Shutdown) { control.close().await?; return Ok(true); }
                         if matches!(command, HostCommand::Reconnect) { return Ok(false); }
+                        if let HostCommand::SshAgent { socket, .. } = command {
+                            ssh_auth_sock = socket;
+                            continue;
+                        }
                         if let HostCommand::StopServer { epoch } = command {
                             if epoch != shared.model.lock().expect("host model").connection_epoch {
                                 shared.update(|m| m.notice = Some("Stop not sent: the connection changed. Review Stop server again.".into()));
@@ -1793,6 +1942,67 @@ async fn run_host(
                                     if api.is_none() { return Err(error); }
                                 }
                             }
+                            continue;
+                        }
+                        if let HostCommand::ResizeLayer {
+                            epoch,
+                            session,
+                            layer,
+                            bounds,
+                            raise_first,
+                        } = command
+                        {
+                            let live_epoch = shared.model.lock().expect("host model").connection_epoch;
+                            if epoch != live_epoch {
+                                shared.update(|m| {
+                                    m.notice = Some(crate::layers::Blocked::ChangedDuringDrag.sentence());
+                                });
+                                continue;
+                            }
+                            let rev = control.welcome().api_revision;
+                            if rev < crate::layers::MIN_API_REVISION {
+                                shared.update(|m| {
+                                    m.notice = Some(crate::layers::Blocked::OldServer(rev).sentence());
+                                });
+                                continue;
+                            }
+                            let Some(bounds) = crate::layers::sendable(bounds) else {
+                                continue;
+                            };
+                            let outcome: Result<()> = async {
+                                if raise_first {
+                                    request(
+                                        &mut control,
+                                        "session.raise_layer",
+                                        json!({"session_id": session, "layer_id": layer}),
+                                    )
+                                    .await?;
+                                }
+                                request(
+                                    &mut control,
+                                    "session.resize_layer",
+                                    json!({"session_id": session, "layer_id": layer, "bounds": bounds}),
+                                )
+                                .await?;
+                                after_request(
+                                    &mut control,
+                                    shared,
+                                    &mut workers,
+                                    &mut state,
+                                    Some(&session),
+                                )
+                                .await
+                            }
+                            .await;
+                            if let Err(error) = outcome {
+                                shared.update(|m| m.notice = Some(format!("{error:#}")));
+                                if !matches!(error.downcast_ref::<rexrs::Error>(), Some(rexrs::Error::Api(_))) {
+                                    return Err(error);
+                                }
+                            }
+                            state.prune(&shared.model.lock().expect("host model"));
+                            reconcile(&endpoint, shared, &sender, &mut workers);
+                            declare_themes(&mut control, shared, &mut state, &workers, theme.as_ref()).await;
                             continue;
                         }
                         if let HostCommand::Keymap(new) = command {
@@ -1824,6 +2034,24 @@ async fn run_host(
                         if let HostCommand::Identify = command {
                             server_reads.want();
                             server_reads.start(&mut control).await?;
+                            continue;
+                        }
+                        if let HostCommand::WatchSharedHosts = command {
+                            let retryable = shared
+                                .model
+                                .lock()
+                                .expect("host model")
+                                .shared
+                                .retryable();
+                            hosts_reads.watch(&mut control, retryable).await?;
+                            continue;
+                        }
+                        if let HostCommand::PutSharedHost { id, epoch, host } = command {
+                            hosts::execute_put(&mut control, shared, &mut hosts_reads, id, epoch, host).await?;
+                            continue;
+                        }
+                        if let HostCommand::RemoveSharedHost { id, epoch, host_id } = command {
+                            hosts::execute_remove(&mut control, shared, &mut hosts_reads, id, epoch, host_id).await?;
                             continue;
                         }
                         if let HostCommand::Upload { session, block, files } = command {
@@ -1899,6 +2127,19 @@ async fn run_host(
                 command = commands.recv_async() => match command {
                     Ok(HostCommand::Shutdown) | Err(_) => return Ok(()),
                     Ok(HostCommand::Reconnect) => break,
+                    Ok(HostCommand::SshAgent { socket, wake_auth_retry }) => {
+                        ssh_auth_sock = socket;
+                        let auth_failed = shared
+                            .model
+                            .lock()
+                            .expect("host model")
+                            .ssh_problem
+                            == Some(crate::ssh::Problem::AuthFailed);
+                        if wake_auth_retry && ssh.is_some() && auth_failed {
+                            retry = 0;
+                            break;
+                        }
+                    }
                     Ok(HostCommand::Select(id)) => preferred = Some(id),
                     Ok(HostCommand::Navigate { id, .. }) => reject_navigation(shared, id),
                     Ok(HostCommand::Visibility(visible)) => shared.update(|m|m.visible=visible),
@@ -1907,6 +2148,23 @@ async fn run_host(
                     Ok(HostCommand::KeepTailscale(new)) => keep_tailscale = new,
                     Ok(HostCommand::Keymap(new)) => keymap = Some(new),
                     Ok(HostCommand::Identify) => server_reads.want(),
+                    Ok(HostCommand::WatchSharedHosts) => hosts_reads.want(),
+                    Ok(HostCommand::PutSharedHost { id, epoch, .. }) => hosts::reject_write(
+                        shared,
+                        id,
+                        epoch,
+                        hosts::WriteKind::Put,
+                        "disconnected",
+                        "Shared host change not sent while disconnected. Try again after reconnecting.",
+                    ),
+                    Ok(HostCommand::RemoveSharedHost { id, epoch, .. }) => hosts::reject_write(
+                        shared,
+                        id,
+                        epoch,
+                        hosts::WriteKind::Remove,
+                        "disconnected",
+                        "Shared host removal not sent while disconnected. Try again after reconnecting.",
+                    ),
                     Ok(HostCommand::Ticket { reply, .. }) => { let _ = reply.send(Err("Host is reconnecting".into())); }
                     Ok(HostCommand::Claim { .. } | HostCommand::PerformReply { .. }) => {}
                     Ok(HostCommand::ListDir(request)) => directory::finish(shared, &request, Err(directory::Failure::Disconnected)),
@@ -1919,6 +2177,9 @@ async fn run_host(
                         if let Some(worker) = workers.get_mut(&block) { worker.size = Some((a,b,c,d)); }
                     }
                     Ok(HostCommand::Terminal { block, command, .. }) if forward_search(&workers, &block, &command) => {}
+                    Ok(HostCommand::ResizeLayer { .. }) => shared.update(|m| {
+                        m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
+                    }),
                     Ok(_) => shared.update(|m| m.notice = Some("Action not sent while disconnected. Try it again after reconnecting.".into())),
                 }
             }
@@ -1933,8 +2194,26 @@ async fn run_host(
                 HostCommand::PrefetchViews(sessions) => prefetch.set_eligible(sessions),
                 HostCommand::Theme(new) => theme = new,
                 HostCommand::KeepTailscale(new) => keep_tailscale = new,
+                HostCommand::SshAgent { socket, .. } => ssh_auth_sock = socket,
                 HostCommand::Keymap(new) => keymap = Some(new),
                 HostCommand::Identify => server_reads.want(),
+                HostCommand::WatchSharedHosts => hosts_reads.want(),
+                HostCommand::PutSharedHost { id, epoch, .. } => hosts::reject_write(
+                    shared,
+                    id,
+                    epoch,
+                    hosts::WriteKind::Put,
+                    "disconnected",
+                    "Shared host change not sent: the connection dropped first. Try again after reconnecting.",
+                ),
+                HostCommand::RemoveSharedHost { id, epoch, .. } => hosts::reject_write(
+                    shared,
+                    id,
+                    epoch,
+                    hosts::WriteKind::Remove,
+                    "disconnected",
+                    "Shared host removal not sent: the connection dropped first. Try again after reconnecting.",
+                ),
                 HostCommand::Ticket { reply, .. } => {
                     let _ = reply.send(Err("Host is reconnecting".into()));
                 }
@@ -1955,6 +2234,9 @@ async fn run_host(
                             .into(),
                     );
                     m.server_stop_result = m.notice.clone();
+                }),
+                HostCommand::ResizeLayer { .. } => shared.update(|m| {
+                    m.notice = Some(crate::layers::Blocked::NotConnected.sentence());
                 }),
                 _ => {}
             }
@@ -1980,6 +2262,7 @@ fn forward_search(workers: &HashMap<String, PaneWorker>, block: &str, command: &
         Command::SearchStep(older) => DataCommand::SearchStep(*older),
         Command::PromptStep(older) => DataCommand::PromptStep(*older),
         Command::CursorStyle(shape) => DataCommand::CursorStyle(*shape),
+        Command::CopyMode(input) => DataCommand::CopyMode(*input),
         _ => return false,
     };
     if let Some(worker) = workers.get(block) {
@@ -2238,6 +2521,9 @@ async fn handle_command(
                 Command::Selection(input) => {
                     let _ = worker.commands.send(DataCommand::Selection(input));
                 }
+                Command::CopyMode(input) => {
+                    let _ = worker.commands.send(DataCommand::CopyMode(input));
+                }
                 Command::Resize(cols, rows, w, h) => {
                     worker.size = Some((cols, rows, w, h));
                     resize(control, &session, &block, cols, rows, w, h).await?;
@@ -2377,13 +2663,18 @@ async fn handle_command(
         }
         HostCommand::ListDir(_)
         | HostCommand::Reconnect
+        | HostCommand::SshAgent { .. }
         | HostCommand::Shutdown
         | HostCommand::StopServer { .. }
+        | HostCommand::ResizeLayer { .. }
         | HostCommand::PrefetchViews(_)
         | HostCommand::Keymap(_)
         | HostCommand::KeepTailscale(_)
         | HostCommand::Tailscale(_)
         | HostCommand::Identify
+        | HostCommand::WatchSharedHosts
+        | HostCommand::PutSharedHost { .. }
+        | HostCommand::RemoveSharedHost { .. }
         | HostCommand::Download(_)
         | HostCommand::DownloadConfirm(_)
         | HostCommand::DownloadCancel(_)
@@ -2415,6 +2706,20 @@ async fn resize(
     Ok(())
 }
 
+fn fail_copy_mode(
+    copy_mode: &mut crate::terminal::copy_mode::Controller,
+    shared: &PaneShared,
+    error: anyhow::Error,
+) {
+    let ended = copy_mode.reset();
+    shared.update(|m| {
+        m.notice = Some(format!("Copy mode failed: {error:#}"));
+        if let Some(epoch) = ended {
+            m.copy_ended_epoch = m.copy_ended_epoch.max(epoch);
+        }
+    });
+}
+
 async fn run_data(
     endpoint: String,
     session: String,
@@ -2426,6 +2731,9 @@ async fn run_data(
     let mut welcome: Option<wire::Welcome> = None;
     let mut stream: Option<TerminalStream> = None;
     let mut selection = None;
+    let mut copy_mode = crate::terminal::copy_mode::Controller::default();
+    let mut pending_yank: Option<crate::terminal::copy_mode::CopyYank> = None;
+    let mut selection_revision: u64 = 0;
     let mut search = crate::terminal::search::Controller::default();
     let mut prompt_anchor = false;
     let mut visible = true;
@@ -2451,18 +2759,28 @@ async fn run_data(
             if socket.is_none() {
                 let (next, fresh) = open_data(&endpoint, &session, &block, &host).await?;
                 selection = Some(crate::terminal::selection::Controller::new()?);
+                let ended = copy_mode.reset();
+                pending_yank = None;
+                selection_revision = 0;
                 search.forget_terminal();
                 prompt_anchor = false;
                 let mut restored = TerminalStream::new(fresh.nonce);
                 restored.set_cursor_style(cursor_style)?;
                 stream = Some(restored); welcome = Some(fresh);
-                shared.update(|m|m.restore_generation+=1);
+                shared.update(|m| {
+                    m.restore_generation += 1;
+                    m.copy_yank = None;
+                    if let Some(epoch) = ended {
+                        m.copy_ended_epoch = m.copy_ended_epoch.max(epoch);
+                    }
+                });
                 renderer = Renderer::new()?; socket = Some(next);
                 shared.status("Restoring terminal…", false);
             }
             let mut socket = socket.context("data socket")?;
             let stream = stream.as_mut().context("terminal stream")?;
             let selection = selection.as_mut().context("selection controller")?;
+            let mut pending_copy_search: Option<PendingCopySearch> = None;
             let mut dirty = true;
             let mut tick = tokio::time::interval(Duration::from_millis(16));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2473,24 +2791,125 @@ async fn run_data(
                         dirty = true;
                     }
                     command = commands.recv_async() => match command {
-                        Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal { selection.apply(terminal, input)?; dirty = true; },
+                        Ok(DataCommand::Selection(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &stream.terminal {
+                            let replaces = matches!(
+                                input.phase,
+                                crate::terminal::selection::Phase::Down(_)
+                                    | crate::terminal::selection::Phase::Clear
+                                    | crate::terminal::selection::Phase::All
+                            ) || (matches!(input.phase, crate::terminal::selection::Phase::Move)
+                                && selection.is_dragging());
+                            selection.apply(terminal, input)?;
+                            selection_revision = selection.revision;
+                            if replaces {
+                                copy_mode.clear_owned_selection();
+                            }
+                            dirty = true;
+                        },
+                        Ok(DataCommand::CopyMode(input)) => if input.generation == shared.model.lock().expect("terminal model").restore_generation && let Some(terminal) = &mut stream.terminal {
+                            let is_to_match = matches!(input.op, crate::terminal::copy_mode::CopyModeOp::ToMatch);
+                            match copy_mode.apply(terminal, Some(&search), input) {
+                                Ok(outcome) if outcome.accepted => {
+                                    prompt_anchor = false;
+                                    selection_revision = input.revision;
+                                    if let Err(error) = selection.stop(terminal) {
+                                        shared.update(|m| m.notice = Some(format!("Copy mode failed: {error:#}")));
+                                    }
+                                    if let Some(yank) = outcome.yank {
+                                        pending_yank = Some(yank);
+                                    }
+                                    if is_to_match && search.has_needle() && !search.is_settled() {
+                                        pending_copy_search = Some(PendingCopySearch {
+                                            epoch: input.epoch,
+                                            steps: Vec::new(),
+                                        });
+                                    } else {
+                                        pending_copy_search = None;
+                                    }
+                                    dirty = true;
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    pending_copy_search = None;
+                                    fail_copy_mode(&mut copy_mode, &shared, error);
+                                    dirty = true;
+                                }
+                            }
+                        },
                         Ok(DataCommand::Visible(value)) => { if value && !visible { dirty = true; } else if !value && let Some(terminal) = &stream.terminal { selection.stop(terminal)?; } visible = value; }
-                        Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta)); selection.after_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::Scroll(delta)) => if let Some(terminal) = &mut stream.terminal {
+                            prompt_anchor = false;
+                            pending_copy_search = None;
+                            let before = terminal.scrollbar()?.offset as usize;
+                            terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Delta(delta));
+                            selection.after_scroll(terminal)?;
+                            if let Err(error) = copy_mode.after_viewport_scroll_delta(terminal, before, delta) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
+                            dirty = true;
+                        },
                         Ok(DataCommand::CursorStyle(shape)) => { cursor_style = shape; stream.set_cursor_style(shape)?; dirty = true; },
                         Ok(DataCommand::PromptStep(older)) => if let Some(terminal) = &mut stream.terminal {
+                            pending_copy_search = None;
                             let before = terminal.scrollbar()?.offset;
                             terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::DeltaPrompt(if older { -1 } else { 1 }));
                             if terminal.scrollbar()?.offset != before {
                                 prompt_anchor = !terminal.is_viewport_active()?;
                             }
                             selection.after_scroll(terminal)?;
+                            if let Err(error) = copy_mode.after_viewport_scroll(terminal) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
                             dirty = true;
                         },
-                        Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal { prompt_anchor = false; terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom); dirty = true; },
+                        Ok(DataCommand::Bottom) => if let Some(terminal) = &mut stream.terminal {
+                            prompt_anchor = false;
+                            pending_copy_search = None;
+                            terminal.scroll_viewport(ghostty_vt::terminal::ScrollViewport::Bottom);
+                            if let Err(error) = copy_mode.after_scroll_bottom(terminal) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
+                            dirty = true;
+                        },
                         // A search that fails is dropped with a notice; the terminal's stream is not its to end.
-                        Ok(DataCommand::Search(needle)) => { prompt_anchor = false; if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } dirty = true; },
+                        Ok(DataCommand::Search(needle)) => {
+                            prompt_anchor = false;
+                            pending_copy_search = None;
+                            if let Err(error) = search.set_needle(stream.terminal.as_ref(), needle) {
+                                search = Default::default();
+                                shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                            }
+                            dirty = true;
+                        }
                         // Ghostty scrolls the selected match into view.
-                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &stream.terminal { prompt_anchor = false; if let Err(error) = search.step(terminal, older) { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); } selection.after_scroll(terminal)?; dirty = true; },
+                        Ok(DataCommand::SearchStep(older)) => if let Some(terminal) = &mut stream.terminal {
+                            prompt_anchor = false;
+                            if search.has_needle()
+                                && !search.is_settled()
+                                && let Some(epoch) = copy_mode.active_epoch()
+                            {
+                                pending_copy_search
+                                    .get_or_insert(PendingCopySearch {
+                                        epoch,
+                                        steps: Vec::new(),
+                                    })
+                                    .steps
+                                    .push(older);
+                            } else {
+                                if let Err(error) = search.step(terminal, older) {
+                                    search = Default::default();
+                                    pending_copy_search = None;
+                                    shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                }
+                                selection.after_scroll(terminal)?;
+                                if copy_mode.is_active()
+                                    && let Err(error) = copy_mode.move_to_match(terminal, &search)
+                                {
+                                    fail_copy_mode(&mut copy_mode, &shared, error);
+                                }
+                            }
+                            dirty = true;
+                        },
                         Ok(DataCommand::Reconnect) => { shared.status("Reconnecting terminal…", false); return Ok(false); }
                         Ok(DataCommand::Stop) | Err(_) => return Ok(true),
                     },
@@ -2499,22 +2918,84 @@ async fn run_data(
                         if stream.render_held(Instant::now())? { continue; }
                         if let Some(terminal) = &mut stream.terminal {
                             selection.tick(terminal)?;
-                            let search_pending = match search.update(terminal) {
+                            let mut search_pending = match search.update(terminal) {
                                 Ok(pending) => pending,
-                                Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); false }
+                                Err(error) => {
+                                    search = Default::default();
+                                    pending_copy_search = None;
+                                    shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                    false
+                                }
                             };
+                            if search_pending && pending_copy_search.is_some() {
+                                for _ in 0..64 {
+                                    match search.update(terminal) {
+                                        Ok(false) => {
+                                            search_pending = false;
+                                            break;
+                                        }
+                                        Ok(true) => {}
+                                        Err(error) => {
+                                            search = Default::default();
+                                            pending_copy_search = None;
+                                            shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                            search_pending = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if !search_pending
+                                && let Some(pending) = pending_copy_search.take()
+                                && copy_mode.active_epoch() == Some(pending.epoch)
+                                && search.has_needle()
+                            {
+                                let mut failed = false;
+                                for older in pending.steps {
+                                    if let Err(error) = search.step(terminal, older) {
+                                        search = Default::default();
+                                        shared.update(|m| m.notice = Some(format!("Search failed: {error:#}")));
+                                        failed = true;
+                                        break;
+                                    }
+                                }
+                                if !failed {
+                                    selection.after_scroll(terminal)?;
+                                    if let Err(error) = copy_mode.move_to_match(terminal, &search) {
+                                        fail_copy_mode(&mut copy_mode, &shared, error);
+                                    }
+                                }
+                            }
+                            if let Err(error) = copy_mode.sync(terminal) {
+                                fail_copy_mode(&mut copy_mode, &shared, error);
+                            }
                             let mut frame = renderer.frame(terminal)?;
                             if terminal.is_viewport_active()? { prompt_anchor = false; }
                             frame.prompt_anchor = prompt_anchor;
-                            frame.selection_revision = selection.revision;
+                            frame.selection_revision = selection_revision;
+                            frame.copy = match copy_mode.view(terminal) {
+                                Ok(view) => view,
+                                Err(error) => {
+                                    fail_copy_mode(&mut copy_mode, &shared, error);
+                                    None
+                                }
+                            };
                             frame.search = match search.results(terminal) {
                                 Ok(results) => results,
                                 Err(error) => { search = Default::default(); shared.update(|m| m.notice = Some(format!("Search failed: {error:#}"))); None }
                             };
                             let frame = Arc::new(frame);
+                            let yank = pending_yank.take();
+                            let ended = copy_mode.ended_epoch();
                             let mut transitioned = false;
                             shared.update(|m| {
                                 m.frame = Some(frame);
+                                if let Some(yank) = yank {
+                                    m.copy_yank = Some(yank);
+                                }
+                                if ended > m.copy_ended_epoch {
+                                    m.copy_ended_epoch = ended;
+                                }
                                 if !m.connected { m.connected = true; m.status = "Live · snapshot restored".into(); transitioned = true; }
                                 if let Some(code) = stream.exit_code { m.status = format!("Process exited · {code}"); }
                             });
@@ -2543,6 +3024,12 @@ async fn run_data(
             }
         }
     }
+}
+
+/// Queued copy-mode jump/steps waiting for an in-flight search scan to settle.
+struct PendingCopySearch {
+    epoch: u64,
+    steps: Vec<bool>,
 }
 
 async fn open_data(
