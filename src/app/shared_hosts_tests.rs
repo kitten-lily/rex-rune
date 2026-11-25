@@ -1925,6 +1925,7 @@ fn shared_write_collision_guards_upfront_pending_and_reply_time_preserve_unique_
             remote_control: false,
             keep_tailscale: false,
             tailscale_name: None,
+            prompts: true,
             collapsed: false,
             hidden_offline: false,
             shell: None,

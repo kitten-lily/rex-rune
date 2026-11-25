@@ -12,6 +12,8 @@ mod compatibility_tests;
 mod copy_mode_tests;
 #[path = "directory_tests.rs"]
 mod directory_tests;
+#[path = "ports_tests.rs"]
+mod ports_tests;
 // These fixtures exercise Unix process identity and the POSIX download store.
 #[cfg(unix)]
 #[path = "downloads_tests.rs"]
@@ -20,6 +22,8 @@ mod downloads_tests;
 mod find_tests;
 #[path = "floating_tests.rs"]
 mod floating_tests;
+#[path = "focus_history_tests.rs"]
+mod focus_history_tests;
 #[path = "font_settings_tests.rs"]
 mod font_settings_tests;
 #[path = "header_fading_tests.rs"]
@@ -48,6 +52,8 @@ mod pane_verb_tests;
 mod polish_tests;
 #[path = "program_icon_tests.rs"]
 mod program_icon_tests;
+#[path = "prompt_tests.rs"]
+mod prompt_tests;
 #[path = "recorder_tests.rs"]
 mod recorder_tests;
 #[path = "remote_session_tests.rs"]
@@ -122,6 +128,7 @@ fn workspace_hosts(count: usize) -> Workspace {
                 remote_control: false,
                 keep_tailscale: false,
                 tailscale_name: None,
+                prompts: true,
                 collapsed: false,
                 hidden_offline: false,
                 shell: None,
@@ -1110,6 +1117,11 @@ fn requests(rx: &flume::Receiver<HostCommand>) -> Vec<(String, String, serde_jso
             HostCommand::Request { method, payload } => {
                 Some((method, payload["session_id"].as_str()?.to_owned(), payload))
             }
+            HostCommand::Close { kind, payload } => Some((
+                kind.method().into(),
+                payload["session_id"].as_str()?.to_owned(),
+                payload,
+            )),
             HostCommand::NewTerminal {
                 method,
                 mut payload,
@@ -4202,6 +4214,12 @@ fn a_sidebar_tabs_menu_rename_and_middle_click_act_on_its_own_session() {
                     payload["session_id"].as_str()?,
                     payload["window_id"].as_str()?,
                     payload["label"].as_str().unwrap_or("-")
+                )),
+                HostCommand::Close { kind, payload } => Some(format!(
+                    "{} {} {} -",
+                    kind.method(),
+                    payload["session_id"].as_str()?,
+                    payload["window_id"].as_str()?,
                 )),
                 _ => None,
             })

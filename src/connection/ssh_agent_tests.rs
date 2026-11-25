@@ -18,6 +18,8 @@ fn spawn_with_fake_ssh(
             theme: None,
             keep_tailscale: None,
             ssh_auth_sock,
+            prompts_enabled: false,
+            max_api_revision: transport::API_REVISION,
             ssh_program: Some(ssh_program),
             tunnel_dir: Some(tunnel_dir),
         },
@@ -72,7 +74,7 @@ async fn ssh_agent_command_does_not_drop_connected_host_and_wakes_only_auth_fail
         let hello =
             serde_json::from_str::<Value>(ws.next().await.unwrap().unwrap().to_text().unwrap())
                 .unwrap();
-        assert_eq!(hello["api_revision"], 13);
+        assert_eq!(hello["api_revision"], 21);
         ws.send(Message::Text(
             json!({
                 "type": "welcome",

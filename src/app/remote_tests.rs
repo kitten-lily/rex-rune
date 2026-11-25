@@ -53,7 +53,25 @@ fn remote_set_is_exact_and_every_denial_is_described() {
             "session.select"
         ]
     );
-    for action in actions::declarations() {
+    let mut tab_state: Vec<_> = actions::SPECS
+        .iter()
+        .filter(|s| matches!(s.remote(), Remote::TabState))
+        .map(|s| s.name)
+        .collect();
+    tab_state.sort();
+    assert_eq!(tab_state, ["client.tab.mute"]);
+    assert!(matches!(
+        actions::find("client.ports").unwrap().remote(),
+        Remote::Never(_)
+    ));
+    assert!(matches!(
+        actions::find(actions::FOCUS_HISTORY_REVERSE)
+            .unwrap()
+            .remote(),
+        Remote::Never(_)
+    ));
+    let declarations = actions::declarations();
+    for action in &declarations {
         if matches!(
             actions::find(&action.name).unwrap().remote(),
             Remote::Never(_)
@@ -61,11 +79,27 @@ fn remote_set_is_exact_and_every_denial_is_described() {
             assert!(
                 action
                     .description
+                    .as_deref()
                     .unwrap()
                     .contains("Not available remotely")
             );
         }
     }
+    let mute = declarations
+        .iter()
+        .find(|a| a.name == "client.tab.mute")
+        .expect("client.tab.mute declaration");
+    let desc = mute.description.as_deref().expect("mute description");
+    assert!(!desc.contains("Not available remotely"), "{desc}");
+    assert!(
+        desc.contains("window_id") && desc.contains("muted"),
+        "{desc}"
+    );
+    let schema = mute.args.as_ref().expect("mute schema");
+    assert_eq!(schema["additionalProperties"], false);
+    assert_eq!(schema["properties"]["window_id"]["maxLength"], 128);
+    assert_eq!(schema["properties"]["session_id"]["maxLength"], 128);
+    assert_eq!(schema["properties"]["muted"]["type"], "boolean");
 }
 
 #[test]
@@ -87,18 +121,17 @@ fn remote_default_off_and_all_hazards_are_denied_without_side_effects() {
             else {
                 panic!()
             };
-            code(
-                outcome,
-                if matches!(spec.remote(), Remote::Never(_)) {
-                    "not_supported"
-                } else {
-                    "refused"
-                },
-            );
+            let expected = match spec.remote() {
+                Remote::Never(_) => "not_supported",
+                Remote::TabState if enabled => "bad_request",
+                Remote::View { .. } | Remote::TabState => "refused",
+            };
+            code(outcome, expected);
             assert!(ws.panel.is_none());
             assert_eq!(ws.sidebar.is_open(), sidebar);
             assert_eq!(ws.settings.sidebar_mode, mode);
             assert_eq!(ws.settings.activity_grouping, grouping);
+            assert!(ws.settings.muted_tabs.is_empty());
         }
     }
     assert_eq!(ws.notices.len(), 1, "off notice once per host per launch");
@@ -546,4 +579,750 @@ fn remote_control_switch_is_per_host_and_survives_save() {
     );
     assert!(!rt.state.settings.hosts[1].keep_tailscale);
     assert_eq!(rt.state.settings.hosts[1].tailscale_name, None);
+}
+
+fn two_host_mute_workspace() -> (
+    Workspace,
+    flume::Receiver<HostCommand>,
+    flume::Receiver<HostCommand>,
+) {
+    let mut ws = workspace_hosts(2);
+    let rx0 = capture_host(&mut ws, 0);
+    let rx1 = capture_host(&mut ws, 1);
+    for (host, prefix) in [(0, "h0"), (1, "h1")] {
+        let model = &mut ws.hosts[host].model;
+        model.connected = true;
+        model.sessions = vec![
+            session(&format!("{prefix}-s")),
+            session(&format!("{prefix}-bg")),
+        ];
+        model.selected = Some(format!("{prefix}-s"));
+        model.views.insert(
+            format!("{prefix}-s"),
+            serde_json::from_value(json!({
+                "revision": 1,
+                "session_id": format!("{prefix}-s"),
+                "active_window_id": format!("{prefix}-main"),
+                "windows": [
+                    {
+                        "window_id": format!("{prefix}-main"),
+                        "label": "main",
+                        "focused_block_id": format!("{prefix}-b-main"),
+                        "layers": [{"kind": "tiled", "layout": {"block_id": format!("{prefix}-b-main")},
+                            "blocks": [{"block_id": format!("{prefix}-b-main")}]}]
+                    },
+                    {
+                        "window_id": format!("{prefix}-worker"),
+                        "label": "worker",
+                        "focused_block_id": format!("{prefix}-b-worker"),
+                        "layers": [{"kind": "tiled", "layout": {"block_id": format!("{prefix}-b-worker")},
+                            "blocks": [{"block_id": format!("{prefix}-b-worker")}]}]
+                    }
+                ]
+            }))
+            .expect("selected view"),
+        );
+        model.views.insert(
+            format!("{prefix}-bg"),
+            serde_json::from_value(json!({
+                "revision": 1,
+                "session_id": format!("{prefix}-bg"),
+                "active_window_id": format!("{prefix}-bg-main"),
+                "windows": [
+                    {
+                        "window_id": format!("{prefix}-bg-main"),
+                        "label": "bg-main",
+                        "focused_block_id": format!("{prefix}-b-bg-main"),
+                        "layers": [{"kind": "tiled", "layout": {"block_id": format!("{prefix}-b-bg-main")},
+                            "blocks": [{"block_id": format!("{prefix}-b-bg-main")}]}]
+                    },
+                    {
+                        "window_id": format!("{prefix}-bg-worker"),
+                        "label": "bg-worker",
+                        "focused_block_id": format!("{prefix}-b-bg-worker"),
+                        "layers": [{"kind": "tiled", "layout": {"block_id": format!("{prefix}-b-bg-worker")},
+                            "blocks": [{"block_id": format!("{prefix}-b-bg-worker")}]}]
+                    }
+                ]
+            }))
+            .expect("background view"),
+        );
+    }
+    ws.settings.hosts[0].remote_control = true;
+    ws.settings.hosts[1].remote_control = true;
+    (ws, rx0, rx1)
+}
+
+#[test]
+fn remote_tab_mute_works_unattended_across_panels_search_sequences_typing_and_offscreen_host() {
+    let (mut ws, rx0, rx1) = two_host_mute_workspace();
+    let (sender, _) = flume::unbounded();
+    live_terminal(&mut ws, "h0-b-main", &sender);
+    ws.local_keymap = actions::resolve(&rex_rune::keymap::Overrides::parse(&json!([
+        {"keys": "ctrl+b>c", "action": "client.sidebar.toggle"}
+    ])));
+    let mut rt = runtime(ws);
+
+    // 1. Focused search field + active keypress: host 1 (off-screen) mutes its own tab.
+    ctrl_shift(&mut rt, 'f');
+    press(&mut rt, Key::Text("a".into()));
+    let search_focus = focused(&rt);
+    assert!(
+        search_focus
+            .as_ref()
+            .unwrap()
+            .contains("search-field:h0-b-main")
+    );
+    rt.state.last_keypress = Some(Instant::now());
+    rx1.drain();
+    rt.update(|s, tx| {
+        s.remote_perform(
+            1,
+            pending(
+                "client.tab.mute",
+                json!({"window_id": "h1-worker", "muted": true}),
+            ),
+            tx,
+        );
+    });
+    assert_eq!(reply(&rx1), Outcome::Performed);
+    assert!(rt.state.tab_muted(1, "h1-worker"));
+    assert_eq!(rt.state.active, 0, "active host did not change");
+    assert_eq!(rt.state.hosts[0].model.selected.as_deref(), Some("h0-s"));
+    assert_eq!(
+        rt.state.hosts[0]
+            .model
+            .window()
+            .unwrap()
+            .window_id
+            .as_deref(),
+        Some("h0-main")
+    );
+    assert_eq!(focused(&rt), search_focus, "search field kept focus");
+    assert!(
+        rt.state
+            .notices
+            .iter()
+            .any(|n| n.text == "test-1: rex (uid 1000) muted \"worker\""),
+        "{:?}",
+        rt.state.notices.iter().map(|n| &n.text).collect::<Vec<_>>()
+    );
+
+    // 2. Settings panel open: host 0 mutes without closing the panel.
+    press(&mut rt, Key::Escape);
+    rt.update(|s, tx| s.perform(Intent::Settings, tx));
+    assert!(rt.state.panel.is_some());
+    rx0.drain();
+    rt.update(|s, tx| {
+        s.remote_perform(
+            0,
+            pending(
+                "client.tab.mute",
+                json!({"window_id": "h0-worker", "muted": true}),
+            ),
+            tx,
+        );
+    });
+    assert_eq!(reply(&rx0), Outcome::Performed);
+    assert!(rt.state.tab_muted(0, "h0-worker"));
+    assert!(rt.state.panel.is_some(), "panel stayed open");
+
+    // 3. Pending key sequence: remote mute succeeds and leaves the sequence intact.
+    press(&mut rt, Key::Escape);
+    assert!(rt.state.panel.is_none());
+    rt.key(KeyEvent {
+        key: Key::Command('b'),
+        mods: Mods {
+            ctrl: true,
+            cmd: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1. / 60.);
+    assert_eq!(rt.state.bindings.sequence.depth, 1);
+    rx0.drain();
+    rt.update(|s, tx| {
+        s.remote_perform(
+            0,
+            pending(
+                "client.tab.mute",
+                json!({"window_id": "h0-worker", "muted": false}),
+            ),
+            tx,
+        );
+    });
+    assert_eq!(reply(&rx0), Outcome::Performed);
+    assert!(!rt.state.tab_muted(0, "h0-worker"));
+    assert_eq!(
+        rt.state.bindings.sequence.depth, 1,
+        "pending sequence untouched"
+    );
+    let sidebar = rt.state.sidebar.is_open();
+    press(&mut rt, Key::Text("c".into()));
+    assert_eq!(rt.state.bindings.sequence.depth, 0);
+    assert_ne!(
+        rt.state.sidebar.is_open(),
+        sidebar,
+        "the pending sequence tail still runs"
+    );
+}
+
+#[test]
+fn remote_tab_mute_in_background_session_suppresses_activity_without_attaching_session() {
+    use rex_rune::connection::activity::ProgramState::*;
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.track_activity(0);
+    // Remote mute worker tab inside background session h0-bg.
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"window_id": "h0-bg-worker", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    // The fork's own prefetch wish is not a navigation.
+    let commands: Vec<_> = rx0
+        .try_iter()
+        .filter(|c| !matches!(c, HostCommand::PrefetchViews(_)))
+        .collect();
+    assert_eq!(commands.len(), 1, "must not send Navigate or Select");
+    assert!(matches!(
+        commands[0],
+        HostCommand::PerformReply {
+            outcome: Outcome::Performed,
+            ..
+        }
+    ));
+    assert_eq!(ws.hosts[0].model.selected.as_deref(), Some("h0-s"));
+    assert!(ws.tab_muted(0, "h0-bg-worker"));
+
+    // Activity arrives on both bg-worker (muted) and bg-main (unmuted).
+    set_activity(&mut ws, "h0-b-bg-worker", &[("", record(Blocked, true))]);
+    set_activity(&mut ws, "h0-b-bg-main", &[("", record(Error, true))]);
+
+    // Desktop notifications only fire for bg-main, never for muted bg-worker.
+    let notified: Vec<_> = ws
+        .outbox
+        .iter()
+        .filter_map(|n| n.target.as_ref().and_then(|t| t.window.as_deref()))
+        .collect();
+    assert_eq!(notified, ["h0-bg-main"]);
+}
+
+#[test]
+fn remote_tab_mute_enforces_args_host_isolation_envelope_lifecycle_and_idempotency() {
+    let (mut ws, rx0, rx1) = two_host_mute_workspace();
+    // Explicit window_id and muted are both required remotely.
+    for bad in [
+        Value::Null,
+        json!({}),
+        json!({"window_id": "h0-worker"}),
+        json!({"muted": true}),
+        json!({"session_id": "h0-s", "muted": true}),
+        json!({"window_id": "   ", "muted": true}),
+        json!({"window_id": "a".repeat(129), "muted": true}),
+        json!({"window_id": "h0-worker", "muted": "yes"}),
+        json!({"window_id": "h0-worker", "muted": true, "extra": 1}),
+    ] {
+        ws.remote_perform(
+            0,
+            pending("client.tab.mute", bad.clone()),
+            &mut rune::Tx::default(),
+        );
+        code(reply(&rx0), "bad_request");
+    }
+
+    // Unknown window or unknown session -> not_found.
+    for missing in [
+        json!({"window_id": "no-such-tab", "muted": true}),
+        json!({"session_id": "no-such-session", "window_id": "h0-worker", "muted": true}),
+        json!({"session_id": "h0-bg", "window_id": "h0-worker", "muted": true}),
+    ] {
+        ws.remote_perform(
+            0,
+            pending("client.tab.mute", missing),
+            &mut rune::Tx::default(),
+        );
+        code(reply(&rx0), "not_found");
+    }
+
+    // Cross-host isolation: host 1 cannot mute or probe host 0's window ID.
+    ws.remote_perform(
+        1,
+        pending(
+            "client.tab.mute",
+            json!({"window_id": "h0-worker", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    code(reply(&rx1), "not_found");
+    assert!(!ws.tab_muted(0, "h0-worker"));
+
+    // Envelope confinement: mismatched session_id or block_id -> refused.
+    let mut bad_session = pending(
+        "client.tab.mute",
+        json!({"window_id": "h0-worker", "muted": true}),
+    );
+    bad_session.request.session_id = Some("h0-bg".into());
+    ws.remote_perform(0, bad_session, &mut rune::Tx::default());
+    code(reply(&rx0), "refused");
+    assert!(!ws.tab_muted(0, "h0-worker"));
+
+    let mut bad_block = pending(
+        "client.tab.mute",
+        json!({"window_id": "h0-worker", "muted": true}),
+    );
+    bad_block.request.block_id = Some("h0-b-main".into());
+    ws.remote_perform(0, bad_block, &mut rune::Tx::default());
+    code(reply(&rx0), "refused");
+    assert!(!ws.tab_muted(0, "h0-worker"));
+
+    // Matching envelope session_id + block_id succeeds.
+    let mut good = pending(
+        "client.tab.mute",
+        json!({"window_id": "h0-worker", "muted": true}),
+    );
+    good.request.session_id = Some("h0-s".into());
+    good.request.block_id = Some("h0-b-worker".into());
+    ws.remote_perform(0, good, &mut rune::Tx::default());
+    assert_eq!(reply(&rx0), Outcome::Performed);
+    assert!(ws.tab_muted(0, "h0-worker"));
+    assert_eq!(ws.notices.len(), 1);
+    assert_eq!(
+        ws.notices[0].text,
+        "test-0: rex (uid 1000) muted \"worker\""
+    );
+
+    // Idempotent repeat: replies Performed, skips redundant notice and skips rewriting disk.
+    ws.notices.clear();
+    std::fs::remove_file(&ws.settings_path).ok();
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"window_id": "h0-worker", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    assert_eq!(reply(&rx0), Outcome::Performed);
+    assert!(ws.notices.is_empty(), "idempotent repeat emits no notice");
+    assert!(
+        !ws.settings_path.exists(),
+        "idempotent repeat skips redundant save"
+    );
+
+    // Unmute changes state, persists, and names the tab in notice.
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"window_id": "h0-worker", "muted": false}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    assert_eq!(reply(&rx0), Outcome::Performed);
+    assert!(!ws.tab_muted(0, "h0-worker"));
+    assert_eq!(ws.notices.len(), 1);
+    assert_eq!(
+        ws.notices[0].text,
+        "test-0: rex (uid 1000) unmuted \"worker\""
+    );
+    assert!(ws.settings_path.exists());
+
+    // Stale epoch drops silently; expired and disconnected return internal.
+    let mut stale = pending(
+        "client.tab.mute",
+        json!({"window_id": "h0-worker", "muted": true}),
+    );
+    stale.epoch = 99;
+    ws.remote_perform(0, stale, &mut rune::Tx::default());
+    assert!(rx0.is_empty());
+
+    let mut expired = pending(
+        "client.tab.mute",
+        json!({"window_id": "h0-worker", "muted": true}),
+    );
+    expired.received -= Duration::from_secs(6);
+    ws.remote_perform(0, expired, &mut rune::Tx::default());
+    code(reply(&rx0), "internal");
+
+    ws.hosts[0].model.connected = false;
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"window_id": "h0-worker", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    code(reply(&rx0), "internal");
+}
+
+#[test]
+fn remote_tab_mute_fetches_unloaded_listed_session_and_rejects_missing_or_disconnected() {
+    use rex_rune::connection::ViewFetchOutcome;
+
+    // 1. Success path: unloaded listed session triggers FetchView, then mutes on arrival.
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-new"));
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h0-new", "window_id": "w-new", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    let commands: Vec<_> = rx0.try_iter().collect();
+    assert_eq!(commands.len(), 1);
+    let HostCommand::FetchView { id, session: s, .. } = &commands[0] else {
+        panic!("expected FetchView");
+    };
+    let fetch_id = *id;
+    assert_eq!(s, "h0-new");
+    assert!(!ws.poll_remote_mutes(Instant::now()));
+
+    ws.hosts[0].model.views.insert(
+        "h0-new".into(),
+        serde_json::from_value(json!({
+            "revision": 1,
+            "session_id": "h0-new",
+            "active_window_id": "w-new",
+            "windows": [{
+                "window_id": "w-new",
+                "label": "fresh-worker",
+                "focused_block_id": "b-new",
+                "layers": [{"kind": "tiled", "layout": {"block_id": "b-new"},
+                    "blocks": [{"block_id": "b-new"}]}]
+            }]
+        }))
+        .unwrap(),
+    );
+    ws.hosts[0]
+        .model
+        .view_fetches
+        .push((fetch_id, ViewFetchOutcome::Loaded));
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    assert_eq!(reply(&rx0), Outcome::Performed);
+    assert!(ws.tab_muted(0, "w-new"));
+    assert_eq!(ws.hosts[0].model.selected.as_deref(), Some("h0-s"));
+
+    // 2. Bogus window_id in unloaded listed session -> not_found after view loads (zero false positives).
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-new"));
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h0-new", "window_id": "bogus", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    let HostCommand::FetchView { id, .. } = rx0.try_recv().unwrap() else {
+        panic!("expected FetchView");
+    };
+    ws.hosts[0].model.views.insert(
+        "h0-new".into(),
+        serde_json::from_value(json!({"revision": 1, "windows": []})).unwrap(),
+    );
+    ws.hosts[0]
+        .model
+        .view_fetches
+        .push((id, ViewFetchOutcome::Loaded));
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    code(reply(&rx0), "not_found");
+    assert!(!ws.tab_muted(0, "bogus"));
+
+    // 3. Disconnect drops pending fetch silently without replying across reconnect.
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-new"));
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h0-new", "window_id": "w-new", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    rx0.drain();
+    ws.hosts[0].model.connected = false;
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    assert!(rx0.is_empty());
+
+    // 4. Timeout returns internal.
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-new"));
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h0-new", "window_id": "w-new", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    rx0.drain();
+    assert!(ws.poll_remote_mutes(Instant::now() + Duration::from_secs(6)));
+    code(reply(&rx0), "internal");
+}
+
+#[test]
+fn remote_tab_mute_post_fetch_rechecks_consent_oracle_concurrency_and_host_lifecycle() {
+    use rex_rune::connection::ViewFetchOutcome;
+
+    let unloaded_view = |session_id: &str, window_id: &str, block_id: &str| {
+        serde_json::from_value(json!({
+            "revision": 1,
+            "session_id": session_id,
+            "active_window_id": window_id,
+            "windows": [{
+                "window_id": window_id,
+                "label": window_id,
+                "focused_block_id": block_id,
+                "layers": [{"kind": "tiled", "layout": {"block_id": block_id},
+                    "blocks": [{"block_id": block_id}]}]
+            }]
+        }))
+        .unwrap()
+    };
+
+    // (a) Toggling Remote control off while FetchView is in flight refuses immediately.
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-new"));
+    ws.remote_perform(
+        0,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h0-new", "window_id": "w-new", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    rx0.drain();
+    ws.toggle_remote_control(0);
+    code(reply(&rx0), "refused");
+    assert!(ws.settings.muted_tabs.is_empty());
+    assert!(ws.remote_mutes.is_empty());
+
+    // (b) Two concurrent FetchView completions (first Failed, second Loaded) arriving
+    // before sync() both resolve deterministically without overwriting.
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-fail"));
+    ws.hosts[0].model.sessions.push(session("h0-ok"));
+    let mut p1 = pending(
+        "client.tab.mute",
+        json!({"session_id": "h0-fail", "window_id": "w-fail", "muted": true}),
+    );
+    p1.request.call_id = "call-fail".into();
+    let mut p2 = pending(
+        "client.tab.mute",
+        json!({"session_id": "h0-ok", "window_id": "w-ok", "muted": true}),
+    );
+    p2.request.call_id = "call-ok".into();
+    ws.remote_perform(0, p1, &mut rune::Tx::default());
+    ws.remote_perform(0, p2, &mut rune::Tx::default());
+    let fetches: Vec<u64> = rx0
+        .try_iter()
+        .filter_map(|c| match c {
+            HostCommand::FetchView { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fetches.len(), 2);
+    {
+        let mut shared = ws.hosts[0].connection.model.lock().unwrap();
+        *shared = ws.hosts[0].model.clone();
+        shared
+            .views
+            .insert("h0-ok".into(), unloaded_view("h0-ok", "w-ok", "b-ok"));
+        shared
+            .view_fetches
+            .push((fetches[0], ViewFetchOutcome::Failed));
+        shared
+            .view_fetches
+            .push((fetches[1], ViewFetchOutcome::Loaded));
+    }
+    ws.sync(0, &mut rune::Tx::default());
+    let replies: Vec<(String, Outcome)> = rx0
+        .try_iter()
+        .filter_map(|c| match c {
+            HostCommand::PerformReply {
+                call_id, outcome, ..
+            } => Some((call_id, outcome)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(replies[0].0, "call-fail");
+    code(replies[0].1.clone(), "internal");
+    assert_eq!(replies[1], ("call-ok".into(), Outcome::Performed));
+    assert!(ws.tab_muted(0, "w-ok") && !ws.tab_muted(0, "w-fail"));
+    assert!(
+        ws.hosts[0]
+            .connection
+            .model
+            .lock()
+            .unwrap()
+            .view_fetches
+            .is_empty(),
+        "sync drains shared.view_fetches"
+    );
+
+    // (c) Mismatched envelope session_id with nonexistent args.session_id -> refused
+    // (no cross-session existence oracle).
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    let mut oracle = pending(
+        "client.tab.mute",
+        json!({"session_id": "does-not-exist", "window_id": "h0-worker", "muted": true}),
+    );
+    oracle.request.session_id = Some("h0-s".into());
+    ws.remote_perform(0, oracle, &mut rune::Tx::default());
+    code(reply(&rx0), "refused");
+
+    // (d) Post-fetch envelope block_id mismatch -> refused; post-fetch envelope session_id
+    // mismatch (window actually lives in another session while env_session was unloaded) -> refused.
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-new"));
+    let mut bad_block = pending(
+        "client.tab.mute",
+        json!({"session_id": "h0-new", "window_id": "w-new", "muted": true}),
+    );
+    bad_block.request.block_id = Some("wrong-block".into());
+    ws.remote_perform(0, bad_block, &mut rune::Tx::default());
+    let HostCommand::FetchView { id, .. } = rx0.try_recv().unwrap() else {
+        panic!("expected FetchView");
+    };
+    ws.hosts[0]
+        .model
+        .views
+        .insert("h0-new".into(), unloaded_view("h0-new", "w-new", "b-new"));
+    ws.hosts[0]
+        .model
+        .view_fetches
+        .push((id, ViewFetchOutcome::Loaded));
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    code(reply(&rx0), "refused");
+    assert!(!ws.tab_muted(0, "w-new"));
+
+    let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+    ws.hosts[0].model.sessions.push(session("h0-unloaded"));
+    let mut env_mismatch = pending(
+        "client.tab.mute",
+        json!({"window_id": "w-later", "muted": true}),
+    );
+    env_mismatch.request.session_id = Some("h0-unloaded".into());
+    ws.remote_perform(0, env_mismatch, &mut rune::Tx::default());
+    let HostCommand::FetchView { id, .. } = rx0.try_recv().unwrap() else {
+        panic!("expected FetchView");
+    };
+    // Suppose w-later actually appeared in h0-s while h0-unloaded loaded empty.
+    ws.hosts[0].model.views.insert(
+        "h0-unloaded".into(),
+        serde_json::from_value(json!({"revision": 1, "windows": []})).unwrap(),
+    );
+    ws.hosts[0]
+        .model
+        .views
+        .get_mut("h0-s")
+        .unwrap()
+        .windows
+        .push(
+            serde_json::from_value(json!({
+                "window_id": "w-later",
+                "label": "w-later",
+                "focused_block_id": "b-later",
+                "layers": [{"kind": "tiled", "layout": {"block_id": "b-later"},
+                    "blocks": [{"block_id": "b-later"}]}]
+            }))
+            .unwrap(),
+        );
+    ws.hosts[0]
+        .model
+        .view_fetches
+        .push((id, ViewFetchOutcome::Loaded));
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    code(reply(&rx0), "refused");
+    assert!(!ws.tab_muted(0, "w-later"));
+
+    // (e) ViewFetchOutcome::Failed (session listed -> internal) vs ViewFetchOutcome::NotFound
+    // (or session removed -> not_found).
+    for (outcome, drop_session, expected) in [
+        (ViewFetchOutcome::Failed, false, "internal"),
+        (ViewFetchOutcome::NotFound, false, "not_found"),
+        (ViewFetchOutcome::Failed, true, "not_found"),
+    ] {
+        let (mut ws, rx0, _rx1) = two_host_mute_workspace();
+        ws.hosts[0].model.sessions.push(session("h0-new"));
+        ws.remote_perform(
+            0,
+            pending(
+                "client.tab.mute",
+                json!({"session_id": "h0-new", "window_id": "w-new", "muted": true}),
+            ),
+            &mut rune::Tx::default(),
+        );
+        let HostCommand::FetchView { id, .. } = rx0.try_recv().unwrap() else {
+            panic!("expected FetchView");
+        };
+        if drop_session {
+            ws.hosts[0]
+                .model
+                .sessions
+                .retain(|s| s.session_id != "h0-new");
+        }
+        ws.hosts[0].model.view_fetches.push((id, outcome));
+        assert!(ws.poll_remote_mutes(Instant::now()));
+        code(reply(&rx0), expected);
+    }
+
+    // (f1) Host removed mid-fetch -> dropped cleanly by HostId without panic or reply.
+    let (mut ws, rx0, rx1) = two_host_mute_workspace();
+    ws.hosts[1].model.sessions.push(session("h1-new"));
+    ws.remote_perform(
+        1,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h1-new", "window_id": "w-new", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    rx1.drain();
+    ws.hosts.remove(1);
+    ws.settings.hosts.remove(1);
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    assert!(ws.remote_mutes.is_empty());
+    assert!(rx0.is_empty());
+
+    // (f2) Host reordered mid-fetch -> still replies on the original host's channel and mutes it.
+    let (mut ws, rx0, rx1) = two_host_mute_workspace();
+    ws.hosts[1].model.sessions.push(session("h1-new"));
+    ws.remote_perform(
+        1,
+        pending(
+            "client.tab.mute",
+            json!({"session_id": "h1-new", "window_id": "w-new", "muted": true}),
+        ),
+        &mut rune::Tx::default(),
+    );
+    let HostCommand::FetchView { id, .. } = rx1.try_recv().unwrap() else {
+        panic!("expected FetchView on host 1");
+    };
+    ws.hosts.swap(0, 1);
+    ws.settings.hosts.swap(0, 1);
+    // Original host 1 is now at index 0.
+    ws.hosts[0]
+        .model
+        .views
+        .insert("h1-new".into(), unloaded_view("h1-new", "w-new", "b-new"));
+    ws.hosts[0]
+        .model
+        .view_fetches
+        .push((id, ViewFetchOutcome::Loaded));
+    assert!(ws.poll_remote_mutes(Instant::now()));
+    assert_eq!(reply(&rx1), Outcome::Performed);
+    assert!(
+        rx0.try_iter()
+            .all(|c| matches!(c, HostCommand::PrefetchViews(_)))
+    );
+    assert!(ws.tab_muted(0, "w-new"));
+    assert!(!ws.tab_muted(1, "w-new"));
 }

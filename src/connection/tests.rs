@@ -7,6 +7,10 @@ mod directory_tests;
 #[cfg(unix)]
 #[path = "download_tests.rs"]
 mod download_tests;
+#[path = "fetch_view_tests.rs"]
+mod fetch_view_tests;
+#[path = "focus_history_tests.rs"]
+mod focus_history_tests;
 #[path = "hosts_tests.rs"]
 mod hosts_tests;
 #[path = "keymap_tests.rs"]
@@ -17,6 +21,10 @@ mod navigation_tests;
 mod notification_queue_tests;
 #[path = "perform_tests.rs"]
 mod perform_tests;
+#[path = "ports_tests.rs"]
+mod ports_tests;
+#[path = "prompt_wire_tests.rs"]
+mod prompt_wire_tests;
 #[path = "server_controls_tests.rs"]
 mod server_controls_tests;
 #[path = "server_info_tests.rs"]
@@ -26,6 +34,8 @@ mod server_info_tests;
 mod ssh_agent_tests;
 #[path = "tailscale_tests.rs"]
 mod tailscale_tests;
+#[path = "undo_close_tests.rs"]
+mod undo_close_tests;
 #[path = "verb_tests.rs"]
 mod verb_tests;
 use futures_util::{SinkExt, StreamExt};
@@ -167,6 +177,54 @@ async fn recv(ws: &mut WebSocketStream<TcpStream>) -> Value {
     serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap()
 }
 
+/// Whether `request` is one of the probes the host sends each block after it learns of it.
+fn is_probe(request: &Value) -> bool {
+    request["method"].as_str().is_some_and(|method| {
+        method
+            .strip_prefix(activity::TERMINAL)
+            .is_some_and(|probe| [".program_status", ".title", ".process", ".pwd"].contains(&probe))
+    })
+}
+
+/// The next request that isn't a probe, answering each probe on the way with an empty payload,
+/// for tests of requests the paced probes would otherwise interleave with.
+async fn recv_past_probes(ws: &mut WebSocketStream<TcpStream>) -> Value {
+    recv_past_probes_titled(ws, None).await
+}
+
+/// A probe's answer: `title` for a title probe when given, otherwise an empty payload.
+fn probe_answer(request: &Value, title: Option<&str>) -> Value {
+    match title {
+        Some(title)
+            if request["method"]
+                .as_str()
+                .is_some_and(|m| m.ends_with(".title")) =>
+        {
+            json!({"title": title})
+        }
+        _ => json!({}),
+    }
+}
+
+/// [`recv_past_probes`], answering title probes with `title`.
+async fn recv_past_probes_titled(
+    ws: &mut WebSocketStream<TcpStream>,
+    title: Option<&str>,
+) -> Value {
+    loop {
+        let request = recv(ws).await;
+        if !is_probe(&request) {
+            return request;
+        }
+        let payload = probe_answer(&request, title);
+        send(
+            ws,
+            json!({"type": "response", "id": request["id"], "payload": payload}),
+        )
+        .await;
+    }
+}
+
 async fn send(ws: &mut WebSocketStream<TcpStream>, value: Value) {
     ws.send(Message::Text(value.to_string().into()))
         .await
@@ -175,7 +233,7 @@ async fn send(ws: &mut WebSocketStream<TcpStream>, value: Value) {
 
 async fn welcome(ws: &mut WebSocketStream<TcpStream>, revision: u32) -> Value {
     let hello = recv(ws).await;
-    assert_eq!(hello["api_revision"], 13);
+    assert_eq!(hello["api_revision"], 21);
     assert_eq!(hello["api_min_revision"], 10);
     send(ws, json!({"type":"welcome", "protocol":"rex.control.v1", "api_revision":revision,
         "limits":{"max_message_bytes":65536}, "client":{"id":"client:test", "reconnect_token":"test-token"}})).await;
@@ -253,7 +311,7 @@ async fn bootstrap_is_first_and_newer_pre_response_events_survive() {
 
 #[tokio::test]
 async fn unsupported_negotiated_revision_is_rejected() {
-    for revision in [9, 14] {
+    for revision in [9, 22] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -263,7 +321,7 @@ async fn unsupported_negotiated_revision_is_rejected() {
         let error = transport::control(&endpoint, None).await.err().unwrap();
         assert_eq!(
             error.to_string(),
-            format!("Rex negotiated API revision {revision}; this client supports 10–13")
+            format!("Rex negotiated API revision {revision}; this client supports 10–21")
         );
         server.await.unwrap();
     }
@@ -271,7 +329,7 @@ async fn unsupported_negotiated_revision_is_rejected() {
 
 #[tokio::test]
 async fn supported_revisions_negotiate() {
-    for revision in [10, 11, 12, 13] {
+    for revision in 10..=21 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -307,6 +365,33 @@ fn snapshot_cutoffs_are_scoped_to_the_state_they_replace() {
     assert!(state.includes(&event(16, "session_destroyed", Some(SESSION))));
     assert!(!state.includes(&event(19, "session_label_changed", Some(SESSION))));
     assert!(state.includes(&event(21, "session_label_changed", Some(SESSION))));
+    // List-level `event_dropped` carrying `payload.session_id` gates against `list_seq`,
+    // not `view_seq`.
+    let dropped = |seq, event_type: &str, session: Option<&str>| rexrs::Event {
+        seq,
+        name: "event_dropped".into(),
+        session_id: None,
+        payload: match session {
+            Some(id) => json!({"event_type": event_type, "session_id": id, "size": 100000}),
+            None => json!({"event_type": event_type, "size": 100000}),
+        },
+    };
+    assert!(!state.includes(&dropped(15, "session_created", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_created", Some(SESSION))));
+    assert!(!state.includes(&dropped(15, "session_moved", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_moved", Some(SESSION))));
+    assert!(!state.includes(&dropped(15, "session_destroyed", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_destroyed", Some(SESSION))));
+    assert!(!state.includes(&dropped(15, "session_label_changed", Some(SESSION))));
+    assert!(state.includes(&dropped(16, "session_label_changed", Some(SESSION))));
+    // Only `session_view_changed` drops are superseded by a newer `session.view`;
+    // `block_event` and `program_status_removed` drops carry metadata not in `session.view`.
+    assert!(!state.includes(&dropped(20, "session_view_changed", Some(SESSION))));
+    assert!(state.includes(&dropped(21, "session_view_changed", Some(SESSION))));
+    assert!(!state.includes(&dropped(10, "block_event", Some(SESSION))));
+    assert!(state.includes(&dropped(20, "block_event", Some(SESSION))));
+    assert!(state.includes(&dropped(20, "program_status_removed", Some(SESSION))));
+    assert!(state.includes(&dropped(21, "block_event", Some(SESSION))));
 }
 
 #[tokio::test]
@@ -3269,4 +3354,995 @@ async fn search_step_with_copy_mode_off_is_never_dropped_while_unsettled() {
 
     ticket_task.await.unwrap();
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn client_prompt_requested_refuses_immediately_and_prompt_ended_is_quiet() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let (disabled_tx, disabled_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        assert_eq!(boot_req["method"], "session.bootstrap");
+        // Send a prompt BEFORE bootstrap finishes with seq below bootstrap's cutoff (seq 1 < 10).
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 1,
+                "payload": {
+                    "type": "client_prompt_requested",
+                    "payload": {
+                        "call_id": "prompt-early",
+                        "action": "git.branch",
+                        "prompt": {"kind": "input", "title": "Branch"},
+                        "timeout_ms": 5000
+                    }
+                }
+            }),
+        )
+        .await;
+        // The server has not acknowledged bootstrap yet.
+        let first_reply = tokio::time::timeout(Duration::from_secs(5), recv(&mut ws))
+            .await
+            .unwrap();
+        assert_eq!(first_reply["method"], "client.reply");
+        assert_eq!(first_reply["payload"]["call_id"], "prompt-early");
+        assert_eq!(first_reply["payload"]["error"]["code"], "not_supported");
+        assert!(
+            first_reply["payload"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("git.branch")
+        );
+        // Simulate another client having answered first -> `not_found` must not disconnect.
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": first_reply["id"],
+                "seq": 11,
+                "error": {"code": "not_found", "message": "already answered", "status": 404}
+            }),
+        )
+        .await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+        disabled_rx.await.unwrap();
+        let barrier = recv(&mut ws).await;
+        assert_eq!(barrier["method"], "server.version");
+        reply(&mut ws, &barrier, 10, json!({})).await;
+
+        // `client_prompt_ended` is ignored quietly; a second prompt still answers cleanly.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 12,
+                "payload": {
+                    "type": "client_prompt_ended",
+                    "payload": {"call_id": "prompt-early", "reason": "answered"}
+                }
+            }),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "client_prompt_requested",
+                    "payload": {
+                        "call_id": "prompt-live",
+                        "prompt": {"kind": "pick", "title": "Choice", "items": []},
+                        "timeout_ms": 5000
+                    }
+                }
+            }),
+        )
+        .await;
+        let second_reply = recv(&mut ws).await;
+        assert_eq!(second_reply["method"], "client.reply");
+        assert_eq!(second_reply["payload"]["call_id"], "prompt-live");
+        assert_eq!(second_reply["payload"]["error"]["code"], "not_supported");
+        reply(&mut ws, &second_reply, 14, json!({})).await;
+        done_tx.send(()).unwrap();
+        expect_close_answering_sweep(&mut ws, &mut |req| panic!("unexpected request: {req}")).await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    host.commands.send(HostCommand::Prompts(false)).unwrap();
+    host.commands
+        .send(HostCommand::Request {
+            method: "server.version".into(),
+            payload: json!({}),
+        })
+        .unwrap();
+    disabled_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(host.model.lock().unwrap().connected);
+    assert!(host.model.lock().unwrap().performs.is_empty());
+    assert!(host.model.lock().unwrap().prompt_events.is_empty());
+    drop(host);
+    server.await.unwrap();
+}
+
+/// Receive the next control request, transparently answering any interleaved background
+/// `status_sweep` reads (`session.view` or `com.superlogical.terminal.program_status`) that
+/// `handle_bg` recognizes so mock tests never race with paced sweep traffic.
+async fn recv_answering_sweep(
+    ws: &mut WebSocketStream<TcpStream>,
+    handle_bg: &mut impl FnMut(&Value) -> Option<(u64, Value)>,
+) -> Value {
+    loop {
+        let req = recv(ws).await;
+        if let Some((seq, payload)) = handle_bg(&req) {
+            reply(ws, &req, seq, payload).await;
+            continue;
+        }
+        return req;
+    }
+}
+
+/// Drain frames until the client closes the WebSocket, answering any trailing background
+/// sweep requests that were already queued when the test dropped the host.
+async fn expect_close_answering_sweep(
+    ws: &mut WebSocketStream<TcpStream>,
+    handle_bg: &mut impl FnMut(&Value) -> Option<(u64, Value)>,
+) {
+    use std::io::ErrorKind;
+    use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
+
+    loop {
+        match ws.next().await {
+            None
+            | Some(Ok(Message::Close(_)))
+            | Some(Err(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => return,
+            Some(Err(WsError::Io(err)))
+                if matches!(
+                    err.kind(),
+                    ErrorKind::ConnectionAborted
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::UnexpectedEof
+                ) =>
+            {
+                return;
+            }
+            Some(Ok(Message::Text(text))) => {
+                let req: Value = serde_json::from_str(&text).unwrap();
+                if let Some((seq, payload)) = handle_bg(&req) {
+                    let msg = json!({"type":"response","id":req["id"],"seq":seq,"payload":payload});
+                    if ws
+                        .send(Message::Text(msg.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            Some(Ok(_)) => {}
+            other => panic!("expected WebSocket Close frame, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn event_dropped_recovers_session_list_keymap_and_hosts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (hh1_go_tx, hh1_go_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        let mut initial = boot();
+        initial.selected_session.as_mut().unwrap().view.windows = vec![
+            serde_json::from_value(json!({
+                "window_id": "w1",
+                "focused_block_id": "b1",
+                "layers": [{
+                    "kind": "tiled",
+                    "bounds": [0, 0, 1, 1],
+                    "layout": {"block_id": "b1"},
+                    "blocks": [{"block_id": "b1", "creator_name": "com.superlogical.terminal"}]
+                }]
+            }))
+            .unwrap(),
+        ];
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(initial).unwrap(),
+        )
+        .await;
+
+        // b1's probes, answered as they come, then the keymap registration and the
+        // WatchSharedHosts initial read.
+        let km_reply = |hash: &str, generation: u64| {
+            let mut resp = rexrs::api::client::KeymapResponse::default();
+            resp.config.hash = hash.into();
+            resp.config.generation = generation;
+            resp.config.instance_id = "inst".into();
+            serde_json::to_value(resp).unwrap()
+        };
+        let km_req = recv_past_probes_titled(&mut ws, Some("before")).await;
+        assert_eq!(km_req["method"], "client.keymap");
+        reply(&mut ws, &km_req, 11, km_reply("h1", 1)).await;
+        let hosts_req = recv_past_probes_titled(&mut ws, Some("before")).await;
+        assert_eq!(hosts_req["method"], "hosts.list");
+        reply(&mut ws, &hosts_req, 11, json!({"hash": "hh1", "hosts": []})).await;
+        // Wait for the client to observe `hh1` before sending the live status and drop sequence.
+        hh1_go_rx.await.unwrap();
+
+        // Deliver a live status_changed record on b1 so it is marked `live: true`. A dropped
+        // StatusRemoved afterwards must be cleared when program_status is re-read as empty.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 12,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {
+                            "type": "block_event",
+                            "payload": {
+                                "block_id": "b1",
+                                "creator_name": "com.superlogical.terminal",
+                                "name": "program_status_changed",
+                                "payload": {
+                                    "id": "",
+                                    "record": {"state": "working", "app": "build"}
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        // 1. Session-scoped event_dropped -> refreshes view, downgrades live status records,
+        //    and probes b1 again.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "block_event",
+                        "session_id": SESSION,
+                        "block_id": "b1",
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req = recv_past_probes_titled(&mut ws, Some("before")).await;
+        assert_eq!(view_req["method"], "session.attach");
+        assert_eq!(view_req["payload"]["session_id"], SESSION);
+        reply(
+            &mut ws,
+            &view_req,
+            14,
+            json!({
+                "client_id": "client:test",
+                "view": {
+                    "session_id": SESSION,
+                    "label": "snapshot",
+                    "revision": 2,
+                    "windows": [{
+                        "window_id": "w1",
+                        "focused_block_id": "b1",
+                        "layers": [{
+                            "kind": "tiled",
+                            "bounds": [0, 0, 1, 1],
+                            "layout": {"block_id": "b1"},
+                            "blocks": [{"block_id": "b1", "creator_name": "com.superlogical.terminal"}]
+                        }]
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        // 2. Server-wide session_* event_dropped -> re-lists sessions.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 15,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {"event_type": "session_created", "size": 100000}
+                }
+            }),
+        )
+        .await;
+        let list_req = recv_past_probes_titled(&mut ws, Some("after-drop")).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            16,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "snapshot"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+
+        let mut bg_other = |req: &Value| -> Option<(u64, Value)> {
+            is_probe(req).then(|| (16, probe_answer(req, Some("after-drop"))))
+        };
+
+        // 3. Server-wide keymap_changed event_dropped -> refreshes keymap.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 17,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {"event_type": "keymap_changed", "size": 100000}
+                }
+            }),
+        )
+        .await;
+        let km_req2 = recv_answering_sweep(&mut ws, &mut bg_other).await;
+        assert_eq!(km_req2["method"], "client.keymap");
+        reply(&mut ws, &km_req2, 18, km_reply("h2", 2)).await;
+
+        // 4. Server-wide hosts_changed event_dropped -> re-reads hosts.list.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 19,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {"event_type": "hosts_changed", "size": 100000}
+                }
+            }),
+        )
+        .await;
+        let hosts_req2 = recv_answering_sweep(&mut ws, &mut bg_other).await;
+        assert_eq!(hosts_req2["method"], "hosts.list");
+        reply(
+            &mut ws,
+            &hosts_req2,
+            20,
+            json!({"hash": "hh2", "hosts": []}),
+        )
+        .await;
+
+        done_tx.send(()).unwrap();
+        expect_close_answering_sweep(&mut ws, &mut bg_other).await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    until(&host, |m| m.title("b1") == Some("before")).await;
+    host.commands
+        .send(HostCommand::Keymap(Box::new(keymap::Declaration {
+            generation: 1,
+            request: rexrs::api::client::Keymap::new(),
+            overrides: crate::keymap::Overrides::default(),
+        })))
+        .unwrap();
+    until(&host, |m| {
+        m.keymap
+            .as_ref()
+            .is_some_and(|k| k.reply.config.hash == "h1")
+    })
+    .await;
+    host.commands.send(HostCommand::WatchSharedHosts).unwrap();
+    until(&host, |m| m.shared.hash() == Some("hh1")).await;
+    hh1_go_tx.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.title("b1") == Some("after-drop")
+            && !m.activity.contains_key("b1")
+            && m.sessions.len() == 2
+            && m.keymap
+                .as_ref()
+                .is_some_and(|k| k.reply.config.hash == "h2")
+            && m.shared.hash() == Some("hh2")
+    })
+    .await;
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn event_dropped_with_session_id_routes_list_level_session_events() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (step1_tx, step1_rx) = tokio::sync::oneshot::channel();
+    let (step1_go_tx, step1_go_rx) = tokio::sync::oneshot::channel();
+    let (step2_go_tx, step2_go_rx) = tokio::sync::oneshot::channel();
+    let (step3_go_tx, step3_go_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+
+        // 1. `event_dropped` for `session_created` WITH `payload.session_id` populated must
+        //    call `session.attach_all` (not `session.view`) so `m.sessions` learns about OTHER.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 11,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_created",
+                        "session_id": OTHER,
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let list_req = recv_past_probes(&mut ws).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            12,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "snapshot"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+        // Let the prefetch read OTHER's layout and fail so OTHER stays unplaced
+        // (in `m.sessions`, absent from `m.views`, marked in `state.viewed`). Under the old
+        // bug, `event_dropped(session_destroyed, session_id=OTHER)` cleared `state.viewed`
+        // without removing OTHER from `m.sessions`, triggering a second view poll.
+        let initial_other_view = recv_past_probes(&mut ws).await;
+        assert_eq!(initial_other_view["method"], "session.view");
+        assert_eq!(initial_other_view["payload"]["session_id"], OTHER);
+        send(
+            &mut ws,
+            json!({
+                "type": "response",
+                "id": initial_other_view["id"],
+                "seq": 12,
+                "error": {"code": "internal", "message": "transient", "status": 500}
+            }),
+        )
+        .await;
+        step1_tx.send(()).unwrap();
+        step1_go_rx.await.unwrap();
+
+        // 2. `event_dropped` for `session_destroyed` WITH `payload.session_id` on unplaced
+        //    session OTHER must remove OTHER on its own (without waiting for a later
+        //    `session.attach_all` and without polling `session.view` for OTHER again).
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_destroyed",
+                        "session_id": OTHER,
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        step2_go_rx.await.unwrap();
+
+        // 3. `session_label_changed` with `session_id` re-lists and updates cached view label.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 14,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_label_changed",
+                        "session_id": SESSION,
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let mut saw_other_view_after_destroy = false;
+        let mut bg = |req: &Value| -> Option<(u64, Value)> {
+            if is_probe(req) {
+                return Some((13, json!({})));
+            }
+            if matches!(
+                req["method"].as_str(),
+                Some("session.view" | "session.attach")
+            ) && req["payload"]["session_id"] == OTHER
+            {
+                saw_other_view_after_destroy = true;
+                return Some((
+                    13,
+                    json!({"client_id": "client:test", "view": {"session_id": OTHER, "revision": 1, "windows": []}}),
+                ));
+            }
+            None
+        };
+        let list_req2 = recv_answering_sweep(&mut ws, &mut bg).await;
+        assert_eq!(list_req2["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req2,
+            15,
+            json!({"sessions": [{"session_id": SESSION, "label": "renamed-via-drop"}]}),
+        )
+        .await;
+        step3_go_rx.await.unwrap();
+
+        // 4. Unnamed `session_label_changed` drop (no `session_id`) also reconciles cached
+        //    view labels from the re-listed sessions.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 16,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_label_changed",
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        let list_req3 = recv_answering_sweep(&mut ws, &mut bg).await;
+        assert_eq!(list_req3["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req3,
+            17,
+            json!({"sessions": [{"session_id": SESSION, "label": "renamed-unnamed-drop"}]}),
+        )
+        .await;
+        done_tx.send(()).unwrap();
+        expect_close_answering_sweep(&mut ws, &mut bg).await;
+        assert!(
+            !saw_other_view_after_destroy,
+            "destroyed unplaced session must not be queried with session.view"
+        );
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    // The sidebar asks for OTHER's layout once it is listed, as it does for a session it shows.
+    host.commands
+        .send(HostCommand::PrefetchViews(HashSet::from(
+            [OTHER.to_owned()],
+        )))
+        .unwrap();
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), step1_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.sessions.iter().any(|s| s.session_id == OTHER) && !m.views.contains_key(OTHER)
+    })
+    .await;
+    step1_go_tx.send(()).unwrap();
+    // Prove `session_destroyed` itself removed OTHER before `session_label_changed` is sent.
+    until(&host, |m| !m.sessions.iter().any(|s| s.session_id == OTHER)).await;
+    step2_go_tx.send(()).unwrap();
+    until(&host, |m| {
+        m.sessions
+            .iter()
+            .any(|s| s.session_id == SESSION && s.label == "renamed-via-drop")
+            && m.views.get(SESSION).and_then(|v| v.label.as_deref()) == Some("renamed-via-drop")
+    })
+    .await;
+    step3_go_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.sessions
+            .iter()
+            .any(|s| s.session_id == SESSION && s.label == "renamed-unnamed-drop")
+            && m.views.get(SESSION).and_then(|v| v.label.as_deref()) == Some("renamed-unnamed-drop")
+    })
+    .await;
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn recreated_block_and_session_ids_reread_layout_and_activity() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (phase1_tx, phase1_rx) = tokio::sync::oneshot::channel();
+    let (proceed_tx, proceed_rx) = tokio::sync::oneshot::channel();
+    let (phase2_tx, phase2_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        let mut initial = boot();
+        let view_with_b1 = |rev: u64| {
+            json!({
+                "session_id": SESSION,
+                "label": "snapshot",
+                "revision": rev,
+                "windows": [{
+                    "window_id": "w1",
+                    "focused_block_id": "b1",
+                    "layers": [{
+                        "kind": "tiled",
+                        "bounds": [0, 0, 1, 1],
+                        "layout": {"block_id": "b1"},
+                        "blocks": [{"block_id": "b1", "creator_name": "com.superlogical.terminal"}]
+                    }]
+                }]
+            })
+        };
+        initial.selected_session.as_mut().unwrap().view =
+            serde_json::from_value(view_with_b1(1)).unwrap();
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(initial).unwrap(),
+        )
+        .await;
+
+        // Wait until b1's title is probed, answering its probes as they come.
+        let title_probed = async |ws: &mut WebSocketStream<TcpStream>, title: &str| loop {
+            let req = recv(ws).await;
+            assert!(is_probe(&req), "unexpected request: {req}");
+            let payload = probe_answer(&req, Some(title));
+            send(
+                ws,
+                json!({"type": "response", "id": req["id"], "payload": payload}),
+            )
+            .await;
+            if req["method"]
+                .as_str()
+                .is_some_and(|m| m.ends_with(".title"))
+            {
+                return;
+            }
+        };
+        title_probed(&mut ws, "first").await;
+
+        // 1. `block_closed` clears b1's probes; when b1 returns (undone close), the client
+        //    must probe b1 again.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 11,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {"type": "block_closed", "payload": {"block_id": "b1"}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req = recv_past_probes_titled(&mut ws, Some("first")).await;
+        assert_eq!(view_req["method"], "session.attach");
+        reply(
+            &mut ws,
+            &view_req,
+            12,
+            json!({"client_id": "client:test", "view": {"session_id": SESSION, "label": "snapshot", "revision": 2, "windows": []}}),
+        )
+        .await;
+        // Now b1 comes back with the same ID via session_view_changed.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": SESSION,
+                        "event": {"type": "session_view_changed", "payload": {"revision": 3}}
+                    }
+                }
+            }),
+        )
+        .await;
+        let view_req2 = recv_past_probes_titled(&mut ws, Some("first")).await;
+        assert_eq!(view_req2["method"], "session.attach");
+        reply(
+            &mut ws,
+            &view_req2,
+            14,
+            json!({"client_id": "client:test", "view": view_with_b1(3)}),
+        )
+        .await;
+        title_probed(&mut ws, "reopened-block").await;
+        phase1_tx.send(()).unwrap();
+        // Wait for the client test task to observe "reopened-block" before destroying SESSION.
+        proceed_rx.await.unwrap();
+
+        // 2. `session_destroyed` clears SESSION + b1; when SESSION is recreated with the same ID,
+        //    selecting it re-reads its view and b1's metadata.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 15,
+                "payload": {
+                    "type": "session_destroyed",
+                    "payload": {"session_id": SESSION}
+                }
+            }),
+        )
+        .await;
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 16,
+                "payload": {
+                    "type": "session_created",
+                    "payload": {"session_id": SESSION}
+                }
+            }),
+        )
+        .await;
+        let list_req = recv_past_probes_titled(&mut ws, Some("reopened-block")).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+        reply(
+            &mut ws,
+            &list_req,
+            17,
+            json!({"sessions": [{"session_id": SESSION, "label": "snapshot"}]}),
+        )
+        .await;
+
+        // The client may read `session.attach` and probe the status for the recreated
+        // session before or during `Select`; on API 19+, foreground `Select` also sends
+        // `session.view` to record focus. Answer both transparently and verify metadata re-reads.
+        let mut bg_session = |req: &Value| -> Option<(u64, Value)> {
+            match req["method"].as_str()? {
+                "session.attach" => Some((
+                    18,
+                    json!({"client_id": "client:test", "view": view_with_b1(4)}),
+                )),
+                "session.view" => Some((18, view_with_b1(4))),
+                "com.superlogical.terminal.program_status" | "com.superlogical.terminal.pwd" => {
+                    Some((18, json!({})))
+                }
+                _ => None,
+            }
+        };
+
+        let mut saw_title = false;
+        let mut saw_process = false;
+        while !(saw_title && saw_process) {
+            let req = recv_answering_sweep(&mut ws, &mut bg_session).await;
+            match req["method"].as_str().unwrap_or("") {
+                "com.superlogical.terminal.title" => {
+                    saw_title = true;
+                    reply(&mut ws, &req, 18, json!({"title": "reopened-session"})).await;
+                }
+                "com.superlogical.terminal.process" => {
+                    saw_process = true;
+                    reply(&mut ws, &req, 18, json!({})).await;
+                }
+                other => panic!("unexpected request after select: {other}"),
+            }
+        }
+        phase2_tx.send(()).unwrap();
+        expect_close_answering_sweep(&mut ws, &mut bg_session).await;
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), phase1_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| m.title("b1") == Some("reopened-block")).await;
+    proceed_tx.send(()).unwrap();
+    until(&host, |m| {
+        m.selected.is_none() && m.sessions.iter().any(|s| s.session_id == SESSION)
+    })
+    .await;
+    host.commands
+        .send(HostCommand::Select(SESSION.into()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), phase2_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| m.title("b1") == Some("reopened-session")).await;
+    drop(host);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn list_syncs_cached_view_label_when_buffered_label_drop_is_suppressed_by_list_seq() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut ws = accept(&listener, "rex.control.v1").await;
+        welcome(&mut ws, 21).await;
+        let boot_req = recv(&mut ws).await;
+        reply(
+            &mut ws,
+            &boot_req,
+            10,
+            serde_json::to_value(boot()).unwrap(),
+        )
+        .await;
+
+        // Trigger `list()` via `session_created` at seq 13.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 13,
+                "payload": {
+                    "type": "session_created",
+                    "payload": {"session_id": OTHER}
+                }
+            }),
+        )
+        .await;
+        let list_req = recv(&mut ws).await;
+        assert_eq!(list_req["method"], "session.attach_all");
+
+        // Buffer an unnamed `event_dropped("session_label_changed")` at seq 14 before the
+        // `session.attach_all` reply at seq 15 arrives. `ControlState::includes` suppresses
+        // seq 14 against `list_seq = 15`, so `list()` itself must reconcile `m.views[SESSION].label`.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 14,
+                "payload": {
+                    "type": "event_dropped",
+                    "payload": {
+                        "event_type": "session_label_changed",
+                        "size": 100000
+                    }
+                }
+            }),
+        )
+        .await;
+        reply(
+            &mut ws,
+            &list_req,
+            15,
+            json!({"sessions": [
+                {"session_id": SESSION, "label": "renamed-during-list"},
+                {"session_id": OTHER, "label": "other"}
+            ]}),
+        )
+        .await;
+
+        // Fence event at seq 16 on OTHER so the client has drained and suppressed the
+        // buffered seq 14 drop before we inspect `m.views[SESSION].label`.
+        send(
+            &mut ws,
+            json!({
+                "type": "event",
+                "seq": 16,
+                "payload": {
+                    "type": "session_event",
+                    "payload": {
+                        "session_id": OTHER,
+                        "event": {
+                            "type": "session_label_changed",
+                            "payload": {"label": "fenced"}
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        done_tx.send(()).unwrap();
+        let mut saw_extra_attach_all = false;
+        let mut bg = |req: &Value| -> Option<(u64, Value)> {
+            if req["method"] == "session.attach_all" {
+                saw_extra_attach_all = true;
+                return Some((
+                    16,
+                    json!({"sessions": [
+                        {"session_id": SESSION, "label": "renamed-during-list"},
+                        {"session_id": OTHER, "label": "fenced"}
+                    ]}),
+                ));
+            }
+            if req["method"] == "session.view" && req["payload"]["session_id"] == OTHER {
+                return Some((
+                    16,
+                    json!({"session_id": OTHER, "label": "fenced", "revision": 1, "windows": []}),
+                ));
+            }
+            None
+        };
+        expect_close_answering_sweep(&mut ws, &mut bg).await;
+        assert!(
+            !saw_extra_attach_all,
+            "buffered seq 14 session_label_changed drop must be suppressed by list_seq = 15"
+        );
+    });
+
+    let host = HostConnection::spawn(endpoint, None, None, None, false, None);
+    connected(&host).await;
+    tokio::time::timeout(Duration::from_secs(5), done_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    until(&host, |m| {
+        m.sessions
+            .iter()
+            .any(|s| s.session_id == OTHER && s.label == "fenced")
+    })
+    .await;
+    {
+        let m = host.model.lock().unwrap();
+        assert!(
+            m.sessions
+                .iter()
+                .any(|s| s.session_id == SESSION && s.label == "renamed-during-list")
+        );
+        assert_eq!(
+            m.views.get(SESSION).and_then(|v| v.label.as_deref()),
+            Some("renamed-during-list")
+        );
+    }
+    drop(host);
+    tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
 }

@@ -113,6 +113,7 @@ pub struct Transport {
     /// Requests sent past the client, whose responses go to their receiver instead.
     detached: HashMap<String, oneshot::Sender<String>>,
     next_detached: u64,
+    max_message_bytes: usize,
 }
 
 impl Transport {
@@ -130,6 +131,12 @@ impl Transport {
         let text = serde_json::to_string(&serde_json::json!({
             "type": "request", "id": id, "method": method, "payload": payload,
         }))?;
+        if text.len() > self.max_message_bytes {
+            return Err(rexrs::Error::RequestTooLarge {
+                size: text.len(),
+                limit: self.max_message_bytes,
+            });
+        }
         let (reply, receiver) = oneshot::channel();
         self.detached.retain(|_, reply| !reply.is_closed());
         self.detached.insert(id, reply);
@@ -152,6 +159,39 @@ impl Transport {
             .then(|| self.detached.remove(response.id.as_deref()?))
             .flatten()
     }
+}
+
+/// Decode a response intercepted by `detach` with the same defaults as an SDK call.
+pub(crate) fn detached_result<T: serde::de::DeserializeOwned>(text: &str) -> rexrs::Result<T> {
+    Ok(detached_result_with_seq(text)?.value)
+}
+
+pub(crate) fn detached_result_with_seq<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> rexrs::Result<rexrs::Reply<T>> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        seq: u64,
+        payload: Option<serde_json::Value>,
+        error: Option<Error>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Error {
+        code: String,
+        #[serde(default)]
+        status: u16,
+        #[serde(default)]
+        message: String,
+    }
+    let reply: Response = serde_json::from_str(text)?;
+    if let Some(error) = reply.error {
+        return Err(rexrs::ApiError::from_wire(&error.code, error.status, error.message).into());
+    }
+    Ok(rexrs::Reply {
+        seq: reply.seq,
+        value: serde_json::from_value(reply.payload.unwrap_or_else(|| serde_json::json!({})))?,
+    })
 }
 
 impl rexrs::AsyncTransport for Transport {
@@ -198,7 +238,7 @@ impl rexrs::AsyncTransport for Transport {
 
 pub type Client = AsyncRexClient<Transport>;
 pub const MIN_API_REVISION: u32 = 10;
-pub const API_REVISION: u32 = 13;
+pub const API_REVISION: u32 = 21;
 pub async fn control(endpoint: &str, reconnect: Option<&str>) -> Result<Client> {
     control_with_label(endpoint, reconnect, &crate::settings::hostname()).await
 }
@@ -208,18 +248,45 @@ pub async fn control_with_label(
     reconnect: Option<&str>,
     label: &str,
 ) -> Result<Client> {
-    // This is an attachment-only client. Server lifetime and listener configuration
-    // belong to the existing upstream Rex server, including its Tailscale identity.
-    let socket = socket(endpoint, "/api/control", "rex.control.v1").await?;
-    connect(socket, reconnect, "Rex Rune", label).await
+    control_with_max_revision(endpoint, reconnect, label, API_REVISION).await
 }
 
-pub(crate) async fn control_from_socket(
-    socket: Socket,
+/// Like [`control_with_label`], but caps the client's offered maximum API revision
+/// (clamped to `MIN_API_REVISION..=API_REVISION`). Used by protocol probes to verify
+/// lower-revision negotiation behavior.
+pub async fn control_with_max_revision(
+    endpoint: &str,
     reconnect: Option<&str>,
-    name: &str,
+    label: &str,
+    max_api_revision: u32,
 ) -> Result<Client> {
-    connect(socket, reconnect, name, &crate::settings::hostname()).await
+    // This is an attachment-only client. Server lifetime and listener configuration
+    // belong to the existing upstream Rex server, including its Tailscale identity.
+    let max_rev = max_api_revision.clamp(MIN_API_REVISION, API_REVISION);
+    let socket = socket(endpoint, "/api/control", "rex.control.v1").await?;
+    connect(
+        socket,
+        reconnect,
+        "Rex Rune",
+        label,
+        rexrs::ClientKind::App,
+        max_rev,
+    )
+    .await
+}
+
+/// Connect a short-lived discovery probe as `ClientKind::Other` so rev 17+ servers never
+/// select it as a `rex.ui` prompt target.
+pub(crate) async fn discovery_from_socket(socket: Socket, name: &str) -> Result<Client> {
+    connect(
+        socket,
+        None,
+        name,
+        &crate::settings::hostname(),
+        rexrs::ClientKind::Other,
+        API_REVISION,
+    )
+    .await
 }
 
 async fn connect(
@@ -227,31 +294,35 @@ async fn connect(
     reconnect: Option<&str>,
     name: &str,
     label: &str,
+    kind: rexrs::ClientKind,
+    max_api_revision: u32,
 ) -> Result<Client> {
     let mut builder = AsyncRexClient::builder()
         .label(label)
         .name(name)
         .version(env!("CARGO_PKG_VERSION"))
-        .api_revisions(MIN_API_REVISION..=API_REVISION)
-        .kind(rexrs::ClientKind::App);
+        .api_revisions(MIN_API_REVISION..=max_api_revision)
+        .kind(kind);
     if let Some(token) = reconnect {
         builder = builder.reconnect_token(token);
     }
-    let client = tokio::time::timeout(
+    let mut client = tokio::time::timeout(
         std::time::Duration::from_secs(8),
         builder.connect_with(Transport {
             socket,
             detached: HashMap::new(),
             next_detached: 0,
+            max_message_bytes: 0,
         }),
     )
     .await
     .context("Rex control WELCOME timed out")??;
     anyhow::ensure!(
-        (MIN_API_REVISION..=API_REVISION).contains(&client.welcome().api_revision),
-        "Rex negotiated API revision {}; this client supports {MIN_API_REVISION}–{API_REVISION}",
+        (MIN_API_REVISION..=max_api_revision).contains(&client.welcome().api_revision),
+        "Rex negotiated API revision {}; this client supports {MIN_API_REVISION}–{max_api_revision}",
         client.welcome().api_revision
     );
+    client.transport().max_message_bytes = client.welcome().limits.max_message_bytes;
     Ok(client)
 }
 

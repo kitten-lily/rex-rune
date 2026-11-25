@@ -32,6 +32,9 @@ pub struct Host {
     /// The Tailscale device name to use; none means the default for this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailscale_name: Option<String>,
+    /// Whether a prompt-capable app may show this host's Lua questions.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub prompts: bool,
     #[serde(default)]
     pub collapsed: bool,
     /// Left out of the sidebar's host list until it next connects; set only while offline.
@@ -609,6 +612,7 @@ impl Default for Settings {
                 remote_control: false,
                 keep_tailscale: false,
                 tailscale_name: None,
+                prompts: true,
                 collapsed: false,
                 hidden_offline: false,
                 shell: None,
@@ -1215,6 +1219,28 @@ mod tests {
         let newer: Settings =
             serde_json::from_value(serde_json::json!({ "pane_header": "on_focus" })).unwrap();
         assert_eq!(newer.pane_header, PaneHeader::Auto);
+    }
+
+    #[test]
+    fn host_prompts_default_to_true_and_only_opt_out_is_saved() {
+        let original = serde_json::json!({
+            "label": "test", "endpoint": "https://rex.example", "collapsed": false
+        });
+        let mut host: Host = serde_json::from_value(original.clone()).unwrap();
+        assert!(host.prompts);
+        assert!(!host.remote_control);
+        assert_eq!(serde_json::to_value(&host).unwrap(), original);
+
+        host.prompts = false;
+        let persisted = serde_json::to_value(&host).unwrap();
+        assert_eq!(persisted["prompts"], false);
+        assert!(!serde_json::from_value::<Host>(persisted).unwrap().prompts);
+
+        let mut explicit_true = original.clone();
+        explicit_true["prompts"] = true.into();
+        let host: Host = serde_json::from_value(explicit_true).unwrap();
+        assert!(host.prompts);
+        assert_eq!(serde_json::to_value(host).unwrap(), original);
     }
 
     #[test]

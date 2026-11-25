@@ -721,13 +721,23 @@ fn host_card(s: &Workspace, i: usize, last: bool) -> El {
     }
     rows.push(setting(
         "Remote control",
-        "Let rex do and other clients on this host change the view in this window.",
+        "Let rex do and other clients on this host change the view and mute tabs in this window.",
         Switch::new(host.remote_control)
             .label(format!("Remote control for {}", host.label))
             .hide_label()
             .on_toggle(move |s: &mut Workspace| s.toggle_remote_control(i))
             .build(kit())
             .key(format!("remote-control:{i}")),
+    ));
+    rows.push(setting(
+        "Allow script prompts",
+        "Let Lua scripts and rex.ui actions on this host ask questions in this window.",
+        Switch::new(host.prompts)
+            .label(format!("Allow script prompts for {}", host.label))
+            .hide_label()
+            .on_toggle_tx(move |s: &mut Workspace, tx: &mut Tx| s.toggle_host_prompts(i, Some(tx)))
+            .build(kit())
+            .key(format!("host-prompts:{i}")),
     ));
     rows.extend(super::tailscale::rows(s, i));
     card(rows)

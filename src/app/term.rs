@@ -94,6 +94,8 @@ pub struct Term {
     pending_copy_yank: Option<CopyYank>,
     /// Last delivered `(epoch, revision)` so each yank is copied at most once.
     last_copy_yank: Option<(u64, u64)>,
+    /// Defense-in-depth: a script prompt or Ports can block direct PTY input commands.
+    pub panel_blocks_input: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +288,7 @@ impl Term {
             copy_ended_epoch,
             pending_copy_yank: None,
             last_copy_yank: None,
+            panel_blocks_input: false,
         }
     }
 
@@ -446,8 +449,23 @@ impl Term {
     }
 
     /// The same send and notice, with acceptance feedback for local path history.
-    /// Defense-in-depth: exits copy mode before any PTY input command reaches the worker.
+    /// Defense-in-depth: blocks PTY input while a script prompt or Ports is open, and exits
+    /// copy mode before any PTY input command reaches the worker.
     pub fn try_send(&mut self, command: Command) -> bool {
+        let is_any_pty_input = matches!(
+            &command,
+            Command::Key(_)
+                | Command::KeyWithPrefix { .. }
+                | Command::Paste(_)
+                | Command::SendKey(_)
+                | Command::Mouse(_)
+                | Command::Wheel(_)
+                | Command::Reset
+                | Command::Clear
+        );
+        if self.panel_blocks_input && is_any_pty_input {
+            return false;
+        }
         let is_pty_input = match &command {
             Command::Key(payload) => {
                 payload.get("action").and_then(|v| v.as_str()) != Some("release")

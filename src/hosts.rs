@@ -656,6 +656,7 @@ mod tests {
             remote_control: false,
             keep_tailscale: false,
             tailscale_name: None,
+            prompts: true,
             collapsed: false,
             hidden_offline: false,
             shell: None,

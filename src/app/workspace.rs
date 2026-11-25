@@ -10,7 +10,7 @@ use super::{
 };
 use rex_rune::{
     connection::{
-        Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, Options,
+        Command, DEFAULT_TAB_LABEL, HostCommand, HostConnection, HostModel, HumanClose, Options,
         tailscale::valid_name,
     },
     layout::{Divider, shell_layout},
@@ -73,6 +73,7 @@ pub struct Workspace {
     pub active: usize,
     pub terminals: HashMap<(HostId, String), Term>,
     pub panel: Option<Panel>,
+    pub(super) ports_watch: Option<super::ports::Watch>,
     pub notices: Vec<Notice>,
     next_notice: u64,
     zoom_notice: Option<u64>,
@@ -88,9 +89,12 @@ pub struct Workspace {
     pub local_keymap: rex_rune::keymap::Resolved,
     pub keymap_generation: u64,
     pub navigation: super::navigation::History,
+    pub focus_history: super::focus_history::State,
     pub last_keypress: Option<std::time::Instant>,
     pub remote_off_notices: HashSet<HostId>,
     pub remote_navigation: Option<super::remote::Navigation>,
+    pub remote_mutes: Vec<super::remote::PendingMute>,
+    pub next_fetch_id: u64,
     /// Panes this window has taken size ownership of since it last came forward.
     pub claimed: HashSet<(HostId, String)>,
     pub handle: AppHandle<Workspace>,
@@ -207,6 +211,8 @@ pub struct Workspace {
     pub restart: std::sync::Arc<std::sync::Mutex<Option<PathBuf>>>,
     /// What this launch's downloads have told the person, and what finished rows may offer.
     pub downloads: super::downloads::Downloads,
+    /// Arrival-ordered `rex.ui` prompt queue and modal drafts (kept outside `Panel`).
+    pub prompts: super::prompts::PromptStore,
 }
 
 #[derive(Default)]
@@ -245,6 +251,7 @@ impl Workspace {
                 remote_control: false,
                 keep_tailscale: false,
                 tailscale_name: None,
+                prompts: true,
                 collapsed: false,
                 hidden_offline: false,
                 shell: None,
@@ -293,6 +300,7 @@ impl Workspace {
             active,
             terminals: HashMap::new(),
             panel: None,
+            ports_watch: None,
             notices: Vec::new(),
             next_notice: 0,
             zoom_notice: None,
@@ -305,9 +313,12 @@ impl Workspace {
             local_keymap,
             keymap_generation: 0,
             navigation: Default::default(),
+            focus_history: Default::default(),
             last_keypress: None,
             remote_off_notices: HashSet::new(),
             remote_navigation: None,
+            remote_mutes: Vec::new(),
+            next_fetch_id: 0,
             claimed: HashSet::new(),
             handle,
             window_focused: true,
@@ -377,6 +388,7 @@ impl Workspace {
             updates: Default::default(),
             restart: Default::default(),
             downloads: Default::default(),
+            prompts: Default::default(),
         };
         this.init_updates();
         if let Some(error) = theme_error {
@@ -432,7 +444,7 @@ impl Workspace {
         } else {
             self.settings.sessions.get(&host.endpoint).cloned()
         };
-        let connection = HostConnection::spawn_with_ssh_agent(
+        let connection = HostConnection::spawn_with_prompts(
             host.endpoint.clone(),
             preferred,
             cli.then(|| self.options.new.clone())
@@ -444,6 +456,7 @@ impl Workspace {
             self.settings.client_label(),
             host.kept_tailscale(),
             self.ssh_agent_socket(),
+            host.prompts,
         );
         let _ = connection
             .commands
@@ -481,6 +494,9 @@ impl Workspace {
         if self.copy_mode.as_ref().is_some_and(|s| s.key.0 == id) {
             self.copy_mode = None;
         }
+        if self.focus_history.is_on_host(id) {
+            self.clear_focus_history_walk();
+        }
         self.terminals.retain(|(host, _), _| *host != id);
         self.claimed.retain(|(host, _)| *host != id);
         self.pane_states.retain(|(host, _), _| *host != id);
@@ -491,6 +507,7 @@ impl Workspace {
         self.update_badge();
         self.shared_hosts.last_reconciled.remove(&id);
         self.shared_hosts.last_host_id.remove(&id);
+        self.forget_host_prompts(id);
     }
 
     /// Stop connecting to saved host `index` and drop it from the workspace. Its server, its
@@ -510,7 +527,11 @@ impl Workspace {
             return;
         }
         self.leave_install_dialog();
+        self.clear_focus_history_walk();
         self.navigation.cancel();
+        if self.ports_target().is_some() {
+            self.close_panel(tx);
+        }
         let state = self.hosts.remove(index);
         self.forget_host(state);
         let host = self.settings.hosts.remove(index);
@@ -593,6 +614,7 @@ impl Workspace {
             let old = std::mem::replace(&mut self.hosts[index], state);
             self.forget_host(old);
             if self.active == index {
+                self.clear_focus_history_walk();
                 self.drag = None;
                 self.layer_drag = None;
             }
@@ -620,7 +642,17 @@ impl Workspace {
     pub fn sync(&mut self, index: usize, tx: &mut Tx) {
         let id = self.hosts[index].id;
         let old_session = self.hosts[index].model.selected.clone();
-        let (mut model, notices, clipboard, bells, client_actions, performs, shared_writes) = {
+        let (
+            mut model,
+            notices,
+            clipboard,
+            bells,
+            client_actions,
+            performs,
+            prompt_events,
+            shared_writes,
+            view_fetches,
+        ) = {
             let mut shared = self.hosts[index]
                 .connection
                 .model
@@ -631,20 +663,38 @@ impl Workspace {
             let bells = std::mem::take(&mut shared.bells);
             let client_actions = std::mem::take(&mut shared.client_actions);
             let performs = std::mem::take(&mut shared.performs);
+            // Bootstrap can publish current-epoch prompt events before `connected` flips to
+            // `true`; keep them buffered until connected so an intervening wake cannot drop them.
+            let prompt_events = if shared.connected {
+                std::mem::take(&mut shared.prompt_events)
+            } else {
+                let epoch = shared.connection_epoch;
+                shared.prompt_events.retain(|e| e.epoch == epoch);
+                std::collections::VecDeque::new()
+            };
             let shared_writes = std::mem::take(&mut shared.shared_writes);
+            let view_fetches = std::mem::take(&mut shared.view_fetches);
+            let mut cloned = shared.clone();
+            cloned.prompt_events.clear();
             (
-                shared.clone(),
+                cloned,
                 notices,
                 clipboard,
                 bells,
                 client_actions,
                 performs,
+                prompt_events,
                 shared_writes,
+                view_fetches,
             )
         };
+        model.view_fetches = view_fetches;
         for (block, connection) in &model.terminals {
             let key = (id, block.clone());
-            if !self.terminals.contains_key(&key) {
+            // An undo can restore the same ID before the UI sees the intervening removal.
+            if self.terminals.get(&key).is_none_or(|term| {
+                !std::sync::Arc::ptr_eq(&term.connection.model, &connection.model)
+            }) {
                 let receiver = connection.wake.clone();
                 let handle = self.handle.clone();
                 let wake_key = key.clone();
@@ -703,13 +753,24 @@ impl Workspace {
             self.save();
         }
         self.hosts[index].model = model;
+        if self
+            .ports_target()
+            .is_some_and(|target| !self.ports_in_context(target))
+        {
+            self.close_panel(tx);
+        }
+        self.refresh_ports_watch();
         if index == self.active {
             // The session, keymap revision or connection above is what a mode belongs to.
             self.revalidate_key_modes();
         }
         self.reconcile_copy_mode();
+        self.reconcile_focus_history(index, tx);
+        self.process_prompt_events(index, prompt_events, tx);
         self.announce_keymap_problems(index);
-        self.poll_remote_navigation(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        self.poll_remote_navigation(now);
+        self.poll_remote_mutes(now);
         for pending in performs {
             self.remote_perform(index, pending, tx);
         }
@@ -719,10 +780,16 @@ impl Workspace {
             self.keymap_generation,
         );
         for queued in client_actions {
-            // File dialogs need this person's own key or click, whatever a host returns.
+            // These actions need this person's own key or click, whatever a host returns.
             if super::actions::find(&queued.action.action).is_some_and(|s| s.requires_person()) {
                 self.inform(if queued.action.action == super::server_page::STOP {
                     "Returned client action skipped: only the person at this computer can stop a server."
+                } else if queued.action.action == super::ports::ACTION {
+                    "Returned client action skipped: only the person at this computer can show listening ports."
+                } else if queued.action.action == super::actions::UNDO_CLOSE {
+                    "Returned client action skipped: only the person at this computer can undo a close."
+                } else if queued.action.action == super::actions::FOCUS_HISTORY_REVERSE {
+                    "Returned client action skipped: only the person at this computer can step through focus history."
                 } else {
                     "Returned client action skipped: a host cannot start a download or open the path browser."
                 });
@@ -766,6 +833,7 @@ impl Workspace {
         self.ring_bells(index, bells);
         self.track_activity(index);
         self.restore_row_selection();
+        self.seed_ports_selection();
         self.deliver_program_notices(index, notices);
         self.sync_layer_menu(tx);
         self.sync_layer_drag();
@@ -1302,6 +1370,7 @@ impl Workspace {
 
     /// Opens the focused terminal's search field, or gives it back the keyboard.
     pub fn open_search(&mut self) {
+        self.clear_focus_history_walk();
         self.cancel_layer_drag();
         if self.in_copy_mode() {
             self.open_copy_mode_search(super::copy_mode::SearchDirection::Forward);
@@ -1352,6 +1421,7 @@ impl Workspace {
     }
 
     pub fn request(&mut self, method: &str, mut payload: Value) {
+        self.clear_focus_history_walk();
         if method.starts_with("session.focus") {
             self.exit_copy_mode();
             self.bindings.sequence.clear();
@@ -1509,6 +1579,7 @@ impl Workspace {
     }
 
     pub fn activate_host(&mut self, host: usize, tx: &mut Tx) {
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.bindings.sequence.clear();
         self.observe_navigation();
@@ -1528,6 +1599,12 @@ impl Workspace {
     /// back a mode nobody entered again.
     pub fn update_visibility(&mut self) {
         self.revalidate_key_modes();
+        if self
+            .ports_target()
+            .is_some_and(|target| !self.ports_in_context(target))
+        {
+            self.cancel_panel_quiet();
+        }
         for term in self.terminals.values_mut() {
             term.end_selection();
         }
@@ -1613,16 +1690,24 @@ impl Workspace {
     }
 
     pub fn toggle_sidebar(&mut self) {
+        self.clear_focus_history_walk();
         self.sidebar.toggle();
         self.save();
     }
 
     pub fn perform(&mut self, action: Intent, tx: &mut Tx) {
-        // Applying a theme goes back to Settings itself.
+        if !matches!(
+            action,
+            Intent::ClientAction(super::actions::FOCUS_HISTORY_REVERSE, _)
+        ) {
+            self.clear_focus_history_walk();
+        }
+        // Applying a theme goes back to Settings itself; copying a port keeps the list open.
         if !action.opens_followup()
             && !matches!(
                 action,
-                Intent::Theme(_)
+                Intent::Port(_)
+                    | Intent::Theme(_)
                     | Intent::Chrome(_)
                     | Intent::SshAgent(_)
                     | Intent::Choose(_)
@@ -1651,6 +1736,7 @@ impl Workspace {
         }
         match action {
             Intent::Select(host, id) => self.select(host, id, tx),
+            Intent::Port(key) => self.use_port(&key, false, tx),
             Intent::Tab(id) => {
                 if let Some(session) = self.model().selected.clone() {
                     self.select_window(self.active, session, id, tx);
@@ -1838,12 +1924,14 @@ impl Workspace {
                 let back = self.panel.take();
                 self.panel = Some(Panel::new(PanelKind::Settings, "Settings", &[]));
                 self.panel.as_mut().unwrap().target = back.and_then(|p| p.target);
+                self.refresh_ports_watch();
                 if self.settings_section == SettingsSection::Notifications {
                     self.notification_command(super::notify::Command::Check);
                 }
                 if self.settings_section == SettingsSection::Hosts {
                     self.refresh_ssh_agents(false);
                 }
+                self.reconcile_prompts();
             }
             Intent::Updates => self.open_updates_settings(),
             Intent::About => {
@@ -1932,6 +2020,9 @@ impl Workspace {
             }
             Intent::Retry => self.send(self.active, HostCommand::Reconnect),
             Intent::Command(command) => command.run(self, tx),
+            Intent::OpenPrompt(key) => {
+                self.open_prompt(key, std::time::Instant::now());
+            }
             Intent::Shortcuts(item) => self.shortcut_menu(item, tx),
         }
     }
@@ -1942,6 +2033,7 @@ impl Workspace {
         if !self.hosts[host].model.connected {
             return;
         }
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.navigation.cancel();
         if self.panel.is_some() {
@@ -2039,6 +2131,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     pub fn pane_menu(&mut self, block: String, anchor: Option<(f32, f32)>) {
@@ -2064,6 +2157,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     /// A sidebar session row's right-click menu, at the pointer (window points).
@@ -2094,6 +2188,7 @@ impl Workspace {
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
             self.panel.as_mut().unwrap().selected = first;
         }
+        self.reconcile_prompts();
     }
 
     /// Every session action names its own host and session, never the selected one.
@@ -2249,6 +2344,7 @@ impl Workspace {
             | PaneAction::Paste
             | PaneAction::SelectAll
             | PaneAction::CopyId
+            | PaneAction::Ports
             | PaneAction::Clear
             | PaneAction::Reset => self.pane_verb(target, action, tx),
         }
@@ -2281,6 +2377,7 @@ impl Workspace {
     }
 
     pub(super) fn confirm(&mut self, title: &str, method: &str, payload: Value, description: &str) {
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.cancel_layer_drag();
         let target = self.panel.as_ref().and_then(|p| p.target.clone());
@@ -2307,6 +2404,8 @@ impl Workspace {
                 Box::new(p)
             });
         self.panel = Some(panel);
+        self.refresh_ports_watch();
+        self.reconcile_prompts();
     }
 
     pub fn picker(&mut self, sessions: bool) {
@@ -2336,6 +2435,7 @@ impl Workspace {
     }
 
     pub fn open_panel(&mut self, kind: PanelKind, title: &str, fields: &[(&str, &str, &str)]) {
+        self.clear_focus_history_walk();
         self.exit_copy_mode();
         self.cancel_layer_drag();
         self.leave_install_dialog();
@@ -2356,6 +2456,7 @@ impl Workspace {
                     | PanelKind::StartSsh { .. }
                     | PanelKind::Pairing { .. }
                     | PanelKind::InstallSsh { .. }
+                    | PanelKind::Prompt(_)
                     | PanelKind::Themes
                     | PanelKind::Fonts(_)
                     | PanelKind::Chromes
@@ -2386,8 +2487,14 @@ impl Workspace {
         };
         self.panel = Some(panel);
         if let Some(first) = self.entries().iter().position(|e| e.enabled) {
-            self.panel.as_mut().unwrap().selected = first;
+            if self.ports_target().is_some() {
+                self.select_row(first);
+            } else {
+                self.panel.as_mut().unwrap().selected = first;
+            }
         }
+        self.refresh_ports_watch();
+        self.reconcile_prompts();
     }
 
     /// The Settings panel a form or confirmation was opened from, to return to after it,
@@ -2437,11 +2544,17 @@ impl Workspace {
         self.leave_download_dialog();
         self.bindings.sequence.clear();
         self.panel = None;
+        self.refresh_ports_watch();
+        self.reconcile_prompts();
         tx.blur();
     }
 
     /// Escape on a modal: back to the panel it came from, or closed.
     pub fn cancel_panel_quiet(&mut self) {
+        if self.is_prompt_open() {
+            self.cancel_open_prompt(None);
+            return;
+        }
         if self.leave_folder_field() {
             return;
         }
@@ -2455,9 +2568,15 @@ impl Workspace {
         } else {
             self.panel = None;
         }
+        self.refresh_ports_watch();
+        self.reconcile_prompts();
     }
 
     pub fn cancel_panel(&mut self, tx: &mut Tx) {
+        if self.is_prompt_open() {
+            self.cancel_open_prompt(Some(tx));
+            return;
+        }
         if self.leave_folder_field() {
             return;
         }
@@ -2468,6 +2587,8 @@ impl Workspace {
                 input.focused = true;
             }
             self.panel = Some(*back);
+            self.refresh_ports_watch();
+            self.reconcile_prompts();
         } else {
             self.close_panel(tx);
         }
@@ -2475,6 +2596,13 @@ impl Workspace {
 
     pub fn navigate_panel(&mut self, delta: isize) {
         let entries = self.entries();
+        if self.ports_target().is_some()
+            && let Some((_, id)) = self.panel.as_ref().and_then(|p| p.row.as_ref())
+            && !entries.iter().any(|e| e.id.as_deref() == Some(id))
+        {
+            self.select_row(0);
+            return;
+        }
         let Some(mut selected) = self.panel.as_ref().map(|p| p.selected as isize + delta) else {
             return;
         };
@@ -2560,6 +2688,10 @@ impl Workspace {
     }
 
     pub fn submit(&mut self, tx: &mut Tx) {
+        if self.ports_target().is_some() {
+            self.submit_port(false, tx);
+            return;
+        }
         let Some(panel) = &self.panel else { return };
         let kind = panel.kind.clone();
         let values: Vec<String> = panel
@@ -2755,6 +2887,7 @@ impl Workspace {
                             remote_control: false,
                             keep_tailscale: false,
                             tailscale_name: None,
+                            prompts: true,
                             collapsed: false,
                             hidden_offline: false,
                             shell: None,
@@ -2772,6 +2905,7 @@ impl Workspace {
                                 remote_control: false,
                                 keep_tailscale: false,
                                 tailscale_name: None,
+                                prompts: true,
                                 collapsed: false,
                                 hidden_offline: false,
                                 shell: None,
@@ -2864,11 +2998,19 @@ impl Workspace {
                     return;
                 }
                 if let Some(tab) = tab {
-                    self.confirmed_tab_close(&tab, &method, payload);
+                    self.confirmed_tab_close(&tab, payload);
                     return;
                 }
                 if let Some(session) = session {
-                    self.session_request(&session, &method, payload);
+                    let mut payload = payload;
+                    payload["session_id"] = json!(session.session);
+                    self.send(
+                        session.host,
+                        HostCommand::Close {
+                            kind: HumanClose::Session,
+                            payload,
+                        },
+                    );
                     return;
                 }
                 match target.filter(|_| method == "block.close") {
@@ -2876,7 +3018,25 @@ impl Workspace {
                         self.confirmed_pane_close(&target, &payload);
                     }
                     Some(target) => {
-                        self.send(target.host, HostCommand::Request { method, payload })
+                        self.send(
+                            target.host,
+                            HostCommand::Close {
+                                kind: HumanClose::Pane,
+                                payload,
+                            },
+                        );
+                    }
+                    None if method == "session.close_window" || method == "block.close" => {
+                        if let Some(session) = &self.model().selected {
+                            let mut payload = payload;
+                            payload["session_id"] = json!(session);
+                            let kind = if method == "block.close" {
+                                HumanClose::Pane
+                            } else {
+                                HumanClose::Tab
+                            };
+                            self.send(self.active, HostCommand::Close { kind, payload });
+                        }
                     }
                     None => self.request(&method, payload),
                 }

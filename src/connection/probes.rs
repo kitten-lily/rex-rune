@@ -80,6 +80,12 @@ impl Probes {
         self.in_flight = None;
     }
 
+    /// Ask every probe of `block` again, as for a block not seen before. An answer in flight
+    /// for it still applies.
+    pub fn forget(&mut self, block: &str) {
+        self.started.remove(block);
+    }
+
     pub fn in_flight(&self) -> bool {
         self.in_flight.is_some()
     }

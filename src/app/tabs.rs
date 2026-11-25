@@ -10,7 +10,7 @@ use super::{
     workspace::Workspace,
 };
 use rex_rune::{
-    connection::{DEFAULT_TAB_LABEL, HostCommand},
+    connection::{DEFAULT_TAB_LABEL, HostCommand, HumanClose},
     settings::MutedTab,
 };
 use rexrs::api::session;
@@ -93,6 +93,34 @@ impl Workspace {
         Some(target)
     }
 
+    /// Resolve `window` on `host`, optionally constrained to `session`, across both opened
+    /// and background session views without selecting or attaching any session.
+    pub fn find_tab(&self, host: usize, window: &str, session: Option<&str>) -> Option<TabTarget> {
+        let model = &self.hosts.get(host)?.model;
+        if let Some(session) = session {
+            if !model.sessions.iter().any(|s| s.session_id == session) {
+                return None;
+            }
+            return self.tab_target(host, session, window);
+        }
+        for s in &model.sessions {
+            if let Some(target) = self.tab_target(host, &s.session_id, window) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    /// Whether `block` is a block inside `target`'s window.
+    pub(super) fn tab_has_block(&self, target: &TabTarget, block: &str) -> bool {
+        self.tab_window(target).is_some_and(|w| {
+            w.layers
+                .iter()
+                .flat_map(|l| &l.blocks)
+                .any(|b| b.block_id.as_deref() == Some(block))
+        })
+    }
+
     /// The target for `window` of the session on screen.
     pub fn current_tab(&self, window: &str) -> Option<TabTarget> {
         self.tab_target(self.active, self.model().selected.as_deref()?, window)
@@ -171,27 +199,56 @@ impl Workspace {
             .any(|m| m.window == window && m.endpoint == *endpoint)
     }
 
-    /// Mute or unmute a tab on this client and remember it. Either way its unseen Done and
-    /// Bell are dropped: what happened while it was muted is not news afterwards.
-    pub fn set_tab_muted(&mut self, target: &TabTarget, muted: bool) {
+    /// Mute or unmute a tab on this client and remember it. Returns whether the muted state
+    /// changed. Either way its unseen Done and Bell are dropped: what happened while it was
+    /// muted is not news afterwards.
+    pub fn set_tab_muted(&mut self, target: &TabTarget, muted: bool) -> bool {
+        if self.tab_muted(target.host, &target.window) == muted {
+            return false;
+        }
         let endpoint = self.settings.hosts[target.host].endpoint.clone();
         self.settings
             .muted_tabs
             .retain(|m| !(m.endpoint == endpoint && m.window == target.window));
         if muted {
             self.settings.muted_tabs.push(MutedTab {
-                endpoint,
+                endpoint: endpoint.clone(),
                 session: target.session.clone(),
                 window: target.window.clone(),
             });
-            let extra = self.settings.muted_tabs.len().saturating_sub(MUTED_LIMIT);
-            self.settings.muted_tabs.drain(..extra);
+            let mut extra = self
+                .settings
+                .muted_tabs
+                .iter()
+                .filter(|m| m.endpoint == endpoint)
+                .count()
+                .saturating_sub(MUTED_LIMIT);
+            if extra > 0 {
+                self.settings.muted_tabs.retain(|m| {
+                    if extra > 0 && m.endpoint == endpoint {
+                        extra -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
         }
-        let key = (self.hosts[target.host].id, target.window.clone());
+        let host_id = self.hosts[target.host].id;
+        let key = (host_id, target.window.clone());
         self.unseen_done.remove(&key);
         self.unseen_bells.remove(&key);
         self.update_badge();
+        if muted {
+            self.close_tab_notification(super::notify::NoteTarget {
+                host: host_id,
+                session: target.session.clone(),
+                window: Some(target.window.clone()),
+                block: None,
+            });
+        }
         self.save();
+        true
     }
 
     /// After host `index` changed: forget muted tabs that closed (their session's view is
@@ -502,15 +559,25 @@ impl Workspace {
     /// A confirmed Close tab or Close other tabs. The other tabs close one request each;
     /// one that closed since the question was asked is skipped, and nothing closes when the
     /// tab that was to stay is gone.
-    pub(super) fn confirmed_tab_close(&mut self, target: &TabTarget, method: &str, payload: Value) {
+    pub(super) fn confirmed_tab_close(&mut self, target: &TabTarget, payload: Value) {
+        let close = |s: &mut Self, mut payload: Value| {
+            payload["session_id"] = json!(target.session);
+            s.send(
+                target.host,
+                HostCommand::Close {
+                    kind: HumanClose::Tab,
+                    payload,
+                },
+            );
+        };
         let Some(named) = payload.get("window_ids").and_then(Value::as_array) else {
-            self.tab_request(target, method, payload);
+            close(self, payload);
             return;
         };
         let open = self.tab_order(target).map(|(_, order)| order);
         for id in named.iter().filter_map(Value::as_str) {
             if open.as_ref().is_some_and(|o| o.iter().any(|w| w == id)) {
-                self.tab_request(target, method, json!({"window_id": id}));
+                close(self, json!({"window_id": id}));
             }
         }
     }

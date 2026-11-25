@@ -40,7 +40,8 @@ client, launcher and icons, never the `rex` server.
   see [Tailscale](docs/hosts.md#tailscale-on-a-local-host).
 - **Sessions and tabs.** A host contains sessions; each session's Rex windows
   become tabs. Searchable switcher (`Ctrl K`), optional sidebar, Back/Forward
-  history and a `<tab> - <session> · <host>` window title.
+  history, server-side focus history (API 19+, across panes, tabs and sessions)
+  and a `<tab> - <session> · <host>` window title.
 - **Tab management.** Tabs close behind a confirmation, rename, mute, reorder in
   server order, close others or fill the toolbar; optional generated program and
   directory titles.
@@ -68,6 +69,11 @@ client, launcher and icons, never the `rex` server.
 - **Downloads.** **Download file…** saves from the terminal's machine (API 13+),
   with progress and partial cleanup, and never overwrites, opens or runs the
   file.
+- **Listening ports.** **Show listening ports…** in Commands lists TCP listeners
+  in this session (API 15+); the pane menu puts that pane first. Enter copies the
+  bind address. Ctrl+Enter (Cmd+Enter on macOS) opens supported ports on Unix-socket
+  hosts or copies an `ssh -L` command for SSH hosts.
+  [Scope and limits](docs/parity-2026-11/listening-ports.md#slice-2-ui).
 - **Fonts and themes.** Chrome palettes, terminal themes declared to the server
   including Ghostty files, installed fonts with a picker and ordered fallbacks,
   fontconfig's fallback chain, bundled IBM Plex Mono and Symbols Nerd Font, font
@@ -93,10 +99,13 @@ client, launcher and icons, never the `rex` server.
   recording, with host-defined modes, the innermost active one named in a chip,
   and multi-key sequences. Commands lists actions; Rex action compatibility is
   a focused subset, not Mac parity.
-- **Remote control.** Off by default for every host; exactly twelve navigation
-  and sidebar actions can zoom panes and switch the display to the requesting host, but none
-  can type, use the clipboard, open dialogs, change interface zoom or act on
-  another host.
+- **Remote control and script prompts.** Remote control is off by default for every host;
+  exactly twelve navigation and sidebar actions can zoom panes and switch the display to the
+  requesting host, and `client.tab.mute` can mute or unmute a named tab on that host
+  unattended, while none can type, use the clipboard, open dialogs, change interface zoom or
+  act on another host. On API 17+ hosts, Lua scripts and actions can ask `rex.ui.input` and
+  `rex.ui.pick` questions in an anti-spoofing modal (or waiting toolbar chip) controlled per
+  host by **Allow script prompts** in Settings → Remote Hosts.
 - **Settings and maintenance.** Server facts, duration and confirmed **Stop
   server…**; Interface, Terminal, Shortcuts, Integrations, Notifications, Remote Hosts,
   Updates and About, with Settings search and history. Copy version or debug
@@ -216,7 +225,7 @@ details are in [Building and
 development](docs/building.md#vendored-dependencies).
 
 Thanks to [Superlogical Rex](https://www.superlogical.com/rex) for the server
-and protocol this client follows (API revision 13, with revisions 10–12 also
+and protocol this client follows (API revision 21, with revisions 10-20 also
 supported), and to [m4nik1/rex-linux-client](https://github.com/m4nik1/rex-linux-client)
 and [noahdunnagan/rmx](https://github.com/noahdunnagan/rmx) for protocol work
 that served as references.

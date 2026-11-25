@@ -36,7 +36,7 @@ async fn notification_queues_end_with_the_control_connection() {
         drop(ws);
         let mut ws = accept(&listener, "rex.control.v1").await;
         let hello = recv(&mut ws).await;
-        assert_eq!(hello["api_revision"], 13);
+        assert_eq!(hello["api_revision"], 21);
         arrived.send(()).unwrap();
         resumed.await.unwrap();
         send(&mut ws, json!({"type":"welcome","protocol":"rex.control.v1","api_revision":13,

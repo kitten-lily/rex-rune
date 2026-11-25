@@ -124,6 +124,7 @@ fn host_header(s: &Workspace, index: usize) -> El {
                     "Collapse host"
                 })
                 .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                    s.clear_focus_history_walk();
                     s.settings.hosts[index].collapsed = !s.settings.hosts[index].collapsed;
                     s.save();
                     tx.blur();
@@ -985,6 +986,7 @@ fn session_list(s: &Workspace) -> (El, f32) {
                         .preserve_focus_on_press(true)
                         .help(status)
                         .on_press_tx(move |s: &mut Workspace, tx: &mut Tx| {
+                            s.clear_focus_history_walk();
                             s.send(index, HostCommand::Reconnect);
                             tx.blur();
                         }),

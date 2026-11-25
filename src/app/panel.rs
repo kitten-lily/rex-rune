@@ -15,6 +15,7 @@ use serde_json::Value;
 pub enum Intent {
     Select(usize, String),
     Tab(String),
+    Port(super::ports::PortKey),
     /// A named client action shared with the shortcut dispatcher.
     ClientAction(&'static str, Value),
     Switcher,
@@ -97,6 +98,8 @@ pub enum Intent {
     Choose(usize),
     /// A Commands row that is not a named action.
     Command(super::commands::Run),
+    /// Open a waiting `rex.ui` prompt modal (Commands row; never a registered remote action).
+    OpenPrompt(super::prompts::PromptKey),
     /// A row of Settings → Shortcuts' Configuration menu.
     Shortcuts(super::recorder::Menu),
 }
@@ -131,6 +134,7 @@ impl Intent {
                 PaneAction::Zoom => ("pane.zoom", Value::Null),
                 PaneAction::Reconnect => ("pane.reconnect", Value::Null),
                 PaneAction::Download => (super::actions::DOWNLOAD, Value::Null),
+                PaneAction::Ports => (super::ports::ACTION, Value::Null),
                 PaneAction::InsertPath => (super::directory::ACTION, Value::Null),
                 PaneAction::GoToDirectory => (super::directory::GO, Value::Null),
                 PaneAction::Close => ("pane.close", Value::Null),
@@ -155,7 +159,7 @@ impl Intent {
             Intent::InsertPath(_)
                 | Intent::Switcher
                 | Intent::ClientAction(
-                    "client.settings" | "session.switch" | super::about::ABOUT | super::recorder::EDIT,
+                    "client.settings" | "session.switch" | super::ports::ACTION | super::about::ABOUT | super::recorder::EDIT,
                     _
                 )
                 | Intent::Shortcuts(super::recorder::Menu::ResetAll)
@@ -178,6 +182,7 @@ impl Intent {
                 | Intent::StartSsh(_)
                 | Intent::InstallSsh(_)
                 | Intent::HostKey(_)
+                | Intent::OpenPrompt(_)
                 | Intent::RenameSession
                 | Intent::RenameWindow(_)
                 | Intent::CloseWindow(_)
@@ -204,7 +209,7 @@ impl Intent {
                 | Intent::RemoveHost(_)
                 | Intent::Pane(
                     _,
-                    PaneAction::Rename | PaneAction::Close | PaneAction::Download | PaneAction::InsertPath | PaneAction::GoToDirectory
+                    PaneAction::Rename | PaneAction::Close | PaneAction::Download | PaneAction::Ports | PaneAction::InsertPath | PaneAction::GoToDirectory
                 )
                 | Intent::Session(_, SessionAction::Rename | SessionAction::Close)
         )
@@ -311,6 +316,7 @@ pub enum PaneAction {
     InsertPath,
     /// The same browser over folders only; it types `cd <folder>` without Enter.
     GoToDirectory,
+    Ports,
     /// The pane's selected text to the clipboard.
     Copy,
     /// The clipboard into the pane, as Ctrl Shift V does for the focused one.
@@ -416,6 +422,7 @@ impl SettingsSection {
 pub enum PanelKind {
     /// `true`: the session switcher; `false`: Commands.
     Picker(bool),
+    Ports(super::ports::Target),
     Hosts(String),
     SwitchHost,
     MovePane,
@@ -473,6 +480,7 @@ pub enum PanelKind {
     },
     /// Download a file from the captured pane's machine; see `downloads.rs`.
     Download(super::downloads::Dialog),
+    Prompt(super::prompts::PromptKey),
     Directory(super::directory::Browser),
     /// The Downloads popover: this launch's transfers.
     Downloads,
@@ -557,6 +565,7 @@ impl Panel {
             PanelKind::SwitchHost
                 | PanelKind::MovePane
                 | PanelKind::Picker(_)
+                | PanelKind::Ports(_)
                 | PanelKind::Hosts(_)
                 | PanelKind::Pane
                 | PanelKind::Layer
@@ -576,6 +585,7 @@ impl Panel {
 }
 
 pub struct Entry {
+    pub port: Option<super::ports::Presentation>,
     /// The row's own identity across a rebuild, where the list has one (`Command.id`): a
     /// host wake that reorders the list finds the same row by this, not by its position.
     pub id: Option<std::borrow::Cow<'static, str>>,
@@ -583,6 +593,8 @@ pub struct Entry {
     pub detail: String,
     pub action: Intent,
     pub group: String,
+    /// Optional identity when different groups can have the same displayed name.
+    pub group_key: Option<String>,
     pub current: bool,
     pub followup: bool,
     pub enabled: bool,
@@ -612,10 +624,12 @@ impl Entry {
         action: Intent,
     ) -> Self {
         Self {
+            port: None,
             id: None,
             label: label.into(),
             detail: detail.into(),
             group: group.into(),
+            group_key: None,
             followup: action.opens_followup(),
             action,
             current: false,
@@ -868,6 +882,9 @@ impl Workspace {
         }
         let query = self.query();
         let lower = query.to_lowercase();
+        if let PanelKind::Ports(target) = &panel.kind {
+            return self.ports_entries(target, &lower);
+        }
         if let PanelKind::Fonts(pick) = panel.kind {
             return self.font_entries(pick);
         }
@@ -1061,7 +1078,7 @@ impl Workspace {
         {
             let zoomed = model
                 .window()
-                .is_some_and(|w| w.zoomed_block_id.as_ref() == Some(&target.block));
+                .is_some_and(|w| rex_rune::layout::is_zoomed(w, &target.block));
             let mut rows = vec![
                 ("Copy", 0, PaneAction::Copy),
                 ("Paste", 0, PaneAction::Paste),
@@ -1083,6 +1100,7 @@ impl Workspace {
                 ("Rename pane…", 2, PaneAction::Rename),
                 ("Copy pane ID", 2, PaneAction::CopyId),
                 ("Download file…", 2, PaneAction::Download),
+                ("Listening ports…", 2, PaneAction::Ports),
                 ("Clear terminal", 3, PaneAction::Clear),
                 ("Reset terminal", 3, PaneAction::Reset),
                 ("Reconnect terminal", 3, PaneAction::Reconnect),

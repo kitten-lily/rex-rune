@@ -21,6 +21,7 @@ pub mod layout;
 pub mod legacy;
 pub mod links;
 pub mod platform;
+pub mod ports;
 pub mod settings;
 pub mod ssh;
 pub mod tailnet;

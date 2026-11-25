@@ -475,6 +475,7 @@ impl Workspace {
                                 remote_control: false,
                                 keep_tailscale: false,
                                 tailscale_name: None,
+                                prompts: true,
                                 collapsed: false,
                                 hidden_offline: false,
                                 shell: None,
@@ -653,6 +654,9 @@ impl Workspace {
         }
         self.stop_install_for_host(index);
         self.navigation.cancel();
+        if self.ports_target().is_some() {
+            self.close_panel(tx);
+        }
         let state = self.hosts.remove(index);
         self.forget_host(state);
         let host = self.settings.hosts.remove(index);
@@ -854,6 +858,7 @@ impl Workspace {
                         remote_control: false,
                         keep_tailscale: false,
                         tailscale_name: None,
+                        prompts: true,
                         collapsed: false,
                         hidden_offline: false,
                         shell: None,
